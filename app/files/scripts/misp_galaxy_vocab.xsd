@@ -1,0 +1,57 @@
+<xs:schema xmlns:xs="http://www.w3.org/2001/XMLSchema" xmlns:MISPGalaxyVocabs="https://www.misp-project.org/galaxy.html" elementFormDefault="qualified" version="1.1.1" xml:lang="English">
+    <xs:annotation>
+		<xs:documentation>This schema was developped by CIRCL, the Computer Incident Response Center of Luxembourg, which is maintaining MISP, a Threat intelligence sharing platform. For more information, including how to get involved in the MISP project and how to contribute to it, please visit https://www.misp-project.org/ and https://github.com/MISP/MISP.</xs:documentation>
+        <xs:appinfo>
+            <schema>MISP Galaxy Vocabularies</schema>
+            <version>1.0</version>
+            <date>09/09/2019</date>
+            <short_description>The following specifies the MISP Galaxy names that can be used by MISP to define custom Malware, Tool, Course of Action or Threat Actor types. For more information about MISP galaxies, please visit https://www.misp-project.org/galaxy.html or https://github.com/MISP/misp-galaxy.</short_description>
+            <terms_of_use></terms_of_use>
+        </xs:appinfo>
+	</xs:annotation>
+    <xs:simpleType name="MISPGalaxyNameEnum-1.0">
+        <xs:annotation>
+            <xs:documentation>The default MISP Galaxy names that are used in MISP.</xs:documentation>
+        </xs:annotation>
+        <xs:restriction base="xs:string">
+            <xs:enumeration value="Enterprise Attack - Course of Action"/>
+            <xs:enumeration value="Tool"/>
+            <xs:enumeration value="Preventive Measure"/>
+            <xs:enumeration value="Course of Action"/>
+            <xs:enumeration value="attck4fraud"/>
+            <xs:enumeration value="Malware"/>
+            <xs:enumeration value="Mobile Attack - Attack Pattern"/>
+            <xs:enumeration value="Exploit-Kit"/>
+            <xs:enumeration value="Sector"/>
+            <xs:enumeration value="Mobile Attack - Intrusion Set"/>
+            <xs:enumeration value="Banker"/>
+            <xs:enumeration value="Backdoor"/>
+            <xs:enumeration value="o365-exchange-techniques"/>
+            <xs:enumeration value="Microsoft Activity Group actor"/>
+            <xs:enumeration value="Intrusion Set"/>
+            <xs:enumeration value="Mobile Attack - Malware"/>
+            <xs:enumeration value="Cert EU GovSector"/>
+            <xs:enumeration value="TDS"/>
+            <xs:enumeration value="Enterprise Attack - Intrusion Set"/>
+            <xs:enumeration value="Mobile Attack - Course of Action"/>
+            <xs:enumeration value="Mobile Attack - Tool"/>
+            <xs:enumeration value="Target Information"/>
+            <xs:enumeration value="Attack Pattern"/>
+            <xs:enumeration value="Enterprise Attack - Malware"/>
+            <xs:enumeration value="Enterprise Attack - Attack Pattern"/>
+            <xs:enumeration value="RAT"/>
+            <xs:enumeration value="Pre Attack - Intrusion Set"/>
+            <xs:enumeration value="Branded Vulnerability"/>
+            <xs:enumeration value="Android"/>
+            <xs:enumeration value="Pre Attack - Attack Pattern"/>
+            <xs:enumeration value="Malpedia"/>
+            <xs:enumeration value="Stealer"/>
+            <xs:enumeration value="Botnet"/>
+            <xs:enumeration value="Election guidelines"/>
+            <xs:enumeration value="Enterprise Attack - Tool"/>
+            <xs:enumeration value="Threat Actor"/>
+            <xs:enumeration value="Ransomware"/>
+            <xs:enumeration value="Mitre Tool"/>
+        </xs:restriction>
+    </xs:simpleType>
+</xs:schema>
