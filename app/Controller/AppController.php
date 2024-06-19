@@ -121,7 +121,9 @@ class AppController extends Controller
         }
         $controller = $this->request->params['controller'];
         $action = $this->request->params['action'];
-
+        if ($action === 'heartbeat') {
+            return;
+        }
         $this->_setupBaseurl();
         $this->Auth->loginRedirect = $this->baseurl . '/users/routeafterlogin';
 
@@ -643,7 +645,12 @@ class AppController extends Controller
         }
 
         // Check if user must create TOTP secret, force them to be on that page as long as needed.
-        if (empty($user['totp']) && Configure::read('Security.otp_required') && !$this->_isControllerAction(['users' => ['terms', 'change_pw', 'logout', 'login', 'totp_new']])) {  // TOTP is mandatory for users, prevent login until the user has configured their TOTP
+        if (
+            empty($user['totp']) &&
+            Configure::read('Security.otp_required') &&
+            !$this->_isControllerAction(['users' => ['terms', 'change_pw', 'logout', 'login', 'totp_new']]) &&
+            empty($user['Role']['perm_skip_otp'])
+        ) {  // TOTP is mandatory for users, prevent login until the user has configured their TOTP
             $this->redirect(array('controller' => 'users', 'action' => 'totp_new', 'admin' => false));
             return false;
         }
