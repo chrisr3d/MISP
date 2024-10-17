@@ -43,7 +43,7 @@ class AnalystData extends AppModel
         'distribution',
         'sharing_group_id',
     ];
-    protected $EDITABLE_FIELDS = [];
+    public const EDITABLE_FIELDS = [];
 
     /** @var object|null */
     protected $Note;
@@ -80,6 +80,9 @@ class AnalystData extends AppModel
             'belongsTo' => [
                 'Org' => [
                     'className' => 'Organisation',
+                    'fields' => [
+                        'id', 'name', 'uuid', 'type', 'description', 'sector', 'nationality', 'local'
+                    ],
                     'foreignKey' => false,
                     'conditions' => [
                         sprintf('%s.org_uuid = Org.uuid', $this->alias)
@@ -87,6 +90,9 @@ class AnalystData extends AppModel
                 ],
                 'Orgc' => [
                     'className' => 'Organisation',
+                    'fields' => [
+                        'id', 'name', 'uuid','type', 'sector', 'nationality', 'local'
+                    ],
                     'foreignKey' => false,
                     'conditions' => [
                         sprintf('%s.orgc_uuid = Orgc.uuid', $this->alias)
@@ -94,6 +100,9 @@ class AnalystData extends AppModel
                 ],
                 'SharingGroup' => [
                     'className' => 'SharingGroup',
+                    'fields' => [
+                        'id', 'name', 'uuid', 'releasability', 'description', 'org_id', 'active', 'roaming', 'local'
+                    ],
                     'foreignKey' => false,
                     'conditions' => [
                         sprintf('%s.sharing_group_id = SharingGroup.id', $this->alias)
@@ -110,7 +119,6 @@ class AnalystData extends AppModel
         parent::afterFind($results, $primary);
 
         $this->setUser();
-
         foreach ($results as $i => $v) {
             $results[$i][$this->alias]['note_type'] = $this->current_type_id;
             $results[$i][$this->alias]['note_type_name'] = $this->current_type;
@@ -119,7 +127,6 @@ class AnalystData extends AppModel
             $results[$i] = $this->rearrangeSharingGroup($results[$i], $this->current_user);
 
             $results[$i][$this->alias]['_canEdit'] = $this->canEditAnalystData($this->current_user, $v, $this->alias);
-
             if (!empty($this->fetchRecursive) && !empty($results[$i][$this->alias]['uuid'])) {
                 $this->Note = ClassRegistry::init('Note');
                 $this->Opinion = ClassRegistry::init('Opinion');
@@ -148,6 +155,17 @@ class AnalystData extends AppModel
                 $this->data[$this->current_type]['authors'] = $this->current_user['email'];
             }
         }
+        if (isset($this->data[$this->current_type]['distribution'])) {
+            if (
+                $this->data[$this->current_type]['distribution'] != 4 &&
+                (
+                    isset($this->data[$this->current_type]['sharing_group_id']) &&
+                    $this->data[$this->current_type]['sharing_group_id'] != 0
+                )
+            ) {
+                $this->data[$this->current_type]['sharing_group_id'] = 0;
+            }
+        }
         return true;
     }
 
@@ -162,12 +180,21 @@ class AnalystData extends AppModel
         }
         $this->data[$this->current_type]['modified'] = (new DateTime($this->data[$this->current_type]['modified'], new DateTimeZone('UTC')))->format('Y-m-d H:i:s');
         $this->data[$this->current_type]['created'] = (new DateTime($this->data[$this->current_type]['created'], new DateTimeZone('UTC')))->format('Y-m-d H:i:s');
+
+        if (empty($this->data[$this->current_type]['id'])) {
+            if (!isset($this->data[$this->current_type]['distribution'])) {
+                $this->data[$this->current_type]['distribution'] = Configure::read('MISP.default_event_distribution'); // use default event distribution
+            }
+            if ($this->data[$this->current_type]['distribution'] != 4) {
+                $this->data[$this->current_type]['sharing_group_id'] = null;
+            }
+        }
         return true;
     }
 
     public function getEditableFields(): array
     {
-        return array_merge(self::BASE_EDITABLE_FIELDS, $this->EDITABLE_FIELDS);
+        return array_merge(static::BASE_EDITABLE_FIELDS, static::EDITABLE_FIELDS);
     }
 
     /**
@@ -256,7 +283,15 @@ class AnalystData extends AppModel
                 if (!isset($analystData['SharingGroup'])) {
                     $this->SharingGroup = ClassRegistry::init('SharingGroup');
                     $sg = $this->SharingGroup->fetchSG($analystData[$this->alias]['sharing_group_id'], $user, true);
-                    $analystData[$this->alias]['SharingGroup'] = $sg['SharingGroup'];
+                    $sgData = array_intersect_key(
+                        $sg['SharingGroup'], array_flip(
+                            [
+                                'id', 'name', 'uuid', 'releasability', 'description', 'org_id',
+                                'active', 'roaming', 'local'
+                            ]
+                        )
+                    );
+                    $analystData[$this->alias]['SharingGroup'] = $sgData;
                 } else {
                     $analystData[$this->alias]['SharingGroup'] = $analystData['SharingGroup'];
                 }
@@ -351,6 +386,8 @@ class AnalystData extends AppModel
             return $analystData;
         }
         $this->fetchedUUIDFromRecursion[$analystData['uuid']] = true;
+        $this->Note = ClassRegistry::init('Note');
+        $this->Opinion = ClassRegistry::init('Opinion');
 
         $paramsNote = [
             'recursive' => -1,
@@ -415,7 +452,7 @@ class AnalystData extends AppModel
         if (!empty($hasMoreNotes)) {
             return true;
         }
-        $hasMoreOpinions = $this->Note->find('first', [
+        $hasMoreOpinions = $this->Opinion->find('first', [
             'recursive' => -1,
             'conditions' => [
                 'AND' => [
@@ -488,6 +525,10 @@ class AnalystData extends AppModel
             $analystData[$type]['org_uuid'] = $user['Organisation']['uuid'];
         }
 
+        if (!isset($analystData[$type]['uuid'])) {
+            $analystData[$type]['uuid'] = CakeText::uuid();
+        }
+
         $this->AnalystDataBlocklist = ClassRegistry::init('AnalystDataBlocklist');
         if ($this->AnalystDataBlocklist->checkIfBlocked($analystData[$type]['uuid'])) {
             $results['errors'][] = __('Blocked by blocklist');
@@ -514,8 +555,8 @@ class AnalystData extends AppModel
 
         if (!Configure::check('MISP.enableOrgBlocklisting') || Configure::read('MISP.enableOrgBlocklisting') !== false) {
             $analystModel->OrgBlocklist = ClassRegistry::init('OrgBlocklist');
-            $orgcUUID = $analystData[$type]['Orgc']['uuid'];
-            if ($analystData[$type]['orgc_uuid'] != 0 && $analystModel->OrgBlocklist->hasAny(array('OrgBlocklist.org_uuid' => $orgcUUID))) {
+            $orgcUUID = $analystData[$type]['orgc_uuid'];
+            if ($orgcUUID != 0 && $analystModel->OrgBlocklist->hasAny(array('OrgBlocklist.org_uuid' => $orgcUUID))) {
                 $results['errors'][] = __('Organisation blocklisted (%s)', $orgcUUID);
                 $results['ignored']++;
                 return $results;
@@ -523,12 +564,6 @@ class AnalystData extends AppModel
         }
 
         $analystData = $analystModel->captureOrganisationAndSG($analystData, $type, $user);
-        if (!isset($analystData[$type]['distribution'])) {
-            $analystData[$type]['distribution'] = Configure::read('MISP.default_event_distribution'); // use default event distribution
-        }
-        if ($analystData[$type]['distribution'] != 4) {
-            $analystData[$type]['sharing_group_id'] = null;
-        }
 
         // Start saving from the leaf since to make sure child elements get saved even if the parent should not be saved (or updated due to locked or timestamp)
         foreach (self::ANALYST_DATA_TYPES as $childType) {
@@ -613,9 +648,8 @@ class AnalystData extends AppModel
             return [];
         }
         $this->Server = ClassRegistry::init('Server');
-        $this->AnalystData = ClassRegistry::init('AnalystData');
 
-        $this->log("Starting Analyst Data sync with server #{$server['Server']['id']}", LOG_INFO);
+        $serverSync->debug("Starting Analyst Data sync");
 
         $analystData = $this->collectDataForPush($serverSync->server());
         $keyedAnalystData = [];
@@ -681,15 +715,60 @@ class AnalystData extends AppModel
         ];
         $dataForPush = $this->getAllAnalystData('all', $options);
         $this->Event = ClassRegistry::init('Event');
+        $SGModel = ClassRegistry::init('SharingGroup');
+        $sgStore = [];
         foreach ($dataForPush as $type => $entries) {
             foreach ($entries as $i => $analystData) {
-                if (!$this->Event->checkDistributionForPush($analystData, $server, $type)) {
+                if (isset($analystData[$type]['SharingGroup'])) {
+                    $sg_id = $analystData[$type]['SharingGroup']['id'];
+                    if (!isset($sgStore[$sg_id])) {
+                        $sg = $SGModel->find('first', [
+                            'contain' => [
+                                'SharingGroupServer' => [
+                                    'Server' => [
+                                        'fields' => [
+                                            'Server.id',
+                                            'Server.url',
+                                            'Server.remote_org_id'
+                                        ]
+                                    ]
+                                ],
+                                'SharingGroupOrg' => [
+                                    'Organisation' => [
+                                        'fields' => [
+                                            'Organisation.id',
+                                            'Organisation.uuid'
+                                        ]
+                                    ]
+                                ],
+                                'Organisation' => [
+                                    'fields' => [
+                                        'Organisation.id',
+                                        'Organisation.uuid'
+                                    ]
+                                ]
+                            ],
+                            'conditions' => ['SharingGroup.id' => $sg_id]
+                        ]);
+                        $temp = $sg['SharingGroup'];
+                        $captureSGDataFields = ['Organisation', 'SharingGroupOrg', 'SharingGroupServer'];
+                        foreach ($captureSGDataFields as $field) {
+                            $temp[$field] = $sg[$field];
+                        }
+                        $sgStore[$sg_id] = $temp;
+                    }
+                    if (isset($sgStore[$analystData[$type]['SharingGroup']['id']])) {
+                        $dataForPush[$type][$i][$type]['SharingGroup'] = $sgStore[$sg_id];
+                    }
+                }
+                if (!$this->Event->checkDistributionForPush($dataForPush[$type][$i], $server, $type)) {
                     unset($dataForPush[$type][$i]);
                 }
                 if (!$this->isPushableForServerSyncRules($analystData[$type], $server)) {
                     unset($dataForPush[$type][$i]);
                 }
             }
+            $dataForPush[$type] = array_values($dataForPush[$type]);
         }
         return $dataForPush;
     }
@@ -936,11 +1015,15 @@ class AnalystData extends AppModel
      *
      * @param array $user
      * @param ServerSyncTool $serverSync
+     * @return int Number of saved analysis
      */
     public function pull(array $user, ServerSyncTool $serverSync)
     {
+        if (!$serverSync->isSupported(ServerSyncTool::PERM_ANALYST_DATA)) {
+            return 0;
+        }
+
         $this->Server = ClassRegistry::init('Server');
-        $this->AnalystData = ClassRegistry::init('AnalystData');
         try {
             $filterRules = $this->buildPullFilterRules($serverSync->server());
             $remoteData = $serverSync->fetchIndexMinimal($filterRules)->json();
@@ -954,7 +1037,9 @@ class AnalystData extends AppModel
             return 0;
         }
         foreach (self::ANALYST_DATA_TYPES as $type) {
-            $allRemoteUUIDs = array_merge($allRemoteUUIDs, array_keys($remoteData[$type]));
+            if (isset($remoteData[$type])) {
+                $allRemoteUUIDs = array_merge($allRemoteUUIDs, array_keys($remoteData[$type]));
+            }
         }
 
         $localAnalystData = $this->getAllAnalystData('list', [
@@ -978,14 +1063,11 @@ class AnalystData extends AppModel
             return 0;
         }
 
-        if ($serverSync->isSupported(ServerSyncTool::PERM_ANALYST_DATA)) {
-            return $this->pullInChunks($user, $remoteUUIDsToFetch, $serverSync);
-        }
+        return $this->pullInChunks($user, $remoteUUIDsToFetch, $serverSync);
     }
 
-    public function pullInChunks(array $user, array $analystDataUuids, ServerSyncTool $serverSync)
+    private function pullInChunks(array $user, array $analystDataUuids, ServerSyncTool $serverSync)
     {
-        $uuids = array_keys($analystDataUuids);
         $saved = 0;
         $serverOrgUUID = $this->Org->find('first', [
             'recursive' => -1,

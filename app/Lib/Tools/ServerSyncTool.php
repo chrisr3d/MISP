@@ -217,7 +217,7 @@ class ServerSyncTool
     }
 
     /**
-     * @param array $rules
+     * @param array $candidates
      * @return HttpSocketResponseExtended
      * @throws HttpSocketHttpException
      * @throws HttpSocketJsonException
@@ -225,7 +225,7 @@ class ServerSyncTool
     public function filterAnalystDataForPush(array $candidates)
     {
         if (!$this->isSupported(self::PERM_ANALYST_DATA)) {
-            return [];
+            throw new RuntimeException("Remote server do not support analyst data");
         }
 
         return $this->post('/analyst_data/filterAnalystDataForPush', $candidates);
@@ -240,20 +240,23 @@ class ServerSyncTool
     public function fetchIndexMinimal(array $rules)
     {
         if (!$this->isSupported(self::PERM_ANALYST_DATA)) {
-            return [];
+            throw new RuntimeException("Remote server do not support analyst data");
         }
 
         return $this->post('/analyst_data/indexMinimal', $rules);
     }
 
     /**
+     * @param string $type
+     * @param array $uuids
+     * @return HttpSocketResponseExtended
      * @throws HttpSocketJsonException
      * @throws HttpSocketHttpException
      */
     public function fetchAnalystData($type, array $uuids)
     {
         if (!$this->isSupported(self::PERM_ANALYST_DATA)) {
-            return [];
+            throw new RuntimeException("Remote server do not support analyst data");
         }
 
         $params = [
@@ -264,12 +267,10 @@ class ServerSyncTool
         $url .= $this->createParams($params);
         $url .= '.json';
         return $this->get($url);
-
-        // $response = $this->post('/analyst_data/restSearch' , $params);
-        // return $response->json();
     }
 
-        /**
+    /**
+     * @param string $type
      * @param array $analystData
      * @return HttpSocketResponseExtended
      * @throws HttpSocketHttpException
@@ -296,19 +297,26 @@ class ServerSyncTool
 
     /**
      * @param array $eventUuids
+     * @param array $blockedOrgs Blocked organisation UUIDs
      * @return array
      * @throws HttpSocketHttpException
      * @throws HttpSocketJsonException
      * @throws JsonException
      */
-    public function fetchSightingsForEvents(array $eventUuids)
+    public function fetchSightingsForEvents(array $eventUuids, array $blockedOrgs = [])
     {
-        return $this->post('/sightings/restSearch/event', [
+        $postParams = [
             'returnFormat' => 'json',
             'last' => 0, // fetch all
             'includeUuid' => true,
             'uuid' => $eventUuids,
-        ])->json()['response'];
+        ];
+        if (!empty($blockedOrgs)) {
+            $postParams['org_id'] = array_map(function ($uuid) {
+                return "!$uuid";
+            }, $blockedOrgs);
+        }
+        return $this->post('/sightings/restSearch/event', $postParams)->json()['response'];
     }
 
     /**
@@ -499,6 +507,16 @@ class ServerSyncTool
     }
 
     /**
+     * @param string $message
+     * @return void
+     */
+    public function debug($message)
+    {
+        $memoryUsage = round(memory_get_usage() / 1024 / 1024, 2);
+        CakeLog::debug("[Server sync #{$this->serverId()}]: $message. Memory: $memoryUsage MB");
+    }
+
+    /**
      * @params string $url Relative URL
      * @return HttpSocketResponseExtended
      * @throws HttpSocketHttpException
@@ -548,6 +566,7 @@ class ServerSyncTool
 
         if ($etag) {
             // Remove compression marks that adds Apache for compressed content
+            // This can be removed in future as this is already checked by MISP itself since 2024-03
             $etagWithoutQuotes = trim($etag, '"');
             $dashPos = strrpos($etagWithoutQuotes, '-');
             if ($dashPos && in_array(substr($etagWithoutQuotes, $dashPos + 1), ['br', 'gzip'], true)) {

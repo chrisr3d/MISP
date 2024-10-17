@@ -1,5 +1,5 @@
 <?php
-App::uses('AppController', 'Controller', 'OTPHP\TOTP');
+App::uses('AppController', 'Controller');
 
 /**
  * @property User $User
@@ -29,7 +29,7 @@ class UsersController extends AppController
         parent::beforeFilter();
 
         // what pages are allowed for non-logged-in users
-        $allowedActions = array('login', 'logout', 'getGpgPublicKey', 'logout401', 'otp');
+        $allowedActions = array('login', 'logout', 'getGpgPublicKey', 'logout401', 'otp', 'heartbeat');
         if (!empty(Configure::read('Security.allow_password_forgotten'))) {
             $allowedActions[] = 'forgot';
             $allowedActions[] = 'password_reset';
@@ -92,6 +92,7 @@ class UsersController extends AppController
             unset($user['User']['authkey']);
         }
         $user['User']['password'] = '*****';
+        $user['User']['totp_is_set'] = !empty($user['User']['totp']);
         $user['User']['totp'] = '*****';
         $temp = [];
         $objectsToInclude = array('User', 'Role', 'UserSetting', 'Organisation');
@@ -476,7 +477,8 @@ class UsersController extends AppController
                     'force_logout',
                     'date_created',
                     'date_modified',
-                    'last_pw_change'
+                    'last_pw_change',
+                    'totp'
                 ),
                 'contain' => array(
                     'Organisation' => array('id', 'name'),
@@ -489,6 +491,10 @@ class UsersController extends AppController
                         $users[$key]['User']['authkey'] = __('Redacted');
                     }
                 }
+            }
+            foreach ($users as $key => $user) {
+                $users[$key]['User']['totp_is_set'] = !empty($user['User']['totp']);
+                unset($users[$key]['User']['totp']);
             }
             $users = $this->User->attachIsUserMonitored($users);
             return $this->RestResponse->viewData($users, $this->response->type());
@@ -1214,11 +1220,13 @@ class UsersController extends AppController
                     $this->Auth->constructAuthenticate();
                 }
                 // user has TOTP token, check creds and redirect to TOTP validation
-                if (!empty($unauth_user['User']['totp']) && !$unauth_user['User']['disabled'] && class_exists('\OTPHP\TOTP')) {
-                    $user = $this->Auth->identify($this->request, $this->response);
-                    if ($user && !$user['disabled']) {
-                        $this->Session->write('otp_user', $user);
-                        return $this->redirect('otp');
+                if (!Configure::read('Security.otp_disabled')) {
+                    if (!empty($unauth_user['User']['totp']) && !$unauth_user['User']['disabled'] && class_exists('\OTPHP\TOTP')) {
+                        $user = $this->Auth->identify($this->request, $this->response);
+                        if ($user && !$user['disabled']) {
+                            $this->Session->write('otp_user', $user);
+                            return $this->redirect('otp');
+                        }
                     }
                 }
             }
@@ -1811,6 +1819,7 @@ class UsersController extends AppController
             $this->Flash->error(__("The required PHP libraries to support TOTP are not installed. Please contact your administrator to address this."));
             $this->redirect($this->referer());
         }
+
         // only allow the users themselves to generate a TOTP secret.
         // If TOTP is enforced they will be invited to generate it at first login
         $user = $this->User->find('first', array(
@@ -1880,8 +1889,9 @@ class UsersController extends AppController
         $this->set('secret', $secret);
     }
 
-    public function totp_delete($id) {
-        if ($this->request->is('post') || $this->request->is('delete')) {
+    public function totp_delete($id)
+    {
+        if ($this->request->is(['post', 'delete'])) {
             $user = $this->User->find('first', array(
                 'conditions' => $this->__adminFetchConditions($id),
                 'recursive' => -1,
@@ -1988,8 +1998,7 @@ class UsersController extends AppController
     // shows some statistics about the instance
     public function statistics($page = 'data')
     {
-        $user = $this->Auth->user();
-        @session_write_close(); // loading this page can take long time, so we can close session
+        $user = $this->_closeSession(true); // loading this page can take long time, so we can close session
 
         if (!$this->_isRest()) {
             $pages = [
@@ -2071,7 +2080,7 @@ class UsersController extends AppController
 
         $stats['attribute_count'] = $this->User->Event->Attribute->find('count', array('conditions' => array('Attribute.deleted' => 0), 'recursive' => -1));
         $stats['attribute_count_month'] = $this->User->Event->Attribute->find('count', array('conditions' => array('Attribute.timestamp >' => $this_month, 'Attribute.deleted' => 0), 'recursive' => -1));
-        $stats['attributes_per_event'] = round($stats['attribute_count'] / $stats['event_count']);
+        $stats['attributes_per_event'] = $stats['event_count'] != 0 ? round($stats['attribute_count'] / $stats['event_count']) : 0;
 
         $stats['correlation_count'] = $this->User->Event->Attribute->Correlation->find('count', array('recursive' => -1));
 
@@ -2082,7 +2091,7 @@ class UsersController extends AppController
         $stats['org_count'] = count($orgs);
         $stats['local_org_count'] = $local_orgs_count;
         $stats['contributing_org_count'] = $this->User->Event->find('count', array('recursive' => -1, 'group' => array('Event.orgc_id')));
-        $stats['average_user_per_org'] = round($stats['user_count'] / $stats['local_org_count'], 1);
+        $stats['average_user_per_org'] = $stats['local_org_count'] != 0 ?  round($stats['user_count'] / $stats['local_org_count'], 1) : 0;
 
         $this->loadModel('Thread');
         $stats['thread_count'] = $this->Thread->find('count', array('conditions' => array('Thread.post_count >' => 0), 'recursive' => -1));
@@ -2603,6 +2612,7 @@ class UsersController extends AppController
                 'org_name',
                 'org_uuid',
                 'message',
+                'pgp',
                 'custom_perms',
                 'perm_sync',
                 'perm_publish',
@@ -3186,10 +3196,6 @@ class UsersController extends AppController
 
     public function forgot()
     {
-        if (empty(Configure::read('Security.allow_password_forgotten'))) {
-            $this->Flash->error(__('This feature is disabled.'));
-            $this->redirect('/');
-        }
         if (!empty($this->Auth->user()) && !$this->_isRest()) {
             $this->Flash->info(__('You are already logged in, no need to ask for a password reset. Log out first.'));
             $this->redirect('/');
@@ -3215,10 +3221,6 @@ class UsersController extends AppController
 
     public function password_reset($token)
     {
-        if (empty(Configure::read('Security.allow_password_forgotten'))) {
-            $this->Flash->error(__('This feature is disabled.'));
-            $this->redirect('/');
-        }
         $this->loadModel('Server');
         $this->set('complexity', !empty(Configure::read('Security.password_policy_complexity')) ? Configure::read('Security.password_policy_complexity') : $this->Server->serverSettings['Security']['password_policy_complexity']['value']);
         $this->set('length', !empty(Configure::read('Security.password_policy_length')) ? Configure::read('Security.password_policy_length') : $this->Server->serverSettings['Security']['password_policy_length']['value']);
@@ -3235,9 +3237,15 @@ class UsersController extends AppController
                 $this->redirect('/');
             }
         }
-        if ($this->request->is('post') || $this->request->is('put')) {
+        if ($this->request->is(['post', 'put'])) {
             $abortPost = false;
             return $this->__pw_change(['User' => $user], 'password_reset', $abortPost, $token, true);
         }
+    }
+
+    public function heartbeat()
+    {
+        $payload = $this->User::HEARTBEAT_MESSAGES[rand(0, count($this->User::HEARTBEAT_MESSAGES)-1)];
+        return $this->RestResponse->viewData($payload, 'json');
     }
 }

@@ -43,7 +43,12 @@ def _get_stix_parser(from_misp, args):
         arguments['sharing_group_id'] = args.sharing_group_id
     if from_misp:
         return 'InternalSTIX2toMISPParser', arguments
-    arguments['cluster_distribution'] = args.cluster_distribution
+    arguments.update(
+        {
+            'cluster_distribution': args.cluster_distribution,
+            'organisation_uuid': args.org_uuid
+        }
+    )
     if args.cluster_distribution == 4 and args.cluster_sharing_group_id is not None:
         arguments['cluster_sharing_group_id'] = args.cluster_sharing_group_id
     return 'ExternalSTIX2toMISPParser', arguments
