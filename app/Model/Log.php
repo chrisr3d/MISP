@@ -144,6 +144,7 @@ class Log extends AppModel
         if (Configure::read('MISP.log_client_ip')) {
             $this->data['Log']['ip'] = $this->_remoteIp();
         }
+        $this->data['Log']['request_is_rest'] = Configure::read('CurrentRequestIsRest');
         $setEmpty = array('title' => '', 'model' => '', 'model_id' => 0, 'action' => '', 'user_id' => 0, 'change' => '', 'email' => '', 'org' => '', 'description' => '', 'ip' => '');
         foreach ($setEmpty as $field => $empty) {
             if (empty($this->data['Log'][$field])) {
@@ -248,7 +249,7 @@ class Log extends AppModel
         if (is_array($change)) {
             $output = [];
             foreach ($change as $field => $values) {
-                $isSecret = strpos($field, 'password') !== false || ($field === 'authkey' && Configure::read('Security.do_not_log_authkeys'));
+                $isSecret = str_contains($field, 'password') || ($field === 'authkey' && Configure::read('Security.do_not_log_authkeys'));
                 if ($isSecret) {
                     $oldValue = $newValue = "*****";
                 } else {
@@ -963,7 +964,7 @@ class Log extends AppModel
     private function __executeRecoveryAttribute($logEntry, $id)
     {
         if (empty($this->Attribute)) {
-            $this->Attribute = ClassRegistry::init('Attribute');
+            $this->Attribute = ClassRegistry::init('MispAttribute');
         }
         if (empty($this->GalaxyCluster)) {
             $this->GalaxyCluster = ClassRegistry::init('GalaxyCluster');
@@ -1064,7 +1065,7 @@ class Log extends AppModel
     private function __executeRecoveryShadowAttribute($logEntry, $id)
     {
         if (empty($this->Attribute)) {
-            $this->Attribute = ClassRegistry::init('Attribute');
+            $this->Attribute = ClassRegistry::init('MispAttribute');
         }
         if (empty($this->ShadowAttribute)) {
             $this->ShadowAttribute = ClassRegistry::init('ShadowAttribute');
@@ -1188,7 +1189,7 @@ class Log extends AppModel
     private function __executeRecoveryMispObject($logEntry)
     {
         if (empty($this->Attribute)) {
-            $this->Attribute = ClassRegistry::init('Attribute');
+            $this->Attribute = ClassRegistry::init('MispAttribute');
         }
         if (empty($this->MispObject)) {
             $this->MispObject = ClassRegistry::init('MispObject');

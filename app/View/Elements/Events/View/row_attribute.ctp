@@ -13,7 +13,7 @@
   }
 
   $isNew = $object['timestamp'] > $event['Event']['publish_timestamp'];
-  
+
   $editScope = $mayModify ? 'Attribute' : 'ShadowAttribute';
   if (!empty($child)) {
       if ($child === 'last' && empty($object['ShadowAttribute'])) {
@@ -39,7 +39,7 @@
 
   $objectId = (int) $object['id'];
 
-  $isNonCorrelatingType = in_array($object['type'], Attribute::NON_CORRELATING_TYPES, true);
+  $isNonCorrelatingType = in_array($object['type'], MispAttribute::NON_CORRELATING_TYPES, true);
   $correlationDisabled = $object['disable_correlation'] || $isNonCorrelatingType;
   $correlationButtonEnabled = $mayChangeCorrelation &&
       empty($event['Event']['disable_correlation']) &&
@@ -59,7 +59,7 @@
   }
 
   ?>
-  <tr id="Attribute_<?= $objectId ?>_tr" data-primary-id="<?= $objectId ?>" class="<?php echo $tr_class; ?>" tabindex="0">
+  <tr id="Attribute_<?= $objectId ?>_tr" data-primary-id="<?= $objectId ?>" class="<?php echo $tr_class; ?>" tabindex="0" data-uuid="<?= h($object['uuid']) ?>">
       <?php if (($mayModify || !empty($extended)) && empty($disable_multi_select)): ?>
         <td style="width:10px">
         <?php if ($mayModify):?>

@@ -20,7 +20,7 @@ class UsersController extends AppController
         ),
         'contain' => array(
             'Organisation' => array('id', 'uuid', 'name'),
-            'Role' => array('id', 'name', 'perm_auth', 'perm_site_admin')
+            'Role' => array('id', 'name', 'perm_auth', 'perm_site_admin', 'perm_admin')
         )
     );
 
@@ -92,7 +92,6 @@ class UsersController extends AppController
             unset($user['User']['authkey']);
         }
         $user['User']['password'] = '*****';
-        $user['User']['totp_is_set'] = !empty($user['User']['totp']);
         $user['User']['totp'] = '*****';
         $temp = [];
         $objectsToInclude = array('User', 'Role', 'UserSetting', 'Organisation');
@@ -434,9 +433,9 @@ class UsersController extends AppController
                     }
                 } elseif ("inactive" == $searchTerm) {
                     if ($v == "1") {
-                        $this->paginate['conditions']['AND'][] = array('User.last_login <' =>  time() - 60*60*24*30);  // older than a month 
-                        $this->paginate['conditions']['AND'][] = array('User.current_login <' =>  time() - 60*60*24*30);  // older than a month 
-                        $this->paginate['conditions']['AND'][] = array('User.last_api_access <' =>  time() - 60*60*24*30);  // older than a month 
+                        $this->paginate['conditions']['AND'][] = array('User.last_login <' =>  time() - 60*60*24*30);  // older than a month
+                        $this->paginate['conditions']['AND'][] = array('User.current_login <' =>  time() - 60*60*24*30);  // older than a month
+                        $this->paginate['conditions']['AND'][] = array('User.last_api_access <' =>  time() - 60*60*24*30);  // older than a month
                     }
                 }
                 $passedArgsArray[$searchTerm] = $v;
@@ -482,7 +481,7 @@ class UsersController extends AppController
                 ),
                 'contain' => array(
                     'Organisation' => array('id', 'name'),
-                    'Role' => array('id', 'name', 'perm_auth', 'perm_site_admin')
+                    'Role' => array('id', 'name', 'perm_auth', 'perm_site_admin', 'perm_admin')
                 )
             ));
             if (!$this->_isSiteAdmin()) {
@@ -493,8 +492,12 @@ class UsersController extends AppController
                 }
             }
             foreach ($users as $key => $user) {
-                $users[$key]['User']['totp_is_set'] = !empty($user['User']['totp']);
                 unset($users[$key]['User']['totp']);
+                if (!empty(Configure::read('Security.advanced_authkeys'))) { // There is no point to show that authkey since it doesn't work when this setting is active
+                    unset($users[$key]['User']['authkey']);
+                } else if (!$this->_isSiteAdmin() && !empty($user['Role']['perm_admin']) && $user['User']['id'] != $this->Auth->user('id')) {
+                    $users[$key]['User']['authkey'] = __('Redacted');
+                }
             }
             $users = $this->User->attachIsUserMonitored($users);
             return $this->RestResponse->viewData($users, $this->response->type());
@@ -511,6 +514,8 @@ class UsersController extends AppController
             $users = $this->paginate();
             foreach ($users as $key => $value) {
                 if ($value['Role']['perm_site_admin']) {
+                    $users[$key]['User']['authkey'] = __('Redacted');
+                } else if (!empty($value['Role']['perm_admin']) && $value['User']['id'] != $this->Auth->user('id')) {
                     $users[$key]['User']['authkey'] = __('Redacted');
                 }
             }
@@ -978,7 +983,7 @@ class UsersController extends AppController
                     if (
                         empty($chosenRole) ||
                         (
-                            ($chosenRole['Role']['id'] != $allowedRole) && 
+                            ($chosenRole['Role']['id'] != $allowedRole) &&
                             ($chosenRole['Role']['perm_site_admin'] == 1 ||
                             $chosenRole['Role']['perm_regexp_access'] == 1 ||
                             $chosenRole['Role']['perm_sync'] == 1) ||
@@ -1231,7 +1236,7 @@ class UsersController extends AppController
                 }
             }
         }
-        // if instance requires email OTP 
+        // if instance requires email OTP
         if ($this->request->is('post') && Configure::read('Security.email_otp_enabled')) {
             $user = $this->Auth->identify($this->request, $this->response);
             if ($user && !$user['disabled']) {
@@ -1833,7 +1838,7 @@ class UsersController extends AppController
             throw new NotFoundException(__('Invalid user'));
         }
         // do not allow this page to be accessed if the current already has a TOTP. Just redirect to the users details page with a Flash->error()
-        if ($user['User']['totp']) { 
+        if ($user['User']['totp']) {
             $this->Flash->error(__("Your account already has a TOTP. Please contact your organisational administrator to change or delete it."));
             $this->redirect($this->referer());
         }
@@ -1858,7 +1863,7 @@ class UsersController extends AppController
                 $this->User->id = $user['User']['id'];
                 $this->User->saveField('totp', $secret);
                 $this->User->saveField('hotp_counter', 0);
-                $this->_refreshAuth();    
+                $this->_refreshAuth();
                 $this->Flash->info(__('The OTP is correct and now active for your account.'));
                 $fieldsDescrStr = 'User (' . $user['User']['id'] . '): ' . $user['User']['email']. ' TOTP token created';
                 $this->User->extralog($this->Auth->user(), "update", $fieldsDescrStr, '');
@@ -1883,7 +1888,7 @@ class UsersController extends AppController
             $totp->setIssuer(Configure::read('MISP.org') . ' MISP');
         }
         $qrcode = $writer->writeString($totp->getProvisioningUri());
-        $qrcode = preg_replace('/^.+\n/', '', $qrcode); // ignore first <?xml version line 
+        $qrcode = preg_replace('/^.+\n/', '', $qrcode); // ignore first <?xml version line
 
         $this->set('qrcode', $qrcode);
         $this->set('secret', $secret);
@@ -2099,8 +2104,11 @@ class UsersController extends AppController
 
         $stats['post_count'] = $this->Thread->Post->find('count', array('recursive' => -1));
         $stats['post_count_month'] = $this->Thread->Post->find('count', array('conditions' => array('Post.date_created >' => date("Y-m-d H:i:s", $this_month)), 'recursive' => -1));
-
+        foreach ($stats as &$value) {
+            $value = strval($value);
+        }
         if ($this->_isRest()) {
+
             $data = array(
                 'stats' => $stats
             );
@@ -2942,8 +2950,8 @@ class UsersController extends AppController
             'User' => $user,
             'periodic_settings' => $this->User->fetchPeriodicSettingForUser($user['id']),
         ];
-        $this->loadModel('Attribute');
-        $distributionData = $this->Attribute->fetchDistributionData($user);
+        $this->loadModel('MispAttribute');
+        $distributionData = $this->MispAttribute->fetchDistributionData($user);
         unset($distributionData['levels'][5]);
         $this->set('sharingGroups', $distributionData['sgs']);
         $this->set('distributionLevels', $distributionData['levels']);
@@ -3082,7 +3090,12 @@ class UsersController extends AppController
     public function view_login_history($userId = null)
     {
         if ($userId && $this->_isAdmin()) {   // org and site admins
-            $userExists = $this->User->hasAny($this->__adminFetchConditions($userId));
+            $userExists = (bool) $this->User->find('first', [
+                'fields' => ['User' . '.' . 'id'],
+                'conditions' => $this->__adminFetchConditions($userId),
+                'recursive' => -1,
+                'contain' => ['Role'],
+            ]);
             if (!$userExists) {
                 throw new NotFoundException(__('Invalid user'));
             }
@@ -3114,7 +3127,7 @@ class UsersController extends AppController
             'login' => 'web:login',
             'login_fail' => 'web:failed'
         ];
-        
+
         $maxRows = 6;  // limit to a few rows, to prevent cluttering the interface.
                         // We didn't filter the data at SQL query too much, nor by age, as we want to show "enough" data, even if old
         $rows = 0;

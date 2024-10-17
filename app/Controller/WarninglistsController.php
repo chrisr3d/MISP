@@ -147,13 +147,21 @@ class WarninglistsController extends AppController
         $this->set('possibleTypes', $types);
         $this->set('possibleCategories', $this->Warninglist->categories());
 
-        $this->loadModel('Attribute');
-        $this->set('matchingAttributes', array_combine(array_keys($this->Attribute->typeDefinitions), array_keys($this->Attribute->typeDefinitions)));
+        $this->loadModel('MispAttribute');
+        $this->set('matchingAttributes', array_combine(array_keys($this->MispAttribute->typeDefinitions), array_keys($this->MispAttribute->typeDefinitions)));
 
         $this->CRUD->add([
             'beforeSave' => function (array $warninglist) {
+                if (empty($warninglist['Warninglist'])) {
+                    $warninglist = ['Warninglist' => $warninglist];
+                }
                 if (isset($warninglist['Warninglist']['entries'])) {
-                    $entries = $this->Warninglist->parseFreetext($warninglist['Warninglist']['entries']);
+                    if (is_array($warninglist['Warninglist']['entries'])) {
+                        $entries = $this->Warninglist->parseArray($warninglist['Warninglist']['entries']);
+                    } else {
+                        $entries = $this->Warninglist->parseFreetext($warninglist['Warninglist']['entries']);
+                        
+                    }
                     unset($warninglist['Warninglist']['entries']);
                     $warninglist['WarninglistEntry'] = $entries;
                 }
@@ -184,8 +192,8 @@ class WarninglistsController extends AppController
         $this->set('possibleTypes', $types);
         $this->set('possibleCategories', $this->Warninglist->categories());
 
-        $this->loadModel('Attribute');
-        $this->set('matchingAttributes', array_combine(array_keys($this->Attribute->typeDefinitions), array_keys($this->Attribute->typeDefinitions)));
+        $this->loadModel('MispAttribute');
+        $this->set('matchingAttributes', array_combine(array_keys($this->MispAttribute->typeDefinitions), array_keys($this->MispAttribute->typeDefinitions)));
 
         $this->CRUD->edit($id, [
             'conditions' => ['default' => 0], // it is not possible to edit default warninglist
@@ -193,8 +201,16 @@ class WarninglistsController extends AppController
             'fields' => ['name', 'description', 'type', 'category', 'entries', 'matching_attributes'],
             'redirect' => ['action' => 'view', $id],
             'beforeSave' => function (array $warninglist) {
+                if (empty($warninglist['Warninglist'])) {
+                    $warninglist = ['Warninglist' => $warninglist];
+                }
                 if (isset($warninglist['Warninglist']['entries'])) {
-                    $entries = $this->Warninglist->parseFreetext($warninglist['Warninglist']['entries']);
+                    if (is_array($warninglist['Warninglist']['entries'])) {
+                        $entries = $this->Warninglist->parseArray($warninglist['Warninglist']['entries']);
+                    } else {
+                        $entries = $this->Warninglist->parseFreetext($warninglist['Warninglist']['entries']);
+                        
+                    }
                     unset($warninglist['Warninglist']['entries']);
                     $warninglist['WarninglistEntry'] = $entries;
                 }

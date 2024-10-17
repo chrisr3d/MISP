@@ -60,33 +60,16 @@ class JsonTool
             return simdjson_is_valid($value);
         }
 
+        if (function_exists('json_validate')) {
+            return json_validate($value);
+        }
+
         try {
             self::decode($value);
             return true;
         } catch (Exception $e) {
             return false;
         }
-    }
-
-    /**
-     * @see https://www.php.net/manual/en/function.array-is-list.php
-     * @param array $array
-     * @return bool
-     */
-    public static function arrayIsList(array $array)
-    {
-        if (function_exists('array_is_list')) {
-            return array_is_list($array);
-        }
-
-        $i = -1;
-        foreach ($array as $k => $v) {
-            ++$i;
-            if ($k !== $i) {
-                return false;
-            }
-        }
-        return true;
     }
 
     /**
@@ -101,5 +84,22 @@ class JsonTool
         }
 
         return htmlspecialchars_decode(htmlspecialchars($string, ENT_SUBSTITUTE, 'UTF-8'));
+    }
+
+    /**
+     * Convert all integers in array or object to strings. Useful for php7.4 to php8 migration
+     * @param mixed $data
+     * @return mixed
+     */
+    public static function convertIntegersToStrings(&$data) {
+        if (is_array($data)) {
+            foreach ($data as $key => &$value) {
+                if (is_int($value)) {
+                    $value = strval($value);
+                } elseif (is_array($value) || is_object($value)) {
+                    JsonTool::convertIntegersToStrings($value);
+                }
+            }
+        }
     }
 }

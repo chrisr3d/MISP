@@ -8,7 +8,6 @@ The objective of MISP is to foster the sharing of structured information within 
 
   &nbsp;&nbsp;&#x25CF;&nbsp;&nbsp;<a href="#core-functions">Core functions</a>
   &nbsp;&nbsp;&#x25CF;&nbsp;&nbsp;<a href="#website--support">Website / Support</a>
-  &nbsp;&nbsp;&#x25CF;&nbsp;&nbsp;<a href="#php-and-misp">PHP and MISP</a><br>
   &nbsp;&nbsp;&#x25CF;&nbsp;&nbsp;<a href="#installation">Installation</a>
   &nbsp;&nbsp;&#x25CF;&nbsp;&nbsp;<a href="#documentation">Documentation</a>
   &nbsp;&nbsp;&#x25CF;&nbsp;&nbsp;<a href="#contributing">Contributing</a><br>
@@ -73,7 +72,7 @@ Core functions
 
 Exchanging info results in *faster detection* of targeted attacks and improves the detection ratio while reducing the false positives. We also avoid reversing similar malware as we know very fast that other teams or organizations have already analyzed a specific malware.
 
-![MISP 2.4 overview](https://raw.githubusercontent.com/MISP/MISP/2.4/INSTALL/screenshots/misp-panorama.png)
+![MISP 2.5 overview](https://raw.githubusercontent.com/MISP/MISP/2.5/INSTALL/screenshots/misp-panorama.png)
 
 A sample event encoded in MISP:
 
@@ -85,13 +84,6 @@ Website / Support
 Checkout the [website](https://www.misp-project.org) for more information about MISP software, standards, tools and communities.
 
 Information, news and updates are also regularly posted on the MISP project [Mastodon account](https://misp-community.org/@misp), [twitter account](https://twitter.com/MISPProject) and [news page](https://www.misp-project.org/news/).
-
-PHP and MISP
--------------
-MISP currently **requires PHP 7.4**, an end-of-life version of PHP. Because of this it is recommended that you only run MISP on distributions or PHP installs that you know will get security fixes backported, like Red Hat or Debian and derratives.
-
-MISP 3.x, currently in development will support PHP 8.x.
-
 
 Installation
 -------------
@@ -116,11 +108,14 @@ Feel free to fork the code, play with it, make some patches and send us the pull
 
 Feel free to contact us, create [issues](https://github.com/MISP/MISP/issues), if you have questions, remarks or bug reports.
 
-There is one main branch:
+There is one main branch (2.5) and one stable branch for 2.4:
 
-- 2.4 (current stable version): what we consider as stable with frequent updates as hot-fixes.
+- [2.5](https://github.com/MISP/MISP/tree/2.5) (current stable version): what we consider as stable with frequent updates as hot-fixes.
+- [2.4](https://github.com/MISP/MISP/tree/2.4) (legacy stable version): what we consider as stable with frequent updates as hot-fixes until April 2025.
 
-and features are developed in separated branches and then regularly merged into the 2.4 stable branch.
+Along with two development branches:
+- [develop](https://github.com/MISP/MISP/tree/develop) (main dev branch): The branch containing all ongoing work, to be merged into 2.5 at each release
+- [2.4-develop](https://github.com/MISP/MISP/tree/2.4-develop) (2.4 dev branch): The branch containing ongoing work to be merged into 2.4 on each legacy release along with frequent merges into develop. We consider this the main entry point for new development for 2.x until the 6 months grace period is up.
 
 
 License
@@ -128,16 +123,16 @@ License
 
 This software is licensed under [GNU Affero General Public License version 3](http://www.gnu.org/licenses/agpl-3.0.html)
 
-* Copyright (C) 2012-2023 Christophe Vandeplas
+* Copyright (C) 2012-2024 Christophe Vandeplas
 * Copyright (C) 2012 Belgian Defence
 * Copyright (C) 2012 NATO / NCIRC
-* Copyright (C) 2013-2023 Andras Iklody
-* Copyright (C) 2015-2023 CIRCL - Computer Incident Response Center Luxembourg
+* Copyright (C) 2013-2024 Andras Iklody
+* Copyright (C) 2015-2024 CIRCL - Computer Incident Response Center Luxembourg
 * Copyright (C) 2016 Andreas Ziegler
-* Copyright (C) 2018-2023 Sami Mokaddem
-* Copyright (C) 2018-2023 Christian Studer
-* Copyright (C) 2015-2023 Alexandre Dulaunoy
+* Copyright (C) 2018-2024 Sami Mokaddem
+* Copyright (C) 2018-2024 Christian Studer
+* Copyright (C) 2015-2024 Alexandre Dulaunoy
 * Copyright (C) 2018-2022 Steve Clement
-* Copyright (C) 2020-2023 Jakub Onderka
+* Copyright (C) 2020-2024 Jakub Onderka
 
 For more information, [the list of authors and contributors](AUTHORS) is available.

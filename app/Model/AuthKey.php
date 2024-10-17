@@ -235,7 +235,7 @@ class AuthKey extends AppModel
         if ($authkey['AuthKey']['read_only']) {
             // Disable all permissions, keep just `perm_auth` and `perm_audit` unchanged
             foreach ($user['Role'] as $key => &$value) {
-                if (substr($key, 0, 5) === 'perm_' && $key !== 'perm_auth' && $key !== 'perm_audit') {
+                if (str_starts_with($key, 'perm_') && $key !== 'perm_auth' && $key !== 'perm_audit') {
                     $value = 0;
                 }
             }
@@ -303,7 +303,7 @@ class AuthKey extends AppModel
     public function createnewkey($userId, $authKey = null, $comment = '', array $allowedIps = [])
     {
         if(empty($authKey)) {
-            $authKey = (new RandomTool())->random_str(true, 40);
+            $authKey = RandomTool::random_str(true, 40);
         }
         $newKey = [
             'authkey' => $authKey,

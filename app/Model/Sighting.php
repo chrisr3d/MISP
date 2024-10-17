@@ -3,9 +3,10 @@ App::uses('AppModel', 'Model');
 App::uses('TmpFileTool', 'Tools');
 App::uses('ServerSyncTool', 'Tools');
 App::uses('ProcessTool', 'Tools');
+App::uses('JsonTool', 'Tools');
 
 /**
- * @property Attribute $Attribute
+ * @property MispAttribute $Attribute
  * @property Event $Event
  * @property Organisation $Organisation
  */
@@ -44,7 +45,11 @@ class Sighting extends AppModel
     );
 
     public $belongsTo = array(
-            'Attribute',
+            'Attribute' => [
+                'className' => 'MispAttribute',
+                'foreignKey' => 'attribute_id',
+                'dependent' => false,
+            ],
             'Event',
             'Organisation' => array(
                     'className' => 'Organisation',
@@ -1129,9 +1134,9 @@ class Sighting extends AppModel
                     }
                 }
                 if ($negation) {
-                    $conditions['Sighting.org_id'][] = $temp;
-                } else {
                     $conditions['Sighting.org_id NOT IN'][] = $temp;
+                } else {
+                    $conditions['Sighting.org_id'][] = $temp;
                 }
                 if (empty($conditions['Sighting.org_id']) && empty($conditions['Sighting.org_id NOT IN'])) {
                     $conditions['Sighting.org_id'] = -1;
@@ -1199,7 +1204,7 @@ class Sighting extends AppModel
         $tmpfile = new TmpFileTool();
         $tmpfile->write($exportTool->header($exportToolParams));
         $separator = $exportTool->separator($exportToolParams);
-        
+
 
         if (empty(Configure::read('MISP.disable_sighting_loading'))) {
             // fetch sightings matching the query without ACL checks
@@ -1209,7 +1214,7 @@ class Sighting extends AppModel
                 foreach ($conditions['Sighting.event_id'] as $e_id) {
                     $conditions_copy['Sighting.event_id'] = $e_id;
                     $tempIds = $this->find('column', [
-                        'conditions' => $conditions,
+                        'conditions' => $conditions_copy,
                         'fields' => ['Sighting.id'],
                         'contain' => $contain
                     ]);
@@ -1224,10 +1229,11 @@ class Sighting extends AppModel
                     'contain' => $contain
                 ]);
             }
-            
+
             foreach (array_chunk($sightingIds, 10000) as $chunk) {
                 // fetch sightings with ACL checks and sighting policies
                 $sightings = $this->getSightings($user, $chunk, $includeEvent, $includeAttribute, $includeUuid);
+                JsonTool::convertIntegersToStrings($sightings);
                 foreach ($sightings as $sighting) {
                     $tmpfile->writeWithSeparator($exportTool->handler($sighting, $exportToolParams), $separator);
                 }

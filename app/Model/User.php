@@ -24,6 +24,10 @@ class User extends AppModel
 
     public $displayField = 'email';
 
+    public $virtualFields = array(
+        'totp_is_set' => 'User.totp IS NOT NULL',
+    );
+
     public $validate = array(
         'role_id' => array(
             'numeric' => array(
@@ -887,7 +891,7 @@ class User extends AppModel
             $result = $sendEmail->sendToUser($user, $subject, $body, $bodyNoEnc,$replyToUser ?: []);
 
         } catch (SendEmailException $e) {
-            $this->logException("Exception during sending e-mail", $e);
+            $this->logException("Exception during sending e-mail with subject '$subject' to {$user['User']['email']}", $e);
             $log->create();
             $log->saveOrFailSilently(array(
                 'org' => 'SYSTEM',
@@ -2152,7 +2156,7 @@ class User extends AppModel
         if (empty($user)) {
             return false;
         }
-        $token = RandomTool::random_str(true, 40, '0123456789abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ');
+        $token = RandomTool::random_str(true, 40);
         RedisTool::init()->set('misp:forgot:' . $token, $user['User']['id'], ['nx', 'ex' => 600]);
         $baseurl = Configure::check('MISP.external_baseurl') ? Configure::read('MISP.external_baseurl') : Configure::read('MISP.baseurl');
         $body = __(

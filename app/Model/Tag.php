@@ -685,7 +685,7 @@ class Tag extends AppModel
         $this->EventTag = Classregistry::init('EventTag');
         $this->AttributeTag = Classregistry::init('AttributeTag');
         $this->Event = Classregistry::init('Event');
-        $this->Attribute = Classregistry::init('Attribute');
+        $this->Attribute = ClassRegistry::init('MispAttribute');
         $full_print_buffer .= "<h2>Conversion</h2>";
         foreach ($mappings as $old_tag_id => $new_tag_name) {
             $print_buffer = "";
@@ -821,7 +821,7 @@ class Tag extends AppModel
                 continue;
             }
             $dataTag['Tag']['local'] = empty($dataTag['local']) ? 0 : 1;
-            if (substr($dataTag['Tag']['name'], 0, strlen('misp-galaxy:')) === 'misp-galaxy:') {
+            if (str_starts_with($dataTag['Tag']['name'], 'misp-galaxy:')) {
                 $possibleGalaxyClusterTag[] = $dataTag['Tag']['name'];
             }
         }

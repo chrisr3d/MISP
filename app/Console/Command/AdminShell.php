@@ -11,7 +11,7 @@ App::uses('JsonTool', 'Tools');
  * @property AdminSetting $AdminSetting
  * @property Taxonomy $Taxonomy
  * @property Warninglist $Warninglist
- * @property Attribute $Attribute
+ * @property MispAttribute $Attribute
  * @property Job $Job
  * @property Correlation $Correlation
  * @property OverCorrelatingValue $OverCorrelatingValue
@@ -19,7 +19,7 @@ App::uses('JsonTool', 'Tools');
 class AdminShell extends AppShell
 {
     public $uses = [
-        'Event', 'Post', 'Attribute', 'Job', 'User', 'Task', 'Allowedlist', 'Server', 'Organisation', 
+        'Event', 'Post', 'MispAttribute', 'Job', 'User', 'Task', 'Allowedlist', 'Server', 'Organisation',
         'AdminSetting', 'Galaxy', 'Taxonomy', 'Warninglist', 'Noticelist', 'ObjectTemplate', 'Bruteforce',
         'Role', 'Feed', 'SharingGroupBlueprint', 'Correlation', 'OverCorrelatingValue'
     ];
@@ -29,6 +29,9 @@ class AdminShell extends AppShell
         $parser = parent::getOptionParser();
         $parser->addSubcommand('updateJSON', array(
             'help' => __('Update the JSON definitions of MISP.'),
+        ));
+        $parser->addSubcommand('updateJSONLite', array(
+            'help' => __('***TESTING ONLY*** Update the JSON definitions of MISP - but with a minimal set, only meant for testing.'),
         ));
         $parser->addSubcommand('updateWarningLists', array(
             'help' => __('Update the JSON definition of warninglists.'),
@@ -299,6 +302,27 @@ class AdminShell extends AppShell
         );
     }
 
+    public function updateJSONLite()
+    {
+        $this->out('Updating some JSON structures. I\'m travelling at the speed of light');
+        $overallSuccess = true;
+        foreach ($this->Server->updateJSON(true) as $type => $result) {
+            $type = Inflector::pluralize(Inflector::humanize($type));
+            if ($result['success']) {
+                $this->out(__('%s updated in %.2f seconds.', $type, $result['duration']));
+            } else {
+                $this->out(__('Could not update %s.', $type));
+                $this->out($result['result']);
+                $overallSuccess = false;
+            }
+        }
+        if ($overallSuccess) {
+            $this->out('Some JSON structures updated. I wanna make a supersonic man out of you.');
+        } else {
+            $this->error('Some structure could no be updated');
+        }
+    }
+
     public function updateJSON()
     {
         $this->out('Updating all JSON structures.');
@@ -551,7 +575,7 @@ class AdminShell extends AppShell
             }
         }
 
-        $result = $this->Server->serverSettingsEditValue('SYSTEM', $setting, $value, $this->params['force']);
+        $result = $this->Server->serverSettingsEditValue('SYSTEM', $setting, $value, $this->params['force'], true);
         if ($result === true) {
             $this->out(__('Setting "%s" changed to %s', $settingName, is_string($value) ? '"' . $value . '"' : json_encode($value)));
         } else {

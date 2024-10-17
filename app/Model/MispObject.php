@@ -7,7 +7,7 @@ App::uses('FileAccessTool', 'Tools');
 /**
  * @property Event $Event
  * @property SharingGroup $SharingGroup
- * @property Attribute $Attribute
+ * @property MispAttribute $Attribute
  * @property ObjectReference $ObjectReference
  * @property ObjectTemplate $ObjectTemplate
  */
@@ -47,7 +47,7 @@ class MispObject extends AppModel
 
     public $hasMany = array(
         'Attribute' => array(
-            'className' => 'Attribute',
+            'className' => 'MispAttribute',
             'dependent' => true,
         ),
         'ObjectReference' => array(
@@ -406,6 +406,7 @@ class MispObject extends AppModel
         foreach ($attributeArray as $attribute) {
             $newObjectAttributes[] = $this->getObjectAttributeHash($attribute);
         }
+        // Check for duplicate objects in the current data-set of new objects
         $newObjectAttributeCount = count($newObjectAttributes);
         if (!empty($this->__objectDuplicationCheckCache['new'][$object['Object']['template_uuid']])) {
             foreach ($this->__objectDuplicationCheckCache['new'][$object['Object']['template_uuid']] as $previousNewObject) {
@@ -419,7 +420,6 @@ class MispObject extends AppModel
             }
         }
         $this->__objectDuplicationCheckCache['new'][$object['Object']['template_uuid']][] = $newObjectAttributes;
-
         if (!isset($this->__objectDuplicationCheckCache[$object['Object']['template_uuid']])) {
             $this->__objectDuplicationCheckCache[$object['Object']['template_uuid']] = $this->find('all', array(
                 'recursive' => -1,
@@ -1026,7 +1026,7 @@ class MispObject extends AppModel
                                     $newAttribute['event_id'] = $object['Object']['event_id'];
                                     $newAttribute['object_id'] = $object['Object']['id'];
                                     $newAttribute['timestamp'] = $time;
-                                    $result = $this->Event->Attribute->save(array('Attribute' => $newAttribute), array('fieldList' => Attribute::EDITABLE_FIELDS));
+                                    $result = $this->Event->Attribute->save(array('Attribute' => $newAttribute), array('fieldList' => MispAttribute::EDITABLE_FIELDS));
                                     if ($result) {
                                         $this->Event->Attribute->AttributeTag->handleAttributeTags($user, $newAttribute, $newAttribute['event_id'], $capture=true);
                                     } else {
@@ -1068,7 +1068,7 @@ class MispObject extends AppModel
                 }
                 foreach ($object['Attribute'] as $originalAttribute) {
                     $originalAttribute['deleted'] = 1;
-                    $this->Event->Attribute->save($originalAttribute, array('fieldList' => Attribute::EDITABLE_FIELDS));
+                    $this->Event->Attribute->save($originalAttribute, array('fieldList' => MispAttribute::EDITABLE_FIELDS));
                 }
             }
         } else { // we only add the new attribute
@@ -1142,6 +1142,14 @@ class MispObject extends AppModel
                 }
                 $this->Attribute->captureAttribute($attribute, $eventId, $user, $objectId, false, $parentEvent);
             }
+        }
+        if (empty($object['Object']['uuid'])) {
+            $t = $this->find('first', [
+                'recursive' => -1,
+                'fields' => ['uuid'],
+                'conditions' => ['id' => $objectId]
+            ]);
+            $object['Object']['uuid'] = $t['Object']['uuid'];
         }
         $this->Event->captureAnalystData($user, $object['Object'], 'Object', $object['Object']['uuid']);
         return true;
@@ -1621,7 +1629,7 @@ class MispObject extends AppModel
         if (isset($filters['page'])) {
             $params['page'] = $filters['page'];
         }
-        if (!empty($filters['deleted'])) {
+        if (isset($filters['deleted'])) {
             $params['deleted'] = $filters['deleted'];
         }
         if (!empty($filters['excludeDecayed'])) {
@@ -1730,7 +1738,7 @@ class MispObject extends AppModel
     private function getObjectAttributeHash($attribute)
     {
         if ($attribute['type'] === 'malware-sample') {
-            if (strpos($attribute['value'], '|') === false && !empty($attribute['data'])) {
+            if (!str_contains($attribute['value'], '|') && !empty($attribute['data'])) {
                 $attribute['value'] = $attribute['value'] . '|' . md5(base64_decode($attribute['data']));
             }
         }

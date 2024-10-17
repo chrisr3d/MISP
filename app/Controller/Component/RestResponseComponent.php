@@ -549,7 +549,7 @@ class RestResponseComponent extends Component
     {
         $action = $this->__dissectAdminRouting($action);
         if (!$message) {
-            $message = Inflector::singularize($controller) . ' ' . $action['action'] . ((substr($action['action'], -1) === 'e') ? 'd' : 'ed');
+            $message = Inflector::singularize($controller) . ' ' . $action['action'] . ((str_ends_with($action['action'], 'e')) ? 'd' : 'ed');
         }
         $response = [
             'saved' => true,
@@ -635,7 +635,7 @@ class RestResponseComponent extends Component
                 }
                 
                 // If response is big array, encode items separately to save memory
-                if (is_array($response) && count($response) > 10000 && JsonTool::arrayIsList($response)) {
+                if (is_array($response) && count($response) > 10000 && array_is_list($response)) {
                     $output = new TmpFileTool();
                     $output->write('[');
 
@@ -776,7 +776,7 @@ class RestResponseComponent extends Component
             return true;
         }
         $userAgent = CakeRequest::header('User-Agent');
-        return $userAgent && (substr($userAgent, 0, 6) === 'PyMISP' || substr($userAgent, 0, 4) === 'MISP');
+        return $userAgent && (str_starts_with($userAgent, 'PyMISP') || str_starts_with($userAgent, 'MISP'));
     }
 
     private function __generateURL($action, $controller, $id)
@@ -788,7 +788,7 @@ class RestResponseComponent extends Component
     private function __dissectAdminRouting($action)
     {
         $admin = false;
-        if (strlen($action) > 6 && substr($action, 0, 6) === 'admin_') {
+        if (str_starts_with($action, 'admin_')) {
             $action = substr($action, 6);
             $admin = true;
         }
@@ -867,7 +867,11 @@ class RestResponseComponent extends Component
         if (!$this->__setup) {
             $scopes = array('Event', 'Attribute', 'Sighting');
             foreach ($scopes as $scope) {
-                $this->{$scope} = ClassRegistry::init($scope);
+                $scopeModel = $scope;
+                if ($scope === 'Attribute') {
+                    $scopeModel = 'MispAttribute';
+                }
+                $this->{$scope} = ClassRegistry::init($scopeModel);
                 $returnFormat = array_keys($this->{$scope}->validFormats);
                 $this->__descriptions[$scope]['restSearch']['returnFormat'] = $returnFormat;
             }
@@ -1969,14 +1973,14 @@ class RestResponseComponent extends Component
                                 if (is_array($field)) {
                                     foreach($field as $sf) {
                                         $fieldsConstraint[$sf] = $this->__fieldsConstraint[$sf];
-                                        $label = $scope . '.' . $sf;
+                                        $label = $action == 'restSearch' ? $sf : ($scope . '.' . $sf);
                                         $fieldsConstraint[$sf]['id'] = $label;
                                         $fieldsConstraint[$sf]['label'] = $label;
                                     }
                                 } else {
                                     if (!empty($this->__fieldsConstraint[$field])) {
                                         $fieldsConstraint[$field] = $this->__fieldsConstraint[$field];
-                                        $label = $scope . '.' . $field;
+                                        $label = $action == 'restSearch' ? $field : ($scope . '.' . $field);
                                         $fieldsConstraint[$field]['id'] = $label;
                                         $fieldsConstraint[$field]['label'] = $label;
                                     }

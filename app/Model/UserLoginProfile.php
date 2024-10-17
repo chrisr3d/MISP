@@ -1,5 +1,6 @@
 <?php
 App::uses('AppModel', 'Model');
+App::uses('RedisTool', 'Tools');
 
 /**
  * @property User $User
@@ -46,17 +47,28 @@ class UserLoginProfile extends AppModel
     private function browscapGetBrowser()
     {
         $logger = new \Monolog\Logger('name');
-        $streamHandler = new \Monolog\Handler\StreamHandler('php://stderr', \Monolog\Logger::INFO);
+        $streamHandler = new \Monolog\Handler\StreamHandler('php://stderr', \Monolog\Level::Info);
         $logger->pushHandler($streamHandler);
-
+        try {
+            $redis = RedisTool::init();
+        } catch (Exception $e) {
+            $redis = false;
+        }
         if (function_exists('apcu_fetch')) {
             App::uses('ApcuCacheTool', 'Tools');
             $cache = new ApcuCacheTool('misp:browscap');
+        } else if (class_exists('\MatthiasMullie\Scrapbook\Adapters\Redis') && $redis) {
+            $redis_cache = new \MatthiasMullie\Scrapbook\Adapters\Redis($redis);
+            $cache = new \MatthiasMullie\Scrapbook\Psr16\SimpleCache($redis_cache);
+        } else if (class_exists('\League\Flysystem\Local\LocalFilesystemAdapter') && class_exists('\MatthiasMullie\Scrapbook\Adapters\Flysystem')) {
+            $adapter = new \League\Flysystem\Local\LocalFilesystemAdapter(APP . '/tmp/cache/browscap', null, LOCK_EX);
+            $filesystem = new \League\Flysystem\Filesystem($adapter);
+            $scrapbookadapter = new \MatthiasMullie\Scrapbook\Adapters\Flysystem($filesystem);
+            $cache = new \MatthiasMullie\Scrapbook\Psr16\SimpleCache($scrapbookadapter);
         } else {
             $fileCache = new \Doctrine\Common\Cache\FilesystemCache(UserLoginProfile::BROWSER_CACHE_DIR);
             $cache = new \Roave\DoctrineSimpleCache\SimpleCacheAdapter($fileCache);
         }
-
         try {
             $bc = new \BrowscapPHP\Browscap($cache, $logger);
             return $bc->getBrowser();
@@ -240,7 +252,7 @@ class UserLoginProfile extends AppModel
     public function _isSuspicious()
     {
         // previously marked loginuserprofile as malicious by the user
-        if (strpos($this->_getTrustStatus($this->_getUserProfile()), 'malicious') !== false) {
+        if (str_contains($this->_getTrustStatus($this->_getUserProfile()), 'malicious')) {
             return __('A user reported a similar login profile as malicious.');
         }
 

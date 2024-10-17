@@ -33,11 +33,11 @@ class AppController extends Controller
 
     public $helpers = array('OrgImg', 'FontAwesome', 'UserName');
 
-    private $__queryVersion = '162';
-    public $pyMispVersion = '2.4.193';
-    public $phpmin = '7.2';
-    public $phprec = '7.4';
-    public $phptoonew = '8.0';
+    private $__queryVersion = '165';
+    public $pyMispVersion = '2.5.1';
+    public $phpmin = '8.1';
+    public $phprec = '8.2';
+    public $phptoonew = '9.0';
     private $isApiAuthed = false;
 
     /** @var redis */
@@ -113,6 +113,14 @@ class AppController extends Controller
             SystemSetting::setGlobalSetting();
         }
 
+        // Set the baseurl for redirects
+        $baseurl = empty(Configure::read('MISP.baseurl')) ? null : Configure::read('MISP.baseurl');
+        if (!empty($baseurl)) {
+            Configure::write('App.fullBaseUrl', $baseurl);
+            Router::fullBaseUrl($baseurl);
+        }
+
+        $this->_setupBaseurl();
         $this->User = ClassRegistry::init('User');
         if (Configure::read('Plugin.Benchmarking_enable')) {
             App::uses('BenchmarkTool', 'Tools');
@@ -124,7 +132,6 @@ class AppController extends Controller
         if ($action === 'heartbeat') {
             return;
         }
-        $this->_setupBaseurl();
         $this->Auth->loginRedirect = $this->baseurl . '/users/routeafterlogin';
 
         $customLogout = Configure::read('Plugin.CustomAuth_custom_logout');
@@ -172,6 +179,7 @@ class AppController extends Controller
 
         Configure::write('CurrentController', $controller);
         Configure::write('CurrentAction', $action);
+        Configure::write('CurrentRequestIsRest', $this->_isRest());
         $versionArray = $this->User->checkMISPVersion();
         $this->mispVersion = implode('.', $versionArray);
         $this->Security->blackHoleCallback = 'blackHole';
@@ -283,6 +291,12 @@ class AppController extends Controller
                 $this->RestResponse->setHeader('X-Username', $headerValue);
             }
 
+            if (Configure::read('Security.user_org_uuid_in_response_header')) {
+                $userOrgHeaderValue = $user['Organisation']['uuid'];
+                $this->response->header('X-UserOrgUUID', $userOrgHeaderValue);
+                $this->RestResponse->setHeader('X-UserOrgUUID', $userOrgHeaderValue);
+            }
+
             if (!$this->__verifyUser($user))  {
                 $this->_stop(); // just for sure
             }
@@ -326,6 +340,8 @@ class AppController extends Controller
             $this->set('isAclSighting', $role['perm_sighting'] ?? false);
             $this->set('isAclAnalystDataCreator', $role['perm_analyst_data'] ?? false);
             $this->set('aclComponent', $this->ACL);
+            $this->loadModel('Bookmark');
+            $this->set('bookmarks', $this->Bookmark->getBookmarksForUser($user));
             $this->userRole = $role;
 
             $this->__accessMonitor($user);
@@ -402,8 +418,8 @@ class AppController extends Controller
             if (!empty($homepage)) {
                 $this->set('homepage', $homepage);
             }
-            if (PHP_MAJOR_VERSION >= 8) {
-                $this->Flash->error(__('WARNING: MISP is currently running under PHP 8.0, which is unsupported. Background jobs will fail, so please contact your administrator to run a supported PHP version (such as 7.4)'));
+            if (PHP_MAJOR_VERSION < 8) {
+                $this->Flash->error(__('WARNING: MISP 2.5.x is currently running under PHP 7.x, which is unsupported. Make sure that you upgrade to PHP 8.x as soon as possible.'));
             }
         }
     }
@@ -458,6 +474,9 @@ class AppController extends Controller
                 $authKeyToStore = $start
                     . str_repeat('*', 32)
                     . $end;
+                if (!empty(Configure::read('Security.allow_unsafe_cleartext_apikey_logging'))) {
+                    $authKeyToStore = $authKey;
+                }
                 $this->__logApiKeyUse($start . $end);
                 if ($user) {
                     // User found in the db, add the user info to the session
@@ -757,7 +776,7 @@ class AppController extends Controller
 
         $shouldBeLogged = $userMonitoringEnabled ||
             Configure::read('MISP.log_paranoid') ||
-            (Configure::read('MISP.log_paranoid_api') && isset($user['logged_by_authkey']) && $user['logged_by_authkey']);
+            (Configure::read('MISP.log_paranoid_api') && isset($user['logged_by_authkey']));
 
         if ($shouldBeLogged) {
             $includeRequestBody = !empty(Configure::read('MISP.log_paranoid_include_post_body')) || $userMonitoringEnabled;
@@ -941,7 +960,7 @@ class AppController extends Controller
     {
         // Let us access $baseurl from all views
         $baseurl = Configure::read('MISP.baseurl');
-        if (substr($baseurl, -1) === '/') {
+        if (str_ends_with($baseurl, '/')) {
             // if the baseurl has a trailing slash, remove it. It can lead to issues with the CSRF protection
             $baseurl = rtrim($baseurl, '/');
             $this->loadModel('Server');
@@ -1046,7 +1065,7 @@ class AppController extends Controller
                     $data = array_merge($data, $temp);
                 } else {
                     foreach ($options['paramArray'] as $param) {
-                        if (substr($param, -1) == '*') {
+                        if (str_ends_with($param, '*')) {
                             $root = substr($param, 0, strlen($param)-1);
                             foreach ($temp as $existingParamKey => $v) {
                                 $leftover = substr($existingParamKey, strlen($param)-1);
@@ -1108,7 +1127,7 @@ class AppController extends Controller
             foreach ($data as $k => $v) {
                 $found = false;
                 foreach ($options['additional_delimiters'] as $delim) {
-                    if (strpos($v, $delim) !== false) {
+                    if (str_contains($v, $delim)) {
                         $found = true;
                         break;
                     }
@@ -1346,11 +1365,19 @@ class AppController extends Controller
         if ($scope === 'MispObject') {
             $scope = 'Object';
         }
+        if ($scope === 'MispAttribute') {
+            $scope = 'Attribute';
+        }
         if (!isset($this->RestSearch->paramArray[$scope])) {
             throw new NotFoundException(__('RestSearch is not implemented (yet) for this scope.'));
         }
-
-        $modelName = $scope === 'Object' ? 'MispObject' : $scope;
+        if ($scope === 'Object') {
+            $modelName = 'MispObject';
+        } else if ($scope === 'Attribute') {
+            $modelName = 'MispAttribute';
+        }else {
+            $modelName = $scope;
+        }
         if (!isset($this->$modelName)) {
             $this->loadModel($modelName);
         }
@@ -1403,7 +1430,8 @@ class AppController extends Controller
             }
         }
         /** @var TmpFileTool $final */
-        $final = $model->restSearch($user, $returnFormat, $filters, false, false, $elementCounter, $renderView);
+        $skippedElementsCounter = 0;
+        $final = $model->restSearch($user, $returnFormat, $filters, false, false, $elementCounter, $renderView, $skippedElementsCounter);
         if ($renderView) {
             $this->layout = false;
             $final = JsonTool::decode($final->intoString());
@@ -1411,7 +1439,7 @@ class AppController extends Controller
             $this->render('/Events/module_views/' . $renderView);
         } else {
             $filename = $this->RestSearch->getFilename($filters, $scope, $responseType);
-            $headers = ['X-Result-Count' => $elementCounter, 'X-Export-Module-Used' => $returnFormat, 'X-Response-Format' => $responseType];
+            $headers = ['X-Result-Count' => $elementCounter, 'X-Export-Module-Used' => $returnFormat, 'X-Response-Format' => $responseType, 'X-Skipped-Elements-Count' => $skippedElementsCounter];
             return $this->RestResponse->viewData($final, $responseType, false, true, $filename, $headers);
         }
     }

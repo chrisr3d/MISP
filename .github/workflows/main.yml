@@ -6,9 +6,9 @@ name: misp
 # events but only for the 2.4 and develop branches
 on:
   push:
-    branches: [ '2.4', develop, misp-stix, taxii ]
+    branches: [ '2.5', '2.4', develop, '2.4-develop', misp-stix, taxii ]
   pull_request:
-    branches: [ '2.4', develop, misp-stix ]
+    branches: [ '2.5', '2.4', develop, '2.4-develop', misp-stix ]
 
 # A workflow run is made up of one or more jobs that can run sequentially or in parallel
 jobs:
@@ -21,7 +21,7 @@ jobs:
       fail-fast: false
       matrix:
         os: [ubuntu-22.04]
-        php: ['7.4']
+        php: ['8.1', '8.3']
 
     # Steps represent a sequence of tasks that will be executed as part of the job
     steps:
@@ -49,8 +49,8 @@ jobs:
       - name: Setup PHP
         uses: shivammathur/setup-php@v2
         with:
-          php-version: ${{ matrix.php }}
-          extensions: mysql, mbstring, json, xml, opcache, readline, redis, gd, apcu
+          php-version: ${{ matrix.php }}a
+          extensions: mysql, mbstring, xml, opcache, readline, redis, gd, apcu
 
       - name: Initialize variables
         run: |
@@ -95,6 +95,7 @@ jobs:
           mysql -h 127.0.0.1 --port 3306 -u root -pbar -e "grant usage on *.* to misp@'%' identified by 'blah';"
           mysql -h 127.0.0.1 --port 3306 -u root -pbar -e "grant all privileges on misp.* to misp@'%';"
           mysql -h 127.0.0.1 --port 3306 -u misp -pblah misp < INSTALL/MYSQL.sql
+
 
           # configure apache virtual hosts
           sudo mkdir -p /etc/apache2/sites-available
@@ -148,7 +149,8 @@ jobs:
           app/Console/cake Admin setSetting "MISP.python_bin" "$GITHUB_WORKSPACE/venv/bin/python"
           . ./venv/bin/activate
           export PYTHONPATH=$PYTHONPATH:./app/files/scripts
-          pip install ./PyMISP[fileobjects,email] ./app/files/scripts/python-stix ./app/files/scripts/cti-python-stix2 pyzmq redis plyara pytest
+          pip install -r requirements.txt
+          pip install -r requirements-dev.txt
           deactivate
 
       - name: DB Update

@@ -481,7 +481,7 @@ class DecayingModel extends AppModel
     // Returns score overtime, sightings, base_score computation and other useful information
     public function getScoreOvertime($user, $model_id, $attribute_id, $model_overrides)
     {
-        $this->Attribute = ClassRegistry::init('Attribute');
+        $this->Attribute = ClassRegistry::init('MispAttribute');
         $attribute = $this->Attribute->fetchAttributes($user, array(
             'conditions' => array('Attribute.id' => $attribute_id),
             'contain' => array('AttributeTag' => array('Tag')),
@@ -564,11 +564,19 @@ class DecayingModel extends AppModel
         $score_overtime = array();
         $rounded_sightings = array();
         $sighting_index = 0;
+        if ($this->Computation::REQUIRES_SIGHTINGS) {
+            $all_sighting_index = 0;
+            $all_sightings = $this->Sighting->listSightings($user, $attribute_id, 'attribute', false, false, false);
+        }
         for ($t=$start_time; $t < $end_time; $t+=3600) {
             // fetch closest sighting to the current time
             $sighting_index = $this->getClosestSighting($sightings, $t, $sighting_index);
             $last_sighting = $sightings[$sighting_index]['Sighting']['rounded_timestamp'];
             $elapsed_time = $t - $last_sighting;
+            if ($this->Computation::REQUIRES_SIGHTINGS) {
+                $all_sighting_index = $this->getClosestSighting($all_sightings, $t, $all_sighting_index);
+                $attribute['Attribute']['Sighting'] = array_slice($all_sightings, 0, $all_sighting_index);
+            }
             $score_overtime[$t] = $this->Computation->computeScore($model, $attribute['Attribute'], $base_score, $elapsed_time);
         }
         $csv = 'date,value' . PHP_EOL;
@@ -677,7 +685,7 @@ class DecayingModel extends AppModel
             if (!empty($modelOverrides)) {
                 $model = $this->overrideModelParameters($model, $modelOverrides);
             }
-            $eventScore = $this->getScoreForEvent($event, $model);
+            $eventScore = $this->getScoreForEvent($user, $event, $model);
             $decayed = $this->isEventDecayed($model, $eventScore['score']);
             $to_attach = [
                 'score' => $eventScore['score'],
@@ -699,7 +707,7 @@ class DecayingModel extends AppModel
     public function getScore($attribute, $model, $user=false)
     {
         if (is_numeric($attribute) && $user !== false) {
-            $this->Attribute = ClassRegistry::init('Attribute');
+            $this->Attribute = ClassRegistry::init('MispAttribute');
             $attribute = $this->Attribute->fetchAttributes($user, array(
                 'conditions' => array('Attribute.id' => $attribute),
                 'contain' => array('AttributeTag' => array('Tag'))
@@ -715,10 +723,10 @@ class DecayingModel extends AppModel
         return $this->Computation->computeCurrentScore($user, $model, $attribute);
     }
 
-    public function getScoreForEvent($event, $model): array
+    public function getScoreForEvent($user, $event, $model): array
     {
         $this->Computation = $this->getModelClass($model);
-        return $this->Computation->computeEventScore($model, $event);
+        return $this->Computation->computeEventScore($user, $model, $event);
     }
 
     public function isEventDecayed(array $model, float $score): bool
