@@ -37,7 +37,8 @@ class AttributeTag extends AppModel
     {
         $pubToZmq = Configure::read('Plugin.ZeroMQ_enable') && Configure::read('Plugin.ZeroMQ_tag_notifications_enable');
         $kafkaTopic = $this->kafkaTopic('tag');
-        if ($pubToZmq || $kafkaTopic) {
+        $triggerCallable = $this->isTriggerCallable('tag-attached-after-save');
+        if ($pubToZmq || $kafkaTopic || $triggerCallable) {
             $tag = $this->find('first', array(
                 'recursive' => -1,
                 'conditions' => array('AttributeTag.id' => $this->id),
@@ -53,6 +54,15 @@ class AttributeTag extends AppModel
             if ($kafkaTopic) {
                 $kafkaPubTool = $this->getKafkaPubTool();
                 $kafkaPubTool->publishJson($kafkaTopic, $tag, 'attached to attribute');
+            }
+            if ($triggerCallable) {
+                $workflowErrors = [];
+                $logging = [
+                    'model' => 'AttributeTag',
+                    'action' => 'add',
+                    'id' => $this->id,
+                ];
+                $this->executeTrigger('tag-attached-after-save', $tag, $workflowErrors, $logging);
             }
         }
     }
@@ -217,17 +227,15 @@ class AttributeTag extends AppModel
     }
 
     // This function help mirroring the tags at attribute level. It will delete tags that are not present on the remote attribute
-    public function pruneOutdatedAttributeTagsFromSync($newerTags, $originalAttributeTags)
+    public function pruneOutdatedAttributeTagsFromSync($newerTags, $originalGlobalAttributeTags)
     {
         $newerTagsName = array();
         foreach ($newerTags as $tag) {
             $newerTagsName[] = strtolower($tag['name']);
         }
-        foreach ($originalAttributeTags as $k => $attributeTag) {
-            if (!$attributeTag['local']) { //
-                if (!in_array(strtolower($attributeTag['Tag']['name']), $newerTagsName)) {
-                    $this->softDelete($attributeTag['id']);
-                }
+        foreach ($originalGlobalAttributeTags as $k => $attributeTag) {
+            if (!in_array(strtolower($attributeTag['Tag']['name']), $newerTagsName)) {
+                $this->softDelete($attributeTag['AttributeTag']['id']);
             }
         }
     }
@@ -252,6 +260,70 @@ class AttributeTag extends AppModel
         unset($this->virtualFields['attribute_count']);
         return $counts;
     }
+
+
+     /**
+     * @param int $tagId
+     * @param array $user
+     * @return int
+     */
+    public function countForTag($tagId, array $user)
+    {
+        $count = $this->countForAllTags([$tagId], $user);
+        return isset($count[$tagId]) ? (int)$count[$tagId] : 0;
+    }
+
+
+
+    /**
+     * @param array $tagIds
+     * @param array $user - Currently ignored for performance reasons
+     * @return array
+     */
+    public function countForAllTags(array $tagIds, array $user)
+    {
+        if (empty($tagIds)) {
+            return [];
+        }
+
+        $countAllTags = [];
+        foreach ($tagIds as $tagId) {
+            // First get attribute IDs directly tagged
+            $directAttributeIds = $this->Attribute->AttributeTag->find('list', [
+                'fields' => ['AttributeTag.attribute_id'],
+                'conditions' => ['AttributeTag.tag_id' => $tagIds],
+                'recursive' => -1
+            ]);
+
+            // Then get attribute IDs from tagged events in one query with join
+            $eventAttributeIds = $this->Attribute->find('list', [
+                'fields' => ['Attribute.id'],
+                'joins' => [
+                    [
+                        'table' => 'event_tags',
+                        'alias' => 'EventTag',
+                        'type' => 'INNER',
+                        'conditions' => [
+                            'EventTag.event_id = Attribute.event_id',
+                            'EventTag.tag_id' => $tagIds
+                        ]
+                    ]
+                ],
+                'recursive' => -1
+            ]);
+
+            // Merge and count unique attributes
+            $allAttributeIds = array_unique(array_merge(
+                array_values($directAttributeIds),
+                array_values($eventAttributeIds)
+            ));
+
+            $countAllTags[$tagId] = count($allAttributeIds);
+        }
+        return $countAllTags;
+    }
+
+
 
     // Fetch all tags attached to attribute belonging to supplied event. No ACL if user not provided
     public function getTagScores($user=false, $eventId=0, $allowedTags=array())

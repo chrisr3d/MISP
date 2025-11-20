@@ -72,7 +72,7 @@ class RestResponseComponent extends Component
             'add' => array(
                 'description' => "POST a MISP Event JSON to this API to create an Event. Contained objects can also be included (such as attributes, objects, tags, etc).",
                 'mandatory' => array('info'),
-                'optional' => array('threat_level_id', 'analysis', 'distribution', 'sharing_group_id', 'uuid', 'published', 'timestamp', 'date', 'Attribute', 'Object', 'Shadow_Attribute', 'EventTag'),
+                'optional' => array('threat_level_id', 'analysis', 'distribution', 'sharing_group_id', 'uuid', 'published', 'timestamp', 'date', 'Attribute', 'Object', 'Shadow_Attribute', 'EventTag', 'is_extension', 'is_extended',),
                 'params' => array()
             ),
             'edit' => array(
@@ -83,12 +83,12 @@ class RestResponseComponent extends Component
             ),
             'index' => array(
                 'description' => 'POST a JSON filter object to this API to get the meta-data about matching events.',
-                'optional' => array('all', 'attribute', 'published', 'eventid', 'datefrom', 'dateuntil', 'org', 'eventinfo', 'tag', 'tags', 'distribution', 'sharinggroup', 'analysis', 'threatlevel', 'email', 'hasproposal', 'timestamp', 'publishtimestamp', 'publish_timestamp', 'minimal')
+                'optional' => array('all', 'attribute', 'published', 'eventid', 'datefrom', 'dateuntil', 'org', 'eventinfo', 'tag', 'tags', 'distribution', 'sharinggroup', 'analysis', 'threatlevel', 'email', 'hasproposal', 'timestamp', 'publishtimestamp', 'publish_timestamp', 'minimal', 'is_extension', 'is_extended')
             ),
             'restSearch' => array(
                 'description' => "Search MISP using a list of filter parameters and return the data in the selected format. The search is available on an event and an attribute level, just select the scope via the URL (/events/restSearch vs /attributes/restSearch). Besides the parameters listed, other, format specific ones can be passed along (for example: requested_attributes and includeContext for the CSV export). This API allows pagination via the page and limit parameters.",
                 'mandatory' => array('returnFormat'),
-                'optional' => array('page', 'limit', 'value', 'type', 'category', 'org', 'tag', 'tags', 'event_tags', 'searchall', 'date', 'last', 'eventid', 'withAttachments', 'metadata', 'uuid', 'published', 'publish_timestamp', 'timestamp', 'enforceWarninglist', 'sgReferenceOnly', 'eventinfo', 'sharinggroup', 'excludeLocalTags', 'threat_level_id'),
+                'optional' => array('page', 'limit', 'value', 'type', 'category', 'org', 'tag', 'tags', 'event_tags', 'searchall', 'date', 'last', 'eventid', 'withAttachments', 'metadata', 'uuid', 'published', 'publish_timestamp', 'timestamp', 'enforceWarninglist', 'sgReferenceOnly', 'eventinfo', 'sharinggroup', 'excludeLocalTags', 'threat_level_id', 'attackGalaxy',),
                 'params' => array()
             ),
             'addTag' => array(
@@ -549,7 +549,7 @@ class RestResponseComponent extends Component
     {
         $action = $this->__dissectAdminRouting($action);
         if (!$message) {
-            $message = Inflector::singularize($controller) . ' ' . $action['action'] . ((substr($action['action'], -1) === 'e') ? 'd' : 'ed');
+            $message = Inflector::singularize($controller) . ' ' . $action['action'] . ((str_ends_with($action['action'], 'e')) ? 'd' : 'ed');
         }
         $response = [
             'saved' => true,
@@ -616,7 +616,6 @@ class RestResponseComponent extends Component
             $type = 'csv';
         } else {
             $type = $format;
-
             $dumpSql = intval($this->Controller->request->params['named']['sql'] ?? 0);
             if ($dumpSql && Configure::read('debug') < 2) {
                 $dumpSql = 0; // disable dumping SQL if debugging is off
@@ -635,7 +634,7 @@ class RestResponseComponent extends Component
                 }
                 
                 // If response is big array, encode items separately to save memory
-                if (is_array($response) && count($response) > 10000 && JsonTool::arrayIsList($response)) {
+                if (is_array($response) && count($response) > 10000 && array_is_list($response)) {
                     $output = new TmpFileTool();
                     $output->write('[');
 
@@ -776,7 +775,7 @@ class RestResponseComponent extends Component
             return true;
         }
         $userAgent = CakeRequest::header('User-Agent');
-        return $userAgent && (substr($userAgent, 0, 6) === 'PyMISP' || substr($userAgent, 0, 4) === 'MISP');
+        return $userAgent && (str_starts_with($userAgent, 'PyMISP') || str_starts_with($userAgent, 'MISP'));
     }
 
     private function __generateURL($action, $controller, $id)
@@ -788,7 +787,7 @@ class RestResponseComponent extends Component
     private function __dissectAdminRouting($action)
     {
         $admin = false;
-        if (strlen($action) > 6 && substr($action, 0, 6) === 'admin_') {
+        if (str_starts_with($action, 'admin_')) {
             $action = substr($action, 6);
             $admin = true;
         }
@@ -823,6 +822,14 @@ class RestResponseComponent extends Component
             $cakeResponse->disableCache();
         }
         return $cakeResponse;
+    }
+
+    public function sendStringAsFile($content, $type = null, $filename = 'download')
+    {
+        $this->Controller->response->body($content);
+        $this->Controller->response->type($type);
+        $this->Controller->response->download($filename);
+        return $this->Controller->response;
     }
 
     public function throwException($code, $message, $url = '', $format = false, $raw = false, $headers = array())
@@ -1211,6 +1218,18 @@ class RestResponseComponent extends Component
                 'values' => array(1 => 'True', 0 => 'False' ),
                 'help' => __('The organisation have write access to this sharing group (they can add/remove other organisation)')
             ),
+            'is_extension' => array(
+                'input' => 'radio',
+                'type' => 'integer',
+                'values' => array(1 => 'True', 0 => 'False' ),
+                'help' => __('Only shows events that are extending an other one')
+            ),
+            'is_extended' => array(
+                'input' => 'radio',
+                'type' => 'integer',
+                'values' => array(1 => 'True', 0 => 'False' ),
+                'help' => __('Only shows events that are extended by an other one')
+            ),
             'external_auth_required' => array(
                 'input' => 'radio',
                 'type' => 'integer',
@@ -1247,6 +1266,12 @@ class RestResponseComponent extends Component
                     'autoclose' => true
                 ),
                 'help' => __('The date from which the event was published')
+            ),
+            'attackGalaxy' => array(
+                'input' => 'text',
+                'type' => 'string',
+                'operators' => array('equal'),
+                'help' => __('The Galaxy\'s type to use for the matrix')
             ),
             'galaxy_cluster_uuid' => array(
             'input' => 'text',
@@ -1374,7 +1399,7 @@ class RestResponseComponent extends Component
                 'type' => 'integer',
                 'operators' => array('equal'),
                 'validation' => array('min' => 0, 'step' => 1),
-                'help' => __('Limit on the pagination')
+                'help' => __('Limit on the pagination. Lower bounded by the one set by the admin')
             ),
             'local' => array(
                 'input' => 'radio',

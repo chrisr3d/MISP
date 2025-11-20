@@ -180,7 +180,12 @@ class Warninglist extends AppModel
                             'warninglist_name' => $warninglists[$warninglistId]['name'],
                             'warninglist_category' => $warninglists[$warninglistId]['category'],
                         ];
-                        $eventWarnings[$warninglistId] = $warninglists[$warninglistId]['name'];
+                        $category = $warninglists[$warninglistId]['category'];
+                        if ($category === "false_positive") {
+                            $eventWarnings["false_positive"][$warninglistId] = $warninglists[$warninglistId]['name'];
+                        } else {
+                            $eventWarnings["known"][$warninglistId] = $warninglists[$warninglistId]['name'];
+                        }
 
                         $store[$warninglistId] = [$match['value'], $match['match']];
                     }
@@ -199,7 +204,12 @@ class Warninglist extends AppModel
                         'warninglist_name' => $warninglists[$warninglistId]['name'],
                         'warninglist_category' => $warninglists[$warninglistId]['category'],
                     ];
-                    $eventWarnings[$warninglistId] = $warninglists[$warninglistId]['name'];
+                    $category = $warninglists[$warninglistId]['category'];
+                    if ($category === "false_positive") {
+                        $eventWarnings["false_positive"][$warninglistId] = $warninglists[$warninglistId]['name'];
+                    } else {
+                        $eventWarnings["known"][$warninglistId] = $warninglists[$warninglistId]['name'];
+                    }
                 }
             }
         }
@@ -390,7 +400,7 @@ class Warninglist extends AppModel
         $warninglistId = (int)$this->id;
         $result = true;
 
-        if (JsonTool::arrayIsList($list['list'])) {
+        if (array_is_list($list['list'])) {
             foreach (array_chunk($list['list'], 1000) as $chunk) {
                 $valuesToInsert = [];
                 foreach ($chunk as $value) {
@@ -634,7 +644,7 @@ class Warninglist extends AppModel
      */
     public function checkValue($listValues, $value, $type, $listType)
     {
-        if ($type === 'malware-sample' || strpos($type, '|') !== false) {
+        if ($type === 'malware-sample' || str_contains($type, '|')) {
             $value = explode('|', $value, 2);
         } else {
             $value = array($value);
@@ -678,7 +688,7 @@ class Warninglist extends AppModel
     private function __evalSubString($listValues, $value)
     {
         foreach ($listValues as $listValue) {
-            if (strpos($value, $listValue) !== false) {
+            if (str_contains($value, $listValue)) {
                 return $listValue;
             }
         }
@@ -688,7 +698,7 @@ class Warninglist extends AppModel
     private function __evalHostname($listValues, $value)
     {
         // php's parse_url is dumb, so let's use some hacky workarounds
-        if (strpos($value, '//') === false) {
+        if (!str_contains($value, '//')) {
             $value = explode('/', $value);
             $hostname = $value[0];
         } else {
@@ -894,8 +904,10 @@ class Warninglist extends AppModel
                     'comment' => isset($entry['comment']) ? $entry['comment'] : null,
                 ];
             } else {
+                $valueAndComment = explode("#", $entry, 2);
                 $entries[] = [
-                    'value' => $entry
+                    'value' => trim($valueAndComment[0]),
+                    'comment' => count($valueAndComment) === 2 ? trim($valueAndComment[1]) : null,
                 ];
             }
         }

@@ -67,6 +67,9 @@ class Tag extends AppModel
         'GalaxyClusterRelationTag' => array(
             'dependent' => true
         ),
+        'EventReportTag' => array(
+            'dependent' => true
+        ),
     );
 
     public $belongsTo = array(
@@ -80,9 +83,12 @@ class Tag extends AppModel
         )
     );
 
-    const RE_GALAXY = '/misp-galaxy:[^:="]+="[^:="]+/i';
+    const RE_GALAXY = '/misp-galaxy:[^:="]+="[^:="]+"/i';
     const RE_CUSTOM_GALAXY = '/misp-galaxy:[^:="]+="[a-fA-F0-9]{8}-[a-fA-F0-9]{4}-[a-fA-F0-9]{4}-[a-fA-F0-9]{4}-[a-fA-F0-9]{12}"/i';
+    const RE_CUSTOM_CLUSTER_FROM_DEFAULT_GALAXY = '/misp-galaxy:(?:(?![a-fA-F0-9]{8}-[a-fA-F0-9]{4}-[a-fA-F0-9]{4}-[a-fA-F0-9]{4}-[a-fA-F0-9]{12}).)+="[^:="]+"/i';
     private $tagOverrides = false;
+
+    private $cachedTagsByName = [];
 
     public function beforeValidate($options = array())
     {
@@ -821,7 +827,7 @@ class Tag extends AppModel
                 continue;
             }
             $dataTag['Tag']['local'] = empty($dataTag['local']) ? 0 : 1;
-            if (substr($dataTag['Tag']['name'], 0, strlen('misp-galaxy:')) === 'misp-galaxy:') {
+            if (str_starts_with($dataTag['Tag']['name'], 'misp-galaxy:')) {
                 $possibleGalaxyClusterTag[] = $dataTag['Tag']['name'];
             }
         }
@@ -869,5 +875,49 @@ class Tag extends AppModel
     public function isCustomGalaxyClusterTag($tagName)
     {
         return (bool)preg_match(self::RE_CUSTOM_GALAXY, $tagName);
+    }
+
+    public function countRelationships(): array
+    {
+        $sources = ['EventTag', 'AttributeTag', 'EventReportTag'];
+        $counts = [];
+        foreach ($sources as $source) {
+            $this->{$source}->virtualFields['tag_type_count'] = "COUNT({$source}.id)";
+            $counts[$source] = $this->{$source}->find('list', [
+                'recursive' => -1,
+                'fields' => ["{$source}.relationship_type", 'tag_type_count'],
+                'group' => ["{$source}.relationship_type"],
+                'conditions' => [
+                    'relationship_type !=' => '',
+                ]
+            ]);
+            unset($this->{$source}->virtualFields['tag_type_count']);
+        }
+        $counts['all'] = [];
+        foreach ($counts as $scope => $scopedCounts) {
+            foreach ($scopedCounts as $type => $scopedCount) {
+                if (!isset($counts['all'][$type])) {
+                    $counts['all'][$type] = 0;
+                }
+                $counts['all'][$type] += $scopedCount;
+            }
+        }
+        return $counts;
+    }
+
+    public function getCachedTags($includeClusters=false): array
+    {
+        $conditions = [
+            'Tag.is_galaxy' => !empty($includeClusters),
+        ];
+        if (empty($this->cachedTagsByName)) {
+            $this->cachedTagsByName = $this->find('all', [
+                'conditions' => $conditions,
+                'recursive' => -1,
+                'order' => ['name asc'],
+                'fields' => ['Tag.id', 'Tag.name']
+            ]);
+        }
+        return $this->cachedTagsByName;
     }
 }

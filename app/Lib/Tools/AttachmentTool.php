@@ -217,6 +217,44 @@ class AttachmentTool
 
     /**
      * @param int $eventId
+     * @param int $originalId
+     * @param int $newId
+     * @param string $pathSuffix
+     * @return bool
+     * @throws Exception
+     */
+    public function changeID($eventId, $originalId, $newId, $pathSuffix = '')
+    {
+        return $this->_changeID(false, $eventId, $originalId, $newId, $pathSuffix);
+    }
+
+    /**
+     * @param bool $shadow
+     * @param int $eventId
+     * @param int $originalId
+     * @param int $newId
+     * @param string $pathSuffix
+     * @return bool
+     * @throws Exception
+     */
+    protected function _changeID($shadow, $eventId, $originalId, $newId, $pathSuffix = '')
+    {
+        $path = $this->getPath($shadow, $eventId, $originalId, $pathSuffix);
+        $newPath = $this->getPath($shadow, $eventId, $newId, $pathSuffix);
+
+        if ($this->attachmentDirIsS3()) {
+            $s3 = $this->loadS3Client();
+            $s3->rename($path, $newPath);
+        } else {
+            $path = $this->attachmentDir() . DS . $path;
+            FileAccessTool::renameFile($path, $newId);
+        }
+
+        return true;
+    }
+
+    /**
+     * @param int $eventId
      * @param int $attributeId
      * @param string $pathSuffix
      * @return bool
@@ -471,7 +509,7 @@ class AttachmentTool
     public function attachmentDirIsS3()
     {
         $attachmentsDir = Configure::read('MISP.attachments_dir');
-        return $attachmentsDir && substr($attachmentsDir, 0, 2) === "s3";
+        return $attachmentsDir && str_starts_with($attachmentsDir, "s3");
     }
 
     /**

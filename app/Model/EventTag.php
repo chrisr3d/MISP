@@ -30,13 +30,15 @@ class EventTag extends AppModel
         parent::afterSave($created, $options);
         $pubToZmq = Configure::read('Plugin.ZeroMQ_enable') && Configure::read('Plugin.ZeroMQ_tag_notifications_enable');
         $kafkaTopic = $this->kafkaTopic('tag');
-        if ($pubToZmq || $kafkaTopic) {
+        $triggerCallable = $this->isTriggerCallable('tag-attached-after-save');
+        if ($pubToZmq || $kafkaTopic || $triggerCallable) {
             $tag = $this->find('first', array(
                 'recursive' => -1,
                 'conditions' => array('EventTag.id' => $this->id),
                 'contain' => array('Tag')
             ));
             $tag['Tag']['event_id'] = $tag['EventTag']['event_id'];
+            $tag['Tag']['local'] = $tag['EventTag']['local'];
             $tag = array('Tag' => $tag['Tag']);
             if ($pubToZmq) {
                 $pubSubTool = $this->getPubSubTool();
@@ -45,6 +47,15 @@ class EventTag extends AppModel
             if ($kafkaTopic) {
                 $kafkaPubTool = $this->getKafkaPubTool();
                 $kafkaPubTool->publishJson($kafkaTopic, $tag, 'attached to event');
+            }
+            if ($triggerCallable) {
+                $workflowErrors = [];
+                $logging = [
+                    'model' => 'EventTag',
+                    'action' => 'add',
+                    'id' => $this->id,
+                ];
+                $this->executeTrigger('tag-attached-after-save', $tag, $workflowErrors, $logging);
             }
         }
     }
@@ -159,6 +170,20 @@ class EventTag extends AppModel
             $nothingToChange = true;
         }
         return false;
+    }
+
+    // This function help mirroring the tags at event level. It will delete tags that are not present on the receiving event
+    public function pruneOutdatedEventTagsFromSync($newerTags, $originalGlobalEventTags)
+    {
+        $newerTagsName = [];
+        foreach ($newerTags as $tag) {
+            $newerTagsName[] = strtolower($tag['name']);
+        }
+        foreach ($originalGlobalEventTags as $k => $eventTag) {
+            if (!in_array(strtolower($eventTag['Tag']['name']), $newerTagsName)) {
+                $this->softDelete($eventTag['EventTag']['id']);
+            }
+        }
     }
 
     /**
