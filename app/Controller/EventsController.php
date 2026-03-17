@@ -28,7 +28,7 @@ class EventsController extends AppController
 
     // private
     const ACCEPTED_FILTERING_NAMED_PARAMS = array(
-        'sort', 'direction', 'focus', 'is_extended', 'overrideLimit', 'filterColumnsOverwrite', 'attributeFilter', 'page',
+        'sort', 'direction', 'focus', 'extended', 'is_extended', 'overrideLimit', 'filterColumnsOverwrite', 'attributeFilter', 'page',
         'searchFor', 'proposal', 'correlation', 'warning', 'deleted', 'includeRelatedTags', 'includeDecayScore', 'distribution',
         'taggedAttributes', 'galaxyAttachedAttributes', 'objectType', 'attributeType', 'feed', 'server', 'toIDS',
         'sighting', 'includeSightingdb', 'warninglistId', 'correlationId', 'email', 'eventid', 'datefrom', 'dateuntil'
@@ -171,9 +171,12 @@ class EventsController extends AppController
             $subconditions[] = array('Attribute.value2 LIKE' => $v);
             $subconditions[] = array('Attribute.comment LIKE' => $v);
         }
-        $conditions = array(
-            'OR' => $subconditions,
-        );
+        $conditions = [
+            'AND' => [
+                'OR' => $subconditions,
+                'Attribute.deleted' => 0,
+            ]
+        ];
         $result = $this->Event->Attribute->fetchAttributes($this->Auth->user(), array(
             'conditions' => $conditions,
             'flatten' => 1,
@@ -1009,6 +1012,7 @@ class EventsController extends AppController
         if (Configure::read('MISP.tagging')) {
             $possibleColumns[] = 'clusters';
             $possibleColumns[] = 'tags';
+            $possibleColumns[] = 'highlights';
         }
 
         $possibleColumns[] = 'attribute_count';
@@ -1058,7 +1062,7 @@ class EventsController extends AppController
 
         $user = $this->Auth->user();
 
-        if (in_array('tags', $columns, true) || in_array('clusters', $columns, true)) {
+        if (in_array('tags', $columns, true) || in_array('clusters', $columns, true) || in_array('highlights', $columns, true)) {
             $events = $this->Event->attachTagsToEvents($events);
             $events = $this->GalaxyCluster->attachClustersToEventIndex($user, $events, true);
             $events = $this->__attachHighlightedTagsToEvents($events);
@@ -1774,6 +1778,9 @@ class EventsController extends AppController
             if (!empty($namedParams['includeCustomGalaxyCluster'])) {
                 $conditions['includeCustomGalaxyCluster'] = 1;
             }
+        }
+        if (!empty($namedParams['noSightings'])) {
+            $conditions['noSightings'] = 1;
         }
         if (!empty($namedParams['extended']) || !empty($this->request->data['extended'])) {
             $conditions['extended'] = 1;
@@ -4433,6 +4440,8 @@ class EventsController extends AppController
                     if (isset($sa['id'])) {
                         unset($sa['id']);
                     }
+                    $sa['org_id'] = $this->Event->Orgc->captureOrg($sa['Org'], $this->Auth->user());
+                    unset($sa['Org']);
                     $this->Event->ShadowAttribute->create();
                     if (!$this->Event->ShadowAttribute->save(array('ShadowAttribute' => $sa))) {
                         $message = "Some of the proposals could not be saved.";
@@ -5764,7 +5773,7 @@ class EventsController extends AppController
                     $modulePayload['data'] = '';
                 }
                 if (!$fail) {
-                    $modulePayload['data'] = base64_encode($modulePayload['data']);
+                    $modulePayload['data'] = JsonTool::base64Encode($modulePayload['data']);
                     if (!empty($filename)) {
                         $modulePayload['filename'] = $filename;
                     }
@@ -6588,13 +6597,8 @@ class EventsController extends AppController
 
         if ($this->request->is('json')) {
             App::uses('JSONConverterTool', 'Tools');
-            if ($this->RestResponse->isAutomaticTool() && empty($event['Event']['protected'])) {
-                foreach (JSONConverterTool::streamConvert($event) as $part) {
-                    $tmpFile->write($part);
-                }
-            } else {
-                $tmpFile->write(JSONConverterTool::convert($event));
-            }
+            $prettyPrint = !($this->RestResponse->isAutomaticTool() && empty($event['Event']['protected']));
+            JSONConverterTool::convertToTmpFile($event, $tmpFile, $prettyPrint);
             $format = 'json';
         } elseif ($this->request->is('xml')) {
             App::uses('XMLConverterTool', 'Tools');

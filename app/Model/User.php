@@ -1144,14 +1144,15 @@ class User extends AppModel
      */
     public function createInitialUser($orgId)
     {
-        $authKey = $this->generateAuthKey();
+        $authKeyOld = $this->generateAuthKey();
+        $authKeyNew = $this->generateAuthKey();
         $admin = array('User' => array(
             'id' => 1,
             'email' => 'admin@admin.test',
             'org_id' => $orgId,
             'password' => 'admin',
             'confirm_password' => 'admin',
-            'authkey' => $authKey,
+            'authkey' => $authKeyOld,
             'nids_sid' => 4000000,
             'newsread' => 0,
             'role_id' => 1,
@@ -1161,7 +1162,7 @@ class User extends AppModel
         $this->save($admin);
         if (!empty(Configure::read("Security.advanced_authkeys"))) {
             $newKey = [
-                'authkey' => $authKey,
+                'authkey' => $authKeyNew,
                 'user_id' => 1,
                 'comment' => 'Initial auto-generated key',
                 'allowed_ips' => null,
@@ -1169,7 +1170,7 @@ class User extends AppModel
             $this->AuthKey->create();
             $this->AuthKey->save($newKey);
         }
-        return $authKey;
+        return empty(Configure::read("Security.advanced_authkeys")) ? $authKeyOld : $authKeyNew;
     }
 
     public function resetAllSyncAuthKeysRouter($user, $jobId = false)
@@ -1362,13 +1363,9 @@ class User extends AppModel
      */
     public function getGpgPublicKey()
     {
-        $email = Configure::read('GnuPG.email');
-        if (!$email) {
-            throw new Exception("Configuration option 'GnuPG.email' is not set, public key cannot be exported.");
-        }
-
         $cryptGpg = $this->initializeGpg();
-        $fingerprint = $cryptGpg->getFingerprint($email);
+        $this->CryptoGraphicKey = ClassRegistry::init('CrytpographicKey');
+        $fingerprint = $this->CryptoGraphicKey->ingestInstanceKey();
         if (!$fingerprint) {
             return null;
         }
@@ -2173,18 +2170,22 @@ class User extends AppModel
         $token = RandomTool::random_str(true, 40);
         RedisTool::init()->set('misp:forgot:' . $token, $user['User']['id'], ['nx', 'ex' => 600]);
         $baseurl = Configure::check('MISP.external_baseurl') ? Configure::read('MISP.external_baseurl') : Configure::read('MISP.baseurl');
-        $body = __(
-            "Dear MISP user,\n\nyou have requested a password reset on the MISP instance at %s. Click the link below to change your password.\n\n%s\n\nThe link above is only valid for 10 minutes, feel free to request a new one if it has expired.\n\nIf you haven't requested a password reset, reach out to your admin team and let them know that someone has attempted it in your stead.\n\nMake sure you keep the contents of this e-mail confidential, do NOT ever forward it as it contains a reset token that is equivalent of a password if acted upon. The IP used to trigger the request was: %s\n\nBest regards,\nYour MISP admin team",
-            $baseurl,
-            $baseurl . '/users/password_reset/' . $token,
-            $ip
-        );
-        $bodyNoEnc = __(
-            "Dear MISP user,\n\nyou have requested a password reset on the MISP instance at %s, however, no valid encryption key was found for your user and thus we cannot deliver your reset token. Please get in touch with your org admin / with an instance site admin to ask for a reset.\n\nThe IP used to trigger the request was: %s\n\nBest regards,\nYour MISP admin team",
-            $baseurl,
-            $ip
-        );
-        $this->sendEmail($user, $body, $bodyNoEnc, __('MISP password reset'));
+        $default_forgot_email = [];
+        $default_forgot_email['enc'] = Configure::read('MISP.forgotPasswordText') ? 
+            Configure::read('MISP.default_forgot_email') :
+                'Dear MISP user,\n\nyou have requested a password reset on the MISP instance at $misp. Click the link below to change your password.\n\n\$reset_link\n\nThe link above is only valid for 10 minutes, feel free to request a new one if it has expired.\n\nIf you haven\'t requested a password reset, reach out to your admin team and let them know that someone has attempted it in your stead.\n\nMake sure you keep the contents of this e-mail confidential, do NOT ever forward it as it contains a reset token that is equivalent of a password if acted upon. The IP used to trigger the request was: $ip\n\nBest regards,\nYour MISP admin team';
+        $default_forgot_email['no_enc'] = Configure::read('MISP.default_forgot_email_no_enc') ? 
+            Configure::read('MISP.forgotPasswordTextNoEnc') :
+                'Dear MISP user,\n\nyou have requested a password reset on the MISP instance at $misp, however, no valid encryption key was found for your user and thus we cannot deliver your reset token. Please get in touch with your org admin / with an instance site admin to ask for a reset.\n\nThe IP used to trigger the request was: $ip\n\nBest regards,\nYour MISP admin team';
+        $body = [];
+        foreach ($default_forgot_email as $key => $value) {
+            $body[$key] = str_replace(
+                ['$misp', '$reset_link', '$ip'],
+                [$baseurl, $baseurl . '/users/password_reset/' . $token, $ip],
+                $value
+            );
+        }
+        $this->sendEmail($user, $body['enc'], $body['no_enc'], __('MISP password reset'));
         return true;
     }
 
