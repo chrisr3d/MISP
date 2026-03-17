@@ -749,11 +749,19 @@
                 "default_category": "Payload delivery",
                 "to_ids": 1
             },
+            "edge-extension-id": {
+                "default_category": "Payload delivery",
+                "to_ids": 1
+            },
             "cortex": {
                 "default_category": "External analysis",
                 "to_ids": 0
             },
             "boolean": {
+                "default_category": "Other",
+                "to_ids": 0
+            },
+            "uuid": {
                 "default_category": "Other",
                 "to_ids": 0
             },
@@ -954,8 +962,10 @@
             "mobile-application-id",
             "azure-application-id",
             "chrome-extension-id",
+            "edge-extension-id",
             "cortex",
             "boolean",
+            "uuid",
             "anonymised",
             "onion-address"
         ],
@@ -1102,6 +1112,7 @@
                 "azure-application-id",
                 "mobile-application-id",
                 "chrome-extension-id",
+                "edge-extension-id",
                 "whois-registrant-email",
                 "anonymised",
                 "onion-address"
@@ -1242,6 +1253,7 @@
                 "azure-application-id",
                 "mobile-application-id",
                 "chrome-extension-id",
+                "edge-extension-id",
                 "other",
                 "mime-type",
                 "anonymised"
@@ -1489,7 +1501,8 @@
                 "boolean",
                 "anonymised",
                 "pgp-public-key",
-                "pgp-private-key"
+                "pgp-private-key",
+                "uuid"
             ]
         }
     }

@@ -768,7 +768,7 @@ class Correlation extends AppModel
             $ip_version = filter_var($ip, FILTER_VALIDATE_IP, FILTER_FLAG_IPV4) ? 4 : 6;
             $cidrList = $this->getCidrList();
             foreach ($cidrList as $cidr) {
-                if (str_contains($cidr, '.')) {
+                if (filter_var(explode("/",$cidr)[0], FILTER_VALIDATE_IP, FILTER_FLAG_IPV4)) {
                     if ($ip_version === 4 && $this->__ipv4InCidr($ip, $cidr)) {
                         $ipValues[] = $cidr;
                     }
@@ -1144,6 +1144,28 @@ class Correlation extends AppModel
             return [];
         }
         return $relatedEventIds;
+    }
+
+    /**
+     * Fetch correlations scoped to a specific set of
+     * attribute IDs. Returns correlated attributes from
+     * other events, grouped by the source attribute ID.
+     *
+     * @param array $user
+     * @param int $eventId
+     * @param array $sgids Authorised sharing group IDs
+     * @param array $attributeIds Attribute IDs to scope
+     * @return array Keyed by source attribute ID
+     */
+    public function getAttributeCorrelations(
+        array $user,
+        $eventId,
+        array $sgids,
+        array $attributeIds
+    ) {
+        return $this->runGetAttributeCorrelations(
+            $user, $eventId, $sgids, $attributeIds
+        );
     }
 
     public function attachExclusionsToOverCorrelations($data)

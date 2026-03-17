@@ -322,7 +322,7 @@ class AttributeValidationTool
                 }
                 return __('The input doesn\'t match the expected format (expected: 40 or more hexadecimal characters)');
             case 'http-method':
-                if (preg_match("#(OPTIONS|GET|HEAD|POST|PUT|DELETE|TRACE|CONNECT|PROPFIND|PROPPATCH|MKCOL|COPY|MOVE|LOCK|UNLOCK|VERSION-CONTROL|REPORT|CHECKOUT|CHECKIN|UNCHECKOUT|MKWORKSPACE|UPDATE|LABEL|MERGE|BASELINE-CONTROL|MKACTIVITY|ORDERPATCH|ACL|PATCH|SEARCH)#", $value)) {
+                if (preg_match("#^(OPTIONS|GET|HEAD|POST|PUT|DELETE|TRACE|CONNECT|PROPFIND|PROPPATCH|MKCOL|COPY|MOVE|LOCK|UNLOCK|VERSION-CONTROL|REPORT|CHECKOUT|CHECKIN|UNCHECKOUT|MKWORKSPACE|UPDATE|LABEL|MERGE|BASELINE-CONTROL|MKACTIVITY|ORDERPATCH|ACL|PATCH|SEARCH)$#", $value)) {
                     return true;
                 }
                 return __('Unknown HTTP method.');
@@ -571,8 +571,7 @@ class AttributeValidationTool
             case 'twitter-id':
             case 'dkim':
             case 'dkim-signature':
-            case 'favicon-mmh3':
-            case 'chrome-extension-id':
+            case 'favicon-mmh3':         
             case 'mobile-application-id':
             case 'azure-application-id':
             case 'named pipe':
@@ -636,6 +635,10 @@ class AttributeValidationTool
                 return __('AS number have to be integer between 1 and 4294967295');
             case 'uuid':
                 return preg_match('/[0-9a-fA-F]{8}(-[0-9a-fA-F]{4}){3}-[0-9a-fA-F]{12}$/', $value) === 1;
+            case 'chrome-extension-id':
+                return preg_match('/^[a-p]{32}$/', $value) === 1;
+            case 'edge-extension-id':
+                return preg_match('/^[a-p]{32}$/', $value) === 1;                   
         }
         throw new InvalidArgumentException("Unknown attribute type $type.");
     }

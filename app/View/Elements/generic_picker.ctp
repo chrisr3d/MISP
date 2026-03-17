@@ -25,6 +25,7 @@
         'flag_redraw_chosen' => false, // should chosen picker be redraw at drawing time
         'redraw_debounce_time' => 200,
         'autofocus' => true,
+        'auto_open' => false, // whether to automatically open dropdown for single-select on autofocus
     );
     /**
     * Supported default option in <Option> fields:
@@ -71,6 +72,43 @@ function setupChosen(id, redrawChosen) {
     var $elem = $('#'+id);
     var chosen_options = <?php echo json_encode($defaults['chosen_options']); ?>;
     $elem.chosen(chosen_options);
+    
+    // Custom sorting to prioritize prefix matches in search results
+    var chosenInstance = $elem.data('chosen');
+    if (chosenInstance && chosenInstance.search_field) {
+        chosenInstance.search_field.on('keyup', function() {
+            setTimeout(function() {
+                var searchTerm = chosenInstance.search_field.val().toLowerCase();
+                if (searchTerm && chosenInstance.search_results) {
+                    var $results = chosenInstance.search_results.find('li.active-result:not(.no-results)');
+                    var items = $results.get();
+                    
+                    // Sort items: prefix matches first, then other matches
+                    items.sort(function(a, b) {
+                        var textA = $(a).text().toLowerCase();
+                        var textB = $(b).text().toLowerCase();
+                        var startsWithA = textA.indexOf(searchTerm) === 0;
+                        var startsWithB = textB.indexOf(searchTerm) === 0;
+                        
+                        if (startsWithA && !startsWithB) return -1;
+                        if (!startsWithA && startsWithB) return 1;
+                        return 0; // Keep original order for same priority
+                    });
+                    
+                    // Re-append sorted items
+                    $.each(items, function(idx, item) {
+                        chosenInstance.search_results.append(item);
+                    });
+                    
+                    // Reset highlighting to first item
+                    chosenInstance.search_results.find('li.highlighted').removeClass('highlighted');
+                    chosenInstance.search_results.find('li.active-result:first').addClass('highlighted');
+                    chosenInstance.result_highlight = chosenInstance.search_results.find('li.active-result:first');
+                }
+            }, 0);
+        });
+    }
+    
     if (!$elem.prop('multiple')) { // not multiple, selection trigger next event
         $elem.change(function(event, selected) {
             var fn = $elem.data('functionname');
@@ -109,7 +147,8 @@ function setupChosen(id, redrawChosen) {
     if ($elem.prop('multiple')) {
         $elem.filter('[autofocus]').trigger('chosen:open');
     } else {
-        $elem.filter('[autofocus]').trigger('chosen:activate');
+        var autoOpen = <?php echo json_encode($defaults['auto_open']); ?>;
+        $elem.filter('[autofocus]').trigger(autoOpen ? 'chosen:open' : 'chosen:activate');
     }
 
     // Hide popover when pressing ESC on closed chosen
