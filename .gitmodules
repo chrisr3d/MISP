@@ -4,8 +4,8 @@
 	branch = 2.x
 [submodule "PyMISP"]
 	path = PyMISP
-	url = https://github.com/MISP/PyMISP.git
-	branch = main
+	url = https://github.com/chrisr3d/pymisp.git
+	branch = testlive
 [submodule "app/files/taxonomies"]
 	path = app/files/taxonomies
 	url = https://github.com/MISP/misp-taxonomies.git
