@@ -38,8 +38,8 @@ class NavbarHelper extends AppHelper {
         $right = $this->filterMenu($right);
 
         // Highlight the menu of the current page
-        $left = $this->markActive($left, $currentController, $currentAction);
-        $right = $this->markActive($right, $currentController, $currentAction);
+        $left = $this->markActive($left, $currentController);
+        $right = $this->markActive($right, $currentController);
 
         return compact('left', 'right');
     }
@@ -71,7 +71,8 @@ class NavbarHelper extends AppHelper {
                     ],
                 ]
             ],
-            [
+            // To implement later, when the object view will be ready
+            /* [
                 'type' => 'group',
                 'label' => __('Objects'),
                 'icon' => 'fas fa-cubes',
@@ -91,7 +92,7 @@ class NavbarHelper extends AppHelper {
                         'icon' => 'fas fa-list'
                     ]
                 ]
-            ],
+            ], */
             [
                 'type' => 'group',
                 'label' => __('Attributes'),
@@ -125,8 +126,8 @@ class NavbarHelper extends AppHelper {
             [
                 'type' => 'group',
                 'label' => __('Event Reports'),
-                'url' => $baseurl . '/reports/index',
-                'controller' => 'reports',
+                'url' => $baseurl . '/event_reports/index',
+                'controller' => 'event_reports',
                 'action' => 'index',
                 'icon' => 'fas fa-file-alt',
             ],
@@ -146,23 +147,23 @@ class NavbarHelper extends AppHelper {
                 'children' => [
                     [
                         'label' => __('View'),
-                        'url' => $baseurl . '/proposals/index',
-                        'controller' => 'proposals',
+                        'url' => $baseurl . '/shadow_attributes/index',
+                        'controller' => 'shadow_attributes',
                         'action' => 'index',
                         'icon' => 'fas fa-eye'
                     ],
                     [
                         'label' => __('Events with Proposals'),
-                        'url' => $baseurl . '/proposals/search',
-                        'controller' => 'proposals',
+                        'url' => $baseurl . '/shadow_attributes/search',
+                        'controller' => 'shadow_attributes',
                         'action' => 'search',
                         'icon' => 'fas fa-clipboard-question'
                     ],
                     [
                         'label' => __('Delegation Requests'),
-                        'url' => $baseurl . '/proposals/delegationRequests',
-                        'controller' => 'proposals',
-                        'action' => 'delegationRequests',
+                        'url' => $baseurl . '/event_delegations/index',
+                        'controller' => 'event_delegations',
+                        'action' => 'index',
                         'requirement' => $this->Acl->canAccess('event_delegations', 'index'),
                         'icon' => 'fas fa-handshake'
                     ]
@@ -205,14 +206,6 @@ class NavbarHelper extends AppHelper {
                 'icon' => 'fas fa-tags',
                 'children' => [
                     [
-                        'label' => __('Add Tag'),
-                        'url' => $baseurl . '/tags/add',
-                        'controller' => 'tags',
-                        'action' => 'add',
-                        'requirement' => $this->Acl->canAccess('tags', 'add'),
-                        'icon' => 'fas fa-plus'
-                    ],
-                    [
                         'label' => __('List Tags'),
                         'url' => $baseurl . '/tags/index',
                         'controller' => 'tags',
@@ -249,8 +242,8 @@ class NavbarHelper extends AppHelper {
                     ],
                     [
                         'label' => __('List Galaxy Relationships'),
-                        'url' => $baseurl . '/galaxyRelationships/index',
-                        'controller' => 'galaxyRelationships',
+                        'url' => $baseurl . '/galaxy_cluster_relations/index',
+                        'controller' => 'galaxy_cluster_relations',
                         'action' => 'index',
                         'icon' => 'fas fa-project-diagram'
                     ]
@@ -295,8 +288,31 @@ class NavbarHelper extends AppHelper {
                         'label' => __('List Object Templates'),
                         'url' => $baseurl . '/objectTemplates/index',
                         'controller' => 'objectTemplates',
-                        'action' => 'templex',
+                        'action' => 'index',
                         'icon' => 'fas fa-cubes'
+                    ],
+                    [
+                        'label' => __('List Object Relationships'),
+                        'url' => $baseurl . '/object_relationships/index',
+                        'controller' => 'object_relationships',
+                        'action' => 'index',
+                        'icon' => 'fas fa-object-ungroup'
+                    ],
+                    [
+                        'label' => __('Event Templates'),
+                        'url' => $baseurl . '/event_templates/index',
+                        'controller' => 'event_templates',
+                        'action' => 'index',
+                        'requirement' => $this->Acl->canAccess('eventTemplates', 'index'),
+                        'icon' => 'fas fa-file-invoice'
+                    ],
+                    [
+                        'label' => __('Add Event Template'),
+                        'url' => $baseurl . '/event_templates/add',
+                        'controller' => 'event_templates',
+                        'action' => 'add',
+                        'requirement' => $this->Acl->canAccess('eventTemplates', 'add'),
+                        'icon' => 'fas fa-plus'
                     ]
                 ]
             ],
@@ -490,9 +506,9 @@ class NavbarHelper extends AppHelper {
             [
                 'type' => 'group',
                 'label' => __('Event ID Translator'),
-                'url' => $baseurl . '/eventIdTranslator/index',
-                'controller' => 'eventIdTranslator',
-                'action' => 'index',
+                'url' => $baseurl . '/servers/idTranslator',
+                'controller' => 'servers',
+                'action' => 'idTranslator',
                 'icon' => 'fas fa-exchange-alt',
             ]
         ];
@@ -544,9 +560,9 @@ class NavbarHelper extends AppHelper {
                     ],
                     [
                         'label' => __('Contact User'),
-                        'url' => $baseurl . '/admin/users/mail',
+                        'url' => $baseurl . '/admin/users/email',
                         'controller' => 'users',
-                        'action' => 'mail',
+                        'action' => 'email',
                         'requirement' => $isAdmin,
                         'icon' => 'fas fa-envelope'
                     ],
@@ -757,7 +773,7 @@ class NavbarHelper extends AppHelper {
             [
                 'type' => 'group',
                 'label' => __('Search logs'),
-                'url' => $baseurl . '/admin/logs/search',
+                'url' => $baseurl . '/logs/search',
                 'controller' => 'logs',
                 'action' => 'index',
                 'requirement' => $this->Acl->canAccess('logs', 'search'),
@@ -825,6 +841,8 @@ class NavbarHelper extends AppHelper {
 
     private function buildResourcesMenu(array $context, $baseurl)
     {
+        extract($context);
+
         $resourcesChildren = [
             [
                 'type' => 'group',
@@ -860,6 +878,12 @@ class NavbarHelper extends AppHelper {
                         'icon' => 'fas fa-gavel'
                     ]
                 ]
+            ],
+            [
+                'type' => 'group',
+                'label' => __('Themes'),
+                'icon' => 'fas fa-palette',
+                'children' => $this->buildThemesMenu($context)
             ]
         ];
         return [
@@ -868,6 +892,38 @@ class NavbarHelper extends AppHelper {
                 'icon' => 'fas fa-circle-info',
                 'children' => $resourcesChildren
         ];
+    }
+
+    private function buildThemesMenu(array $context)
+    {
+        extract($context);
+
+        $themes = $context['themes'] ?? [];
+        $theme = $context['theme'] ?? null;
+        $themesEnabled = $context['themesEnabled'] ?? false;
+
+        $items = [];
+
+        if (!$themesEnabled) {
+            $items[] = [
+                'type' => 'message',
+                'label' => __('Themes are not yet enabled.'),
+                'description' => __('Contact your MISP administrator to set MISP.enable_themes to 1.')
+            ];
+        }
+
+        foreach ($themes as $tObj) {
+
+            $items[] = [
+                'type' => 'theme',
+                'label' => $tObj->label,
+                'theme' => $tObj->name,
+                'description' => $tObj->description ?? '',
+                'on' => $theme === $tObj->name
+            ];
+        }
+
+        return $items;
     }
 
     private function buildBookmarksMenu(array $context, $baseurl)
@@ -889,6 +945,7 @@ class NavbarHelper extends AppHelper {
         //TO DO
         $bookmarksChildren[] = [
             'label' => __('Set this page as homepage'),
+            'url' => '',
             'icon' => 'fas fa-home'
         ];
 
@@ -937,7 +994,7 @@ class NavbarHelper extends AppHelper {
             ]
         ];
 
-        $orgLogo = $this->OrgImg->getOrgLogo($me, 20);
+        $orgLogo = $this->OrgImg->getOrgLogoV2($me, 20);
 
         // Remove the <a> wrapper of the logo
         $orgLogo = preg_replace('/<a[^>]*>(.*?)<\/a>/i', '$1', $orgLogo);
@@ -1022,7 +1079,7 @@ class NavbarHelper extends AppHelper {
     /**
     * Recursively mark active menu items (robust controller/action matching)
     */
-    private function markActive(array $items, $currentController, $currentAction = null)
+    private function markActive(array $items, $currentController)
     {
         foreach ($items as &$item) {
 
@@ -1031,15 +1088,7 @@ class NavbarHelper extends AppHelper {
             // Direct match on controller
             if (!empty($item['controller'])) {
                 if (strtolower($item['controller']) === strtolower($currentController)) {
-
-                    // If action is defined, check it too
-                    if (!empty($item['action']) && $currentAction !== null) {
-                        if (strtolower($item['action']) === strtolower($currentAction)) {
-                            $item['active'] = true;
-                        }
-                    } else {
-                        $item['active'] = true;
-                    }
+                    $item['active'] = true;
                 }
             }
 
@@ -1048,7 +1097,6 @@ class NavbarHelper extends AppHelper {
                 $item['children'] = $this->markActive(
                     $item['children'],
                     $currentController,
-                    $currentAction
                 );
 
                 foreach ($item['children'] as $child) {

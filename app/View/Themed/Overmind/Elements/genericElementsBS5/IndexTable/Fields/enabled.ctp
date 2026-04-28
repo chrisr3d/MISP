@@ -1,9 +1,30 @@
 <?php
-$value = Hash::get($row, $field['data_path']);
+/*
+ * enabled.ctp
+ *
+ * Expected:
+ * $data_path => item.enabled'
+ */
 
-if (!empty($value)) {
-    echo '<div class="d-flex align-items-center"><span class="fas fa-check-circle text-success" style="font-size: 1.5em;" title="Enabled"></span></div>';
-} else {
-    echo '<div class="d-flex align-items-center"><span class="fas fa-times-circle text-danger" style="font-size: 1.5em;" title="Disabled"></span></div>';
+$enabled = Hash::extract($row, $field['data_path']);
+
+if (empty($enabled)) {
+    return;
 }
+$boolean = !empty($field['boolean_reverse']) ? !$enabled[0] : $enabled[0];
+$isCard = isset($viewMode) && $viewMode === 'card';
+
+echo $this->element(
+    'genericElementsBS5/Badges/boolean',
+    [
+        'boolean' => $boolean,
+        'full' => $isCard,
+        'true' => __('Enabled'),
+        'false' => __('Disabled'),
+        'trueColor'  => 'success',
+        'falseColor' => 'danger',
+        'trueIcon'   => 'fa-check-circle',
+        'falseIcon'  => 'fa-times-circle'
+    ]
+);
 ?>

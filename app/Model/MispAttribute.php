@@ -121,6 +121,189 @@ class MispAttribute extends AppModel
     // if these then a category may have upload
     const UPLOAD_DEFINITIONS = ['attachment'];
 
+    // Curated list of MISP object templates that can be used as the target
+    // container for an upload via /attributes/add_attachment. Split into two
+    // pools depending on whether the "is a malware sample" checkbox is set.
+    // The first entry in each pool is the default and reflects the current
+    // implementation (a generic `file` object for malware samples, a flat
+    // `attachment` attribute with no object for benign uploads).
+    const ATTACHMENT_OBJECT_TEMPLATES = [
+        'malicious' => [
+            [
+                'name' => 'file',
+                'uuid' => '688c46fb-5edb-40a3-8273-1af7923e2215',
+                'label' => 'Generic file (default)',
+                'description' => 'File object describing a file with meta-information',
+                'default' => true,
+            ],
+            [
+                'name' => 'apk',
+                'uuid' => '501bf5cf-28e0-4a5a-8056-e811c6447cfa',
+                'label' => 'APK (Android package)',
+                'description' => 'Apk object describing a file with meta-information',
+            ],
+            [
+                'name' => 'lnk',
+                'uuid' => 'ad13533e-1853-4da0-a111-33a7ce7e6c09',
+                'label' => 'LNK (Windows shortcut)',
+                'description' => 'LNK object describing a Windows LNK binary file (aka Windows shortcut)',
+            ],
+            [
+                'name' => 'cs-beacon-config',
+                'uuid' => 'd17355ef-ca1f-4b5a-86cd-65d877991f54',
+                'label' => 'Cobalt Strike beacon config',
+                'description' => 'Cobalt Strike Beacon Config',
+            ],
+            [
+                'name' => 'malware-config',
+                'uuid' => '8200b79b-1d8c-49a8-9a63-7710e613c059',
+                'label' => 'Malware config',
+                'description' => 'Malware configuration recovered or extracted from a malicious binary',
+            ],
+            [
+                'name' => 'data-url',
+                'uuid' => '8b478c14-bfe7-4f99-b370-753637bf60fe',
+                'label' => 'Data URL',
+                'description' => 'URL prefixed with the data: scheme, used to embed inline files in documents',
+            ],
+            [
+                'name' => 'artifact',
+                'uuid' => '0a46df3a-bd9b-472c-a1e7-6aede7094483',
+                'label' => 'Artifact (raw bytes)',
+                'description' => 'Artifact object capturing an array of bytes as a base64-encoded string',
+            ],
+            [
+                'name' => 'exploit',
+                'uuid' => '611a25d5-d8aa-4dde-b9c8-c084e786ebf3',
+                'label' => 'Exploit',
+                'description' => 'Exploit object describing a program used to abuse one or more vulnerabilities',
+            ],
+            [
+                'name' => 'exploit-poc',
+                'uuid' => 'e3bdeef8-78c3-48d8-9c2f-1be5e5bde93b',
+                'label' => 'Exploit PoC',
+                'description' => 'Exploit-poc object describing a proof of concept or exploit of a vulnerability',
+            ],
+            [
+                'name' => 'script',
+                'uuid' => '6bce7d01-dbec-4054-b3c2-3655a19382e2',
+                'label' => 'Script',
+                'description' => 'Object describing a computer program written to be run in a special run-time environment',
+            ],
+        ],
+        'non_malicious' => [
+            [
+                'name' => null,
+                'uuid' => null,
+                'label' => 'Attachment attribute (default)',
+                'description' => 'Store the file as a flat attachment attribute without wrapping it in an object',
+                'default' => true,
+            ],
+            [
+                'name' => 'file',
+                'uuid' => '688c46fb-5edb-40a3-8273-1af7923e2215',
+                'label' => 'Generic file',
+                'description' => 'File object describing a file with meta-information',
+            ],
+            [
+                'name' => 'image',
+                'uuid' => 'ca78ec03-3321-4ed3-9840-9bfd52b91d82',
+                'label' => 'Image',
+                'description' => 'Object describing an image file',
+            ],
+            [
+                'name' => 'meme-image',
+                'uuid' => '6f6c3b61-f085-475e-93df-2e2d9c2fb0f6',
+                'label' => 'Meme image',
+                'description' => 'Object describing a meme (image)',
+            ],
+            [
+                'name' => 'ocrized-image',
+                'uuid' => 'fc2abf07-1228-4a14-8633-f39030b0220c',
+                'label' => 'OCRized image',
+                'description' => 'OCRized image, including the original image, extracted text, and context',
+            ],
+            [
+                'name' => 'forged-document',
+                'uuid' => '7e927620-b97c-4b00-98c0-8c0184d83d21',
+                'label' => 'Forged document',
+                'description' => 'Object describing a forged document',
+            ],
+            [
+                'name' => 'leaked-document',
+                'uuid' => 'ea145ecd-b3c2-4f57-ac11-c16e883c4247',
+                'label' => 'Leaked document',
+                'description' => 'Object describing a leaked document',
+            ],
+            [
+                'name' => 'sandbox-report',
+                'uuid' => '4d3fffd2-cd07-4357-96e0-a51c988faaef',
+                'label' => 'Sandbox report',
+                'description' => 'Sandbox report',
+            ],
+            [
+                'name' => 'report',
+                'uuid' => '70a68471-df22-4e3f-aa1a-5a3be19f82df',
+                'label' => 'Report',
+                'description' => 'Report object describing a report along with its metadata',
+            ],
+            [
+                'name' => 'risk-assessment-report',
+                'uuid' => '72989321-6866-40c6-a9b5-4c5869ec2a76',
+                'label' => 'Risk assessment report',
+                'description' => 'Risk assessment report object',
+            ],
+            [
+                'name' => 'phishing',
+                'uuid' => '2dad6f9d-d425-4217-8fda-0b0a2d815307',
+                'label' => 'Phishing',
+                'description' => 'Phishing template describing a phishing website and its analysis',
+            ],
+            [
+                'name' => 'email',
+                'uuid' => 'a0c666e0-fc65-4be8-b48f-3423d788b552',
+                'label' => 'Email',
+                'description' => 'Email object describing an email with meta-information',
+            ],
+            [
+                'name' => 'paste',
+                'uuid' => 'cedc055c-78aa-49a4-bfd7-4cc30cecef12',
+                'label' => 'Paste',
+                'description' => 'Paste or similar post from a website',
+            ],
+            [
+                'name' => 'iot-firmware',
+                'uuid' => '8bafb8fc-d986-4a58-b22b-6b8c7c0e8b70',
+                'label' => 'IoT firmware',
+                'description' => 'A firmware for an IoT device',
+            ],
+            [
+                'name' => 'original-imported-file',
+                'uuid' => '4cd560e9-2cfe-40a1-9964-7b2e797ecac5',
+                'label' => 'Original imported file',
+                'description' => 'Object describing the original file used to import data in MISP',
+            ],
+            [
+                'name' => 'geojson',
+                'uuid' => 'b6d67c8b-8d8c-4231-8830-7a159e5195e5',
+                'label' => 'GeoJSON',
+                'description' => 'GeoJSON file containing geographic data structures',
+            ],
+            [
+                'name' => 'gpx',
+                'uuid' => '64ee6f19-f154-45c0-bd9c-e659ff0e30f7',
+                'label' => 'GPX (GPS exchange)',
+                'description' => 'GPX (GPS Exchange Format) file',
+            ],
+            [
+                'name' => 'trusted-timestamp',
+                'uuid' => 'cb84ff28-a488-432e-8ba4-f0d54cc91172',
+                'label' => 'Trusted timestamp',
+                'description' => 'A trusted timestamp',
+            ],
+        ],
+    ];
+
     // skip Correlation for the following types
     const NON_CORRELATING_TYPES = [
         'comment',
@@ -194,7 +377,7 @@ class MispAttribute extends AppModel
     // This helps generate quick filtering for the event view, but we may reuse this and enhance it in the future for other uses (such as the API?)
     const TYPE_GROUPINGS = [
         'file' => ['attachment', 'pattern-in-file', 'filename-pattern', 'md5', 'sha1', 'sha224', 'sha256', 'sha384', 'sha512', 'sha512/224', 'sha512/256', 'sha3-224', 'sha3-256', 'sha3-384', 'sha3-512', 'ssdeep', 'imphash', 'telfhash', 'impfuzzy', 'authentihash', 'vhash', 'pehash', 'tlsh', 'cdhash', 'filename', 'filename|md5', 'filename|sha1', 'filename|sha224', 'filename|sha256', 'filename|sha384', 'filename|sha512', 'filename|sha512/224', 'filename|sha512/256', 'filename|sha3-224', 'filename|sha3-256', 'filename|sha3-384', 'filename|sha3-512', 'filename|authentihash', 'filename|vhash', 'filename|ssdeep', 'filename|tlsh', 'filename|imphash', 'filename|pehash', 'malware-sample', 'x509-fingerprint-sha1', 'x509-fingerprint-sha256', 'x509-fingerprint-md5'],
-        'network' => ['ip-src', 'ip-dst', 'ip-src|port', 'ip-dst|port', 'mac-address', 'mac-eui-64', 'hostname', 'hostname|port', 'domain', 'domain|ip', 'email-dst', 'url', 'uri', 'user-agent', 'http-method', 'AS', 'snort', 'bro', 'zeek',  'pattern-in-traffic', 'x509-fingerprint-md5', 'x509-fingerprint-sha1', 'x509-fingerprint-sha256','ja3-fingerprint-md5', 'jarm-fingerprint', 'favicon-mmh3', 'hassh-md5', 'hasshserver-md5', 'community-id', 'dom-hash'],
+        'network' => ['ip-src', 'ip-dst', 'ip-src|port', 'ip-dst|port', 'mac-address', 'mac-eui-64', 'hostname', 'hostname|port', 'domain', 'domain|ip', 'email-dst', 'url', 'uri', 'user-agent', 'http-method', 'AS', 'snort', 'suricata', 'bro', 'zeek',  'pattern-in-traffic', 'x509-fingerprint-md5', 'x509-fingerprint-sha1', 'x509-fingerprint-sha256','ja3-fingerprint-md5', 'jarm-fingerprint', 'favicon-mmh3', 'hassh-md5', 'hasshserver-md5', 'community-id', 'dom-hash'],
         'financial' => ['btc', 'xmr', 'iban', 'bic', 'bank-account-nr', 'aba-rtn', 'bin', 'cc-number', 'prtn', 'phone-number']
     ];
 
@@ -1106,204 +1289,195 @@ class MispAttribute extends AppModel
         return $data;
     }
 
-    public function set_filter_tags(&$params, $conditions, $options)
-    {
-        // If no tag filters at all, bail early
-        if (empty($params['tags']) && empty($params['event_tags'])) {
+    public function set_filter_tags(
+        &$params, $conditions, $options
+    ) {
+        if (
+            empty($params['tags']) &&
+            empty($params['event_tags'])
+        ) {
             return $conditions;
         }
 
         /** @var Tag $Tag */
-        $Tag     = ClassRegistry::init('Tag');
-        $tag_key = !empty($params['tags']) ? 'tags' : 'event_tags';
+        $Tag = ClassRegistry::init('Tag');
+        $tag_key = !empty($params['tags'])
+            ? 'tags' : 'event_tags';
 
-        // Normalize and look up real tag IDs
-        $params[$tag_key] = $this->dissectArgs($params[$tag_key]);
+        $params[$tag_key] = $this->dissectArgs(
+            $params[$tag_key]
+        );
         $tagArray = [];
-        foreach ([0,1,2] as $op) {
-            $tagArray[$op] = $Tag->fetchTagIdsSimple($params[$tag_key][$op]);
-            // AND-group hack: if any of the requested ANDed tags didn't exist,
-            // force-match-none by setting to [-1]
-            if ($op === 2 && count($params[$tag_key][2]) !== count($tagArray[2])) {
+        foreach ([0, 1, 2] as $op) {
+            $tagArray[$op] = $Tag->fetchTagIdsSimple(
+                $params[$tag_key][$op]
+            );
+            if (
+                $op === 2 &&
+                count($params[$tag_key][2])
+                    !== count($tagArray[2])
+            ) {
                 $tagArray[2] = [-1];
             }
         }
 
-        $attributeHeavyQuery = function($params) {
-            $attributeDrivingFields = ['value', 'type', 'category'];
-            $toReturn = false;
-            foreach ($attributeDrivingFields as $field) {
-                if (isset($params[$field])) {
-                    return true;
-                }
-            }
-            return false;
-        };
-        
+    //
+    // Detect whether the query has selective attribute-
+    // level filters. When it does, MySQL narrows the
+    // outer scan first and correlated EXISTS probes are
+    // cheap. When tags are the sole driver, uncorrelated
+    // IN lets MySQL materialise + semi-join once.
+    //
+    $attributeSelective = false;
+    $selectiveFields = [
+        'value', 'value1', 'value2', 'type',
+        'category', 'object_relation', 'uuid',
+        'timestamp', 'attribute_timestamp',
+        'first_seen', 'last_seen', 'to_ids',
+    ];
+    foreach ($selectiveFields as $f) {
+        if (
+            isset($params[$f]) &&
+            $params[$f] !== '' &&
+            $params[$f] !== false
+        ) {
+            $attributeSelective = true;
+            break;
+        }
+    }
 
     //
-    // 1) Positive OR-tags: event/attribute must have *any* of these tags
+    // 1) Positive OR-tags: element must have *any* of
+    //    these tags (via attribute_tags or event_tags).
     //
     if (!empty($tagArray[0])) {
-
-        // No-match sentinel
         if ($tagArray[0][0] === -1) {
             $conditions[] = ['Event.id' => -1];
         } else {
-
-            $posIds    = array_map('intval', $tagArray[0]);
+            $posIds = array_map('intval', $tagArray[0]);
             $inPosList = implode(',', $posIds);
 
-            //
-            // Attribute-heavy detection: use EXISTS for selective queries
-            //
-            $attributeHeavyQuery = function(array $params) {
-                $fields = [
-                    'value',
-                    'value1',
-                    'value2',
-                    'object_relation',
-                    'uuid',
-                    'timestamp',
-                    'attribute_timestamp',
-                    'first_seen',
-                    'last_seen'
-                ];
-                foreach ($fields as $field) {
-                    if (isset($params[$field]) && $params[$field] !== '' && $params[$field] !== false) {
-                        return true;
-                    }
-                }
-                return false;
-            };
-
-            $isAttributeHeavy = $attributeHeavyQuery($params);
-
-
-            //
-            // ──────────────────────────────────────────────
-            // MODE A: EXISTS (attribute-heavy, selective)
-            // ──────────────────────────────────────────────
-            //
-            if ($isAttributeHeavy) {
-                if ($options['scope'] === 'Event') {
-                    // Event scope: event has tag OR any attribute has tag
-                    $conditions['AND'][] =
-                    "(EXISTS (
-                        SELECT 1
-                        FROM event_tags et_pos
-                        WHERE et_pos.event_id = Event.id
-                        AND et_pos.tag_id   IN ({$inPosList})
+            if ($options['scope'] === 'Event') {
+                $conditions['AND'][] =
+                    "(Event.id IN (
+                        SELECT et.event_id
+                        FROM event_tags et
+                        WHERE et.tag_id IN ({$inPosList})
                     )
-                    OR EXISTS (
-                        SELECT 1
-                        FROM attributes a_pos
-                        JOIN attribute_tags at_pos ON at_pos.attribute_id = a_pos.id
-                        WHERE a_pos.event_id = Event.id
-                        AND at_pos.tag_id  IN ({$inPosList})
+                    OR Event.id IN (
+                        SELECT at.event_id
+                        FROM attribute_tags at
+                        WHERE at.tag_id IN ({$inPosList})
                     ))";
-                } else {
-                    // Attribute scope: attribute has tag OR event has tag
-                    $conditions['AND'][] =
+            } elseif ($attributeSelective) {
+                // Selective mode: correlated EXISTS
+                // probes are cheap when the outer scan
+                // is already narrow. Avoids OR of two
+                // IN subqueries on different columns
+                // which prevents MySQL from using either
+                // index efficiently.
+                $conditions['AND'][] =
                     "(EXISTS (
                         SELECT 1
                         FROM attribute_tags at_pos
-                        WHERE at_pos.attribute_id = Attribute.id
-                        AND at_pos.tag_id      IN ({$inPosList})
+                        WHERE at_pos.attribute_id
+                            = Attribute.id
+                        AND at_pos.tag_id
+                            IN ({$inPosList})
                     )
                     OR EXISTS (
                         SELECT 1
                         FROM event_tags et_pos
-                        WHERE et_pos.event_id = Attribute.event_id
-                        AND et_pos.tag_id    IN ({$inPosList})
+                        WHERE et_pos.event_id
+                            = Attribute.event_id
+                        AND et_pos.tag_id
+                            IN ({$inPosList})
                     ))";
-                }
-
-                //
-                // ──────────────────────────────────────────────
-                // MODE B: UNION (tag-only or non-selective)
-                // ──────────────────────────────────────────────
-                //
             } else {
-                if ($options['scope'] === 'Event') {
-                    // Event scope: by event_id
-                    $subquery = "
-                        SELECT id FROM (
-                            SELECT et.event_id AS id
-                            FROM event_tags et
-                            WHERE et.tag_id IN ({$inPosList})
-                            UNION ALL
-                            SELECT a.event_id AS id
-                            FROM attributes a
-                            JOIN attribute_tags at ON at.attribute_id = a.id
-                            WHERE at.tag_id IN ({$inPosList})
-                        ) AS t
-                    ";
-                    $conditions['AND'][] = "Event.id IN ({$subquery})";
-                } else {
-                    // Attribute scope: by attribute_id
-                    $subquery = "
-                        SELECT id FROM (
-                            SELECT at.attribute_id AS id
-                            FROM attribute_tags at
-                            WHERE at.tag_id IN ({$inPosList})
-                            UNION ALL
-                            SELECT a2.id
-                            FROM attributes a2
-                            JOIN event_tags et ON et.event_id = a2.event_id
-                            WHERE et.tag_id IN ({$inPosList})
-                        ) AS t
-                    ";
-                    $conditions['AND'][] = "Attribute.id IN ({$subquery})";
-                }
+                // Tag-only mode: uncorrelated IN lets
+                // MySQL materialise each set once and
+                // semi-join, avoiding per-row probes
+                // across the full table.
+                $conditions['AND'][] =
+                    "(Attribute.id IN (
+                        SELECT at.attribute_id
+                        FROM attribute_tags at
+                        WHERE at.tag_id
+                            IN ({$inPosList})
+                    )
+                    OR Attribute.event_id IN (
+                        SELECT et.event_id
+                        FROM event_tags et
+                        WHERE et.tag_id
+                            IN ({$inPosList})
+                    ))";
             }
         }
     }
 
     //
-    // 2) Negative tags (exclude elements that have any tag in tagArray[1])
+    // 2) Negative tags: exclude elements that carry any
+    //    of these tags. Uses NOT EXISTS which can
+    //    short-circuit on first match and avoids the
+    //    NULL-safety issues of NOT IN.
     //
     if (!empty($tagArray[1])) {
-        if (!(count($tagArray[1]) === 1 && $tagArray[1][0] === -1)) {
-
-            $negIds    = array_map('intval', $tagArray[1]);
+        if (
+            !(count($tagArray[1]) === 1
+                && $tagArray[1][0] === -1)
+        ) {
+            $negIds = array_map('intval', $tagArray[1]);
             $inNegList = implode(',', $negIds);
 
             // Event-level negation
-            if ($options['scope'] === 'all' || $options['scope'] === 'Event') {
-                $evtField = ($options['scope'] === 'Event')
-                    ? 'Event.id'
-                    : 'Attribute.event_id';
+            if (
+                $options['scope'] === 'all' ||
+                $options['scope'] === 'Event'
+            ) {
+                $evtField = (
+                    $options['scope'] === 'Event'
+                ) ? 'Event.id' : 'Attribute.event_id';
 
                 $conditions['AND'][] =
-                    "{$evtField} NOT IN (
-                        SELECT event_id
-                        FROM event_tags
-                        WHERE tag_id IN ({$inNegList})
+                    "NOT EXISTS (
+                        SELECT 1
+                        FROM event_tags et_neg
+                        WHERE et_neg.event_id
+                            = {$evtField}
+                        AND et_neg.tag_id
+                            IN ({$inNegList})
                     )";
             }
 
             // Attribute-level negation
-            if (empty($options['skip_neg']) &&
-                ($options['scope'] === 'all' || $options['scope'] === 'Attribute')) {
-
-                $attrField = ($options['scope'] === 'Event')
-                    ? 'Event.id'
-                    : 'Attribute.id';
+            if (
+                empty($options['skip_neg']) &&
+                ($options['scope'] === 'all' ||
+                    $options['scope'] === 'Attribute')
+            ) {
+                $attrField = (
+                    $options['scope'] === 'Event'
+                ) ? 'Event.id' : 'Attribute.id';
 
                 $conditions['AND'][] =
-                    "{$attrField} NOT IN (
-                        SELECT attribute_id
-                        FROM attribute_tags
-                        WHERE tag_id IN ({$inNegList})
+                    "NOT EXISTS (
+                        SELECT 1
+                        FROM attribute_tags at_neg
+                        WHERE at_neg.attribute_id
+                            = {$attrField}
+                        AND at_neg.tag_id
+                            IN ({$inNegList})
                     )";
             }
         }
     }
 
     //
-    // 3) AND-group tags: must have *each* tag in tagArray[2]
-    // ----------------------------------------------------------------------
+    // 3) AND-group tags: must have *each* tag.
+    //    Each tag becomes a separate uncorrelated IN
+    //    subquery — one index seek per tag rather than
+    //    a UNION + derived table per tag.
+    //
     if (!empty($tagArray[2])) {
         if ($tagArray[2][0] === -1) {
             $conditions[] = ['Event.id' => -1];
@@ -1318,28 +1492,42 @@ class MispAttribute extends AppModel
                             FROM event_tags et
                             WHERE et.tag_id = {$t}
                         )";
+                } elseif ($attributeSelective) {
+                    $conditions['AND'][] =
+                        "(EXISTS (
+                            SELECT 1
+                            FROM attribute_tags at_and
+                            WHERE at_and.attribute_id
+                                = Attribute.id
+                            AND at_and.tag_id = {$t}
+                        )
+                        OR EXISTS (
+                            SELECT 1
+                            FROM event_tags et_and
+                            WHERE et_and.event_id
+                                = Attribute.event_id
+                            AND et_and.tag_id = {$t}
+                        ))";
                 } else {
-                    $subquery = "
-                        SELECT id FROM (
-                            SELECT at.attribute_id AS id
+                    $conditions['AND'][] =
+                        "(Attribute.id IN (
+                            SELECT at.attribute_id
                             FROM attribute_tags at
                             WHERE at.tag_id = {$t}
-                            UNION ALL
-                            SELECT a2.id
-                            FROM attributes a2
-                            JOIN event_tags et ON et.event_id = a2.event_id
+                        )
+                        OR Attribute.event_id IN (
+                            SELECT et.event_id
+                            FROM event_tags et
                             WHERE et.tag_id = {$t}
-                        ) AS t
-                    ";
-                    $conditions['AND'][] = "Attribute.id IN ({$subquery})";
+                        ))";
                 }
             }
         }
     }
 
-
     //
-    // 4) Clean up the $params[$tag_key] array for UI/state
+    // 4) Clean up the $params[$tag_key] array for
+    //    UI/state
     //
     $params[$tag_key] = [];
     if (!empty($tagArray[0]) && empty($options['pop'])) {
@@ -1348,7 +1536,9 @@ class MispAttribute extends AppModel
     if (!empty($tagArray[1])) {
         $params[$tag_key]['NOT'] = $tagArray[1];
     }
-    if (!empty($tagArray[2]) && empty($options['pop'])) {
+    if (
+        !empty($tagArray[2]) && empty($options['pop'])
+    ) {
         $params[$tag_key]['AND'] = $tagArray[2];
     }
     if (empty($params[$tag_key])) {
@@ -1713,82 +1903,68 @@ class MispAttribute extends AppModel
 
     public function buildConditions($user)
     {
-        $cacheKey = ($user['Role']['perm_site_admin'] ? '1' : '0') . '-' . $user['org_id'];
+        $cacheKey = ($user['Role']['perm_site_admin']
+            ? '1' : '0') . '-' . $user['org_id'];
         if (isset($this->aclConditionsCache[$cacheKey])) {
             return $this->aclConditionsCache[$cacheKey];
         }
 
-        $conditions = array();
+        $conditions = [];
         if (!$user['Role']['perm_site_admin']) {
-            $sgids = $this->SharingGroup->authorizedIds($user);
-            if (Configure::read('MISP.fetchAttributeLegacyStrategy')) {
-                $org_ownership_condition = ['Event.org_id' => $user['org_id']];
-                $event_lax_distribution_condition = [
-                    'Event.distribution IN' => [1,2,3]
-                ];
-                $event_sharing_group_condition = [
-                    'Event.distribution' => 4,
-                    'Event.sharing_group_id' => $sgids
-                ];
-                if (Configure::read('MISP.unpublishedprivate')) {
-                    $event_lax_distribution_condition['Event.published'] = 1;
-                    $event_sharing_group_condition['Event.published'] = 1;
-                }
-            } else {
-                $subQuery1 = [
-                    'conditions' => ['org_id' => $user['org_id']],
-                    'fields' => ['id']
-                ];
-                $subQuery2 = [
-                    'conditions' => [
-                        'distribution IN' => [1, 2, 3]
-                    ],
-                    'fields' => ['id']
-                ];
-                $subQuery3 = [
-                    'conditions' => [
-                        'Event.distribution' => 4,
-                        'Event.sharing_group_id IN' => $sgids
-                    ],
-                    'fields' => ['id']
-                ];
-                if (Configure::read('MISP.unpublishedprivate')) {
-                    $subQuery2['conditions']['Event.published'] = 1;
-                    $subQuery3['conditions']['Event.published'] = 1;
-                }
-                $org_ownership_condition = $this->subQueryGenerator($this->Event, $subQuery1, 'Attribute.event_id');
-                $event_lax_distribution_condition = $this->subQueryGenerator($this->Event, $subQuery2, 'Attribute.event_id');
-                $event_sharing_group_condition = $this->subQueryGenerator($this->Event, $subQuery3, 'Attribute.event_id');
+            $sgids = $this->SharingGroup
+                ->authorizedIds($user);
+
+            // Use direct conditions on the already-joined
+            // Event table rather than subqueries. The
+            // events table is always joined in
+            // fetchAttributes(), so referencing Event.*
+            // directly avoids redundant subquery overhead.
+            $eventLaxCondition = [
+                'Event.distribution IN' => [1, 2, 3],
+            ];
+            $eventSgCondition = [
+                'Event.distribution' => 4,
+                'Event.sharing_group_id' => $sgids,
+            ];
+            if (Configure::read('MISP.unpublishedprivate')) {
+                $eventLaxCondition['Event.published'] = 1;
+                $eventSgCondition['Event.published'] = 1;
             }
             $conditions = [
                 'OR' => [
-                    $org_ownership_condition,
+                    ['Event.org_id' => $user['org_id']],
                     'AND' => [
                         'OR' => [
-                            $event_lax_distribution_condition,
-                            $event_sharing_group_condition
+                            $eventLaxCondition,
+                            $eventSgCondition,
                         ],
                         [
                             'OR' => [
-                                'Attribute.distribution' => [1, 2, 3, 5],
+                                'Attribute.distribution'
+                                    => [1, 2, 3, 5],
                                 'AND' => [
-                                    'Attribute.distribution' => 4,
-                                    'Attribute.sharing_group_id' => $sgids,
-                                ]
-                            ]
+                                    'Attribute.distribution'
+                                        => 4,
+                                    'Attribute.sharing_group_id'
+                                        => $sgids,
+                                ],
+                            ],
                         ],
                         [
                             'OR' => [
                                 'Attribute.object_id' => 0,
-                                'Object.distribution' => [1, 2, 3, 5],
+                                'Object.distribution'
+                                    => [1, 2, 3, 5],
                                 'AND' => [
-                                    'Object.distribution' => 4,
-                                    'Object.sharing_group_id' => $sgids,
-                                ]
-                            ]
-                        ]
-                    ]
-                ]
+                                    'Object.distribution'
+                                        => 4,
+                                    'Object.sharing_group_id'
+                                        => $sgids,
+                                ],
+                            ],
+                        ],
+                    ],
+                ],
             ];
         }
 
@@ -2544,6 +2720,21 @@ class MispAttribute extends AppModel
      * @param array $hashTypes
      * @return array
      */
+    /**
+     * Thin public wrapper around handleMaliciousRaw() so that the attachment object
+     * builder (and any other caller outside the model) can obtain the encrypt+zip
+     * payload without reaching into private methods.
+     *
+     * @param string   $filename
+     * @param string   $content
+     * @param string[] $hashTypes
+     * @return array  ['success' => bool, 'data_raw' => string|null, 'md5' => ..., 'sha1' => ..., ...]
+     */
+    public function encryptForMalwareSample($filename, $content, array $hashTypes = ['md5', 'sha1', 'sha256'])
+    {
+        return $this->handleMaliciousRaw($filename, $content, $hashTypes);
+    }
+
     private function handleMaliciousRaw($originalFilename, $content, array $hashTypes)
     {
         $attachmentTool = $this->loadAttachmentTool();
@@ -2578,6 +2769,42 @@ class MispAttribute extends AppModel
         }
 
         return false;
+    }
+
+    /**
+     * Returns which advanced-extraction tools are available. Keys are tool names
+     * (pymisp, lief, pydeep, magic) and values are booleans (true = installed).
+     * Empty array when the helper script itself can't be executed.
+     *
+     * @return array<string,bool>
+     */
+    public function advancedExtractionTools()
+    {
+        try {
+            $types = $this->loadAttachmentTool()->checkAdvancedExtractionStatus();
+        } catch (Exception $e) {
+            return [];
+        }
+        $out = [];
+        foreach ($types as $tool => $missing) {
+            // The helper returns `false` to indicate the tool is NOT missing.
+            $out[$tool] = ($missing === false);
+        }
+        return $out;
+    }
+
+    /**
+     * Public wrapper around the advanced extraction helper script so that callers
+     * outside the model (e.g. the attachment object builder) can invoke LIEF-backed
+     * enrichment the same way the simple/advanced malware flow does.
+     *
+     * @param string $filePath
+     * @return array  The JSON-decoded response from generate_file_objects.py.
+     * @throws Exception
+     */
+    public function runAdvancedExtraction($filePath)
+    {
+        return $this->loadAttachmentTool()->advancedExtraction($filePath);
     }
 
     public function resolveHashType($hash)
@@ -2751,6 +2978,26 @@ class MispAttribute extends AppModel
             unset($distributionLevels[4]);
         }
         return array('sgs' => $sgs, 'levels' => $distributionLevels, 'initial' => $initialDistribution);
+    }
+
+    /**
+     * Dispatch an uploaded attachment to the object-template handler that matches the selected pool + UUID.
+     * Returns a normalized payload of the shape:
+     *   ['Attribute' => [], 'Object' => [], 'ObjectReference' => []]
+     *
+     * @param string      $pool          'malicious' | 'non_malicious'
+     * @param string|null $templateUuid  Curated template UUID; null or '' for the non-malicious flat-attachment sentinel.
+     * @param int         $eventId
+     * @param array       $attributeSettings  Posted Attribute fields.
+     * @param string      $filename
+     * @param File        $tmpfile
+     * @return array
+     * @throws InvalidArgumentException  When the pool/UUID pair is not in the curated list or has no handler yet.
+     */
+    public function buildAttachmentPayload($pool, $templateUuid, $eventId, array $attributeSettings, $filename, $tmpfile)
+    {
+        App::uses('AttachmentObjectBuilder', 'Tools');
+        return (new AttachmentObjectBuilder($this))->build($pool, $templateUuid, $eventId, $attributeSettings, $filename, $tmpfile);
     }
 
     public function simpleAddMalwareSample($event_id, $attribute_settings, $filename, $tmpfile)
@@ -3551,11 +3798,28 @@ class MispAttribute extends AppModel
             $loop = true;
         }
         unset($params['page']);
+        // Use cursor-based (ID sliding window) pagination
+        // when looping internally and no explicit sort order
+        // was requested.  Instead of OFFSET N (which must scan
+        // and discard N rows on every page), we filter on
+        // Attribute.id > last_seen_id.  This gives O(1) page
+        // cost regardless of depth.
+        // When the user requested a specific order, fall back
+        // to offset pagination to honour their sort.
+        $useCursor = $loop && empty($params['order']);
+        if ($useCursor) {
+            $params['order'] = 'Attribute.id ASC';
+            unset($params['offset']);
+        }
+        $lastId = 0;
         $totalCount = 0;
         do {
             if (($totalCount + $params['limit']) > $requestedLimit) {
                 $params['limit'] = $requestedLimit - $totalCount;
                 $loop = false;
+            }
+            if ($useCursor && $lastId > 0) {
+                $params['conditions']['Attribute.id >'] = $lastId;
             }
             $incrementTotalBy = $loop ? 0 : 1;
             $results = $this->fetchAttributes($user, $params, $elementCounter, false, $skippedElementsCounter);
@@ -3570,8 +3834,8 @@ class MispAttribute extends AppModel
                 $results = $this->Sightingdb->attachToAttributes($results, $user);
             }
             $results = $this->Allowedlist->removeAllowedlistedFromArray($results, true);
-            //$lastId = 0;
             foreach ($results as $attribute) {
+                $lastId = $attribute['Attribute']['id'];
                 $handlerResult = $exportTool->handler($attribute, $exportToolParams);
                 if ($handlerResult !== '') {
                     $tmpfile->writeWithSeparator($handlerResult, $separator);
@@ -3583,7 +3847,9 @@ class MispAttribute extends AppModel
                     break; // do not continue if we received fewer results than limit
                 }
             }
-            $params['offset'] = (empty($params['offset']) ? 0 : $params['offset']) + $params['limit'];
+            if (!$useCursor) {
+                $params['offset'] = (empty($params['offset']) ? 0 : $params['offset']) + $params['limit'];
+            }
         } while ($loop);
         return $totalCount + $incrementTotalBy;
     }
@@ -3938,7 +4204,7 @@ class MispAttribute extends AppModel
             ),
             'Network activity' => array(
                 'desc' => __('Information about network traffic generated by the malware'),
-                'types' => array('ip-src', 'ip-dst', 'ip-dst|port', 'ip-src|port', 'port', 'hostname', 'domain', 'domain|ip', 'mac-address', 'mac-eui-64', 'email', 'email-dst', 'email-src', 'eppn', 'url', 'uri', 'user-agent', 'http-method', 'AS', 'snort', 'pattern-in-file', 'filename-pattern','stix2-pattern', 'pattern-in-traffic', 'attachment', 'comment', 'text', 'x509-fingerprint-md5', 'x509-fingerprint-sha1', 'x509-fingerprint-sha256', 'ja3-fingerprint-md5', 'jarm-fingerprint', 'hassh-md5', 'hasshserver-md5', 'other', 'hex', 'cookie', 'hostname|port', 'bro', 'zeek', 'anonymised', 'community-id', 'email-subject', 'favicon-mmh3', 'dkim', 'dkim-signature', 'ssh-fingerprint', 'dom-hash', 'onion-address')
+                'types' => array('ip-src', 'ip-dst', 'ip-dst|port', 'ip-src|port', 'port', 'hostname', 'domain', 'domain|ip', 'mac-address', 'mac-eui-64', 'email', 'email-dst', 'email-src', 'eppn', 'url', 'uri', 'user-agent', 'http-method', 'AS', 'snort', 'suricata', 'pattern-in-file', 'filename-pattern','stix2-pattern', 'pattern-in-traffic', 'attachment', 'comment', 'text', 'x509-fingerprint-md5', 'x509-fingerprint-sha1', 'x509-fingerprint-sha256', 'ja3-fingerprint-md5', 'jarm-fingerprint', 'hassh-md5', 'hasshserver-md5', 'other', 'hex', 'cookie', 'hostname|port', 'bro', 'zeek', 'anonymised', 'community-id', 'email-subject', 'favicon-mmh3', 'dkim', 'dkim-signature', 'ssh-fingerprint', 'dom-hash', 'onion-address')
             ),
             'Payload type' => array(
                 'desc' => __('Information about the final payload(s)'),
@@ -3952,7 +4218,7 @@ class MispAttribute extends AppModel
             'External analysis' => array(
                 'desc' => __('Any other result from additional analysis of the malware like tools output'),
                 'formdesc' => __('Any other result from additional analysis of the malware like tools output Examples: pdf-parser output, automated sandbox analysis, reverse engineering report.'),
-                'types' => array('md5', 'sha1', 'sha256', 'sha3-224', 'sha3-256', 'sha3-384', 'sha3-512', 'filename', 'filename|md5', 'filename|sha1', 'filename|sha256', 'filename|sha3-224', 'filename|sha3-256', 'filename|sha3-384', 'filename|sha3-512', 'ip-src', 'ip-dst', 'ip-dst|port', 'ip-src|port', 'mac-address', 'mac-eui-64', 'hostname', 'domain', 'domain|ip', 'url', 'user-agent', 'regkey', 'regkey|value', 'AS', 'snort', 'bro', 'zeek', 'pattern-in-file', 'pattern-in-traffic', 'pattern-in-memory', 'filename-pattern','vulnerability', 'cpe', 'weakness', 'attachment', 'malware-sample', 'link', 'comment', 'text', 'x509-fingerprint-sha1', 'x509-fingerprint-md5', 'x509-fingerprint-sha256', 'ja3-fingerprint-md5', 'jarm-fingerprint', 'hassh-md5', 'hasshserver-md5', 'github-repository', 'other', 'cortex', 'anonymised', 'community-id', 'dom-hash', 'onion-address')
+                'types' => array('md5', 'sha1', 'sha256', 'sha3-224', 'sha3-256', 'sha3-384', 'sha3-512', 'filename', 'filename|md5', 'filename|sha1', 'filename|sha256', 'filename|sha3-224', 'filename|sha3-256', 'filename|sha3-384', 'filename|sha3-512', 'ip-src', 'ip-dst', 'ip-dst|port', 'ip-src|port', 'mac-address', 'mac-eui-64', 'hostname', 'domain', 'domain|ip', 'url', 'user-agent', 'regkey', 'regkey|value', 'AS', 'snort', 'suricata', 'bro', 'zeek', 'pattern-in-file', 'pattern-in-traffic', 'pattern-in-memory', 'filename-pattern','vulnerability', 'cpe', 'weakness', 'attachment', 'malware-sample', 'link', 'comment', 'text', 'x509-fingerprint-sha1', 'x509-fingerprint-md5', 'x509-fingerprint-sha256', 'ja3-fingerprint-md5', 'jarm-fingerprint', 'hassh-md5', 'hasshserver-md5', 'github-repository', 'other', 'cortex', 'anonymised', 'community-id', 'dom-hash', 'onion-address')
             ),
             'Financial fraud' => array(
                 'desc' => __('Financial Fraud indicators'),
@@ -4021,6 +4287,7 @@ class MispAttribute extends AppModel
             'regkey|value' => array('desc' => __("Registry value + data separated by |"), 'default_category' => 'Persistence mechanism', 'to_ids' => 1),
             'AS' => array('desc' => __('Autonomous system'), 'default_category' => 'Network activity', 'to_ids' => 0),
             'snort' => array('desc' => __('An IDS rule in Snort rule-format'), 'formdesc' => __("An IDS rule in Snort rule-format. This rule will be automatically rewritten in the NIDS exports."), 'default_category' => 'Network activity', 'to_ids' => 1),
+            'suricata' => array('desc' => __('An IDS rule in Suricata rule-format'), 'formdesc' => __("An IDS rule in Suricata rule-format. This rule will be automatically rewritten in the NIDS exports."), 'default_category' => 'Network activity', 'to_ids' => 1),
             'bro' => array('desc' => __('An NIDS rule in the Bro rule-format'), 'formdesc' => __("An NIDS rule in the Bro rule-format."), 'default_category' => 'Network activity', 'to_ids' => 1),
             'zeek' => array('desc' => __('An NIDS rule in the Zeek rule-format'), 'formdesc' => __("An NIDS rule in the Zeek rule-format."), 'default_category' => 'Network activity', 'to_ids' => 1),
             'community-id' => array('desc' => __('A community ID flow hashing algorithm to map multiple traffic monitors into common flow id'), 'formdesc' => __("a community ID flow hashing algorithm to map multiple traffic monitors into common flow id"), 'default_category' => 'Network activity', 'to_ids' => 1),
