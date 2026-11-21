@@ -1,151 +1,58 @@
 <?php
+// Title of the index displayed in the header section, leaving it empty will fallback to controller name
+$headerTitle = __('');
 
-$orgList = ['All'];
-foreach ($events as $event) {
-    if (!in_array($event['Org']['name'], $orgList)) {
-        $orgList[] = $event['Org']['name'];
-    }
+// Description displayed under the title in the header section, leave empty if not needed
+$headerDescription = __('');
+
+$headerActions = [];
+// "Add Event → From Template" entry point — Overmind toolbar parity
+// with the default theme (PRD §5.2 F2.1). Renders the searchable
+// picker modal once on the page and adds a header action that opens
+// it via headerSection's link.onClick callbacSk.
+$canPickTemplate = (
+    $this->Acl->canAccess('eventTemplates', 'index')
+    && $this->Acl->canAccess('eventTemplates', 'instantiate')
+);
+
+if ($this->Acl->canAccess('events', 'importEvent')) {
+    $headerActions[] = [
+        'type' => 'modal',
+        'label' => __('Import Event'),
+        'icon' => 'file-import',
+        'url' => $baseurl . '/events/importEvent',
+    ];
 }
 
+if ($canPickTemplate) {
+    $headerActions[] = [
+        'type' => 'modal',
+        'id' => 'event-template-picker-button',
+        'label' => __('From template'),
+        'icon' => 'wand-magic-sparkles',
+        'url' => '#',
+        'onClick' => 'openEventTemplatePicker'
+    ];
+    echo $this->element('eventTemplates/templatePickerModal');
+}
 
-$fields = [
-    [
-        'element' => 'selector',
-        'data_path' => 'Event.id',
-        'card_section' => 'selector',
-        'actions' => [
-            [
-                'type' => 'link',
-                'label' => __('View'),
-                'icon' => 'eye',
-                'url' => $baseurl . '/events/view/%id%'
-            ],
-            [
-                'type' => 'link',
-                'label' => __('Edit'),
-                'icon' => 'pen-to-square',
-                'url' => $baseurl . '/events/edit/%id%'
-            ],
-            [
-                'type' => 'toggle',
-                'label_on' => __('Unpublish'),
-                'label_off' => __('Publish Event'),
-                'icon_on' => 'download text-danger',
-                'icon_off' => 'upload text-success',
-                'url' => 'event.preventDefault();publishPopup(<?= $eventId ?>)',
-                'state_path' => 'Event.published',
-                //'requirement' => $this->Acl->canPublishEvent($event)
-            ]
-        ]
-    ],
-    [
-        'name' => __('ID'),
-        'sort' => 'Event.id',
-        'data_path' => 'Event.id',
-        'element' => 'id',
-        'card_section' => 'meta'
-    ],
-    [
-        'name' => __('Distribution'),
-        'data_path' => 'Event.distribution',
-        'element' => 'distribution',
-        'display' => 'long'
-    ],
-    [
-        'name' => __('Info'),
-        'data_path' => 'Event.info',
-        'card_section' => 'title'
-    ],
-    [
-        'name' => __('Published'),
-        'sort' => 'Event.published',
-        'data_path' => 'Event.published',
-        'element' => 'enabled',
-        'card_section' => 'meta',
-    ],
-    [
-        'name' => __('Organisation'),
-        'sort' => 'Orgc.name',
-        'data_path' => 'Orgc',
-        'element' => 'organisation',
-        'card_section' => 'title'
-    ],
-    [
-        'name' => __('Tags'),
-        'data_path' => 'EventTag',
-        'element' => 'tag',
-        'card_section' => 'tag'
-    ],
-    [
-        'name' => __('Galaxy'),
-        'data_path' => 'GalaxyCluster',
-        'element' => 'galaxy',
-        'card_section' => 'galaxy'
-    ],
-    [
-        'name' => __('Contents'),
-        'data_path' => 'Event',
-        'element' => 'event_contents',
-        'card_section' => 'extra'
-    ],
-];
+if ($this->Acl->canAccess('events', 'add')) {
+    $headerActions[] = [
+        'type' => 'modal',
+        'id' => 'add-event-button',
+        'label' => __('Add Event'),
+        'icon' => 'plus',
+        'url' => $baseurl . '/events/add'
+    ];
+}
 
-// if ($this->Acl->canAccess('noticelists', 'update')) {
-//     $this->set('headerActions', [
-//         [
-//             'url' => $baseurl . '/noticelists/update',
-//             'label' => __('Update Noticelists'),
-//             'icon' => 'sync'
-//         ]
-//     ]);
-// }
+$this->set('headerTitle', $headerTitle);
+$this->set('headerDescription', $headerDescription);
+$this->set('headerActions', $headerActions);
 
-echo $this->element('genericElementsBS5/IndexTable/scaffold', [
-    'scaffold_data' => [
-        'data' => [
-            'data' => $events,
-            'top_bar' => [
-                'pull' => 'right',
-                'children' => [
-                    [
-                        'type' => 'search',
-                        'button' => 'Search',
-                        'placeholder' => 'Search events...'
-                    ],
-                    [
-                        'type' => 'dropdown',
-                        'label' => 'Distribution',
-                        'name' => 'distribution',
-                        'options' => [
-                            '' => 'All',
-                            '0' => 'Your organisation only',
-                            '1' => 'Community',
-                            '2' => 'Connected communities',
-                            '3' => 'All communities'
-                        ]
-                    ],
-                    [
-                        'type' => 'dropdown',
-                        'label' => 'Published',
-                        'name' => 'published',
-                        'options' => [
-                            '' => 'All',
-                            '1' => 'Published',
-                            '0' => 'Not published'
-                        ]
-                    ],
-                    [
-                        'type' => 'dropdown',
-                        'label' => 'Organisation',
-                        'name' => 'org_id',
-                        'options' => [
-                            '' => 'All',   // ← important
-                        ] + $orgList
-                    ]
-                ]
-            ],
-            'fields' => $fields,
-        ]
-    ]
+
+echo $this->element('Events/index', [
+    'events' => $events,
+    'show_user_button' => true,
+    'show_org_button' => true,
 ]);
-?>

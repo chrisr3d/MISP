@@ -3,10 +3,12 @@
 class MispAdminResourceWidget
 {
     public $title = 'MISP Resource Usage';
+    public $category = 'system';
     public $render = 'SimpleList';
     public $width = 2;
     public $height = 2;
     public $params = array();
+    public $schema = array();
     public $description = 'Basic widget showing some server statistics in regards to MISP.';
     public $cacheLifetime = false;
     public $autoRefreshDelay = 3;
@@ -30,12 +32,11 @@ class MispAdminResourceWidget
                 'value' => h($memory_stats)
             );
         }
-        $db_size = $this->Server->query(
-            sprintf(
-                "SELECT table_schema, ROUND(SUM(data_length + index_length) / 1024 / 1024, 1) AS 'size_mb' FROM information_schema.tables WHERE table_schema = '%s' GROUP BY table_schema;",
-                $this->Server->getDataSource()->config['database']
-            )
-        )[0][0]['size_mb'];
+        $db_bytes = 0;
+        foreach ($this->Server->getSchemaInspector()->tableSizes() as $size) {
+            $db_bytes += $size['total_in_bytes'];
+        }
+        $db_size = round($db_bytes / 1024 / 1024, 1);
         $data[] = array(
             'title' => __('MySQL DB disk usage'),
             'value' => h($db_size) . 'M'

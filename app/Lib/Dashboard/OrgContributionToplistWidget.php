@@ -2,6 +2,7 @@
 class OrgContributionToplistWidget
 {
     public $title = 'Contributor Top List (Orgs)';
+    public $category = 'orgs';
     public $render = 'BarChart';
     public $description = 'The top contributors (orgs) in a selected time frame.';
     public $width = 3;
@@ -18,8 +19,18 @@ class OrgContributionToplistWidget
         'filter' => 'A list of filters by organisation meta information (nationality, sector, type, name, uuid, local (- expects a boolean or a list of boolean values)) to include. (dictionary, prepending values with ! uses them as a negation)',
         'limit' => 'Limits the number of displayed tags. Default: 10'
     ];
+    public $schema = [
+        'filter' => [
+            'type' => 'org_meta_filter',
+            'help' => 'Filter by organisation meta-data (sector, type, nationality, name, uuid). Each entry may have "!" prefix to negate.',
+        ],
+    ];
     public $cacheLifetime = null;
     public $autoRefreshDelay = false;
+    // Generic widget cache opt-in (DD-20): cache the payload for 1h.
+    // User-independent aggregate — handler() never touches $user; counts
+    // events grouped by orgc_id across the instance. Config-only key safe.
+    public $cache_duration = 3600;
     private $validFilterKeys = [
         'nationality',
         'sector',
@@ -114,8 +125,16 @@ class OrgContributionToplistWidget
             'fields' => ['Organisation.id', 'Organisation.name'],
             'conditions' => $params['conditions']
         ]);
+        // When a filter is set but matches zero orgs, array_keys($org_ids)
+        // is empty and `Event.orgc_id IN ()` blows up as malformed SQL.
+        // Sentinel `[-1]` matches nothing cleanly — same pattern
+        // TrendingAttributesWidget uses for the equivalent case.
+        $orgcIdList = array_keys($org_ids);
+        if (empty($orgcIdList)) {
+            $orgcIdList = [-1];
+        }
         $conditions = [];
-        $conditions['AND'][] = ['Event.orgc_id IN' => array_keys($org_ids)];
+        $conditions['AND'][] = ['Event.orgc_id IN' => $orgcIdList];
         $timeConditions = $this->timeConditions($options);
         if ($timeConditions) {
             $conditions['AND'][]['AND'] = $timeConditions;
@@ -135,5 +154,36 @@ class OrgContributionToplistWidget
             $results[$org_ids[$org['Event']['orgc_id']]] = $org['Event']['frequency'];
         }
         return ['data' => $results];
+    }
+
+    /**
+     * Naming organisations is this widget's whole purpose, so it is not
+     * scoped - it is withdrawn. `handler()` never reads $user: it counts
+     * `Event.orgc_id` across the entire events table and maps the ids back
+     * to names, so every organisation with any event is named whether or
+     * not the caller can see a single one of them. On an instance running
+     * `Security.hide_organisation_index_from_users` that is the directory
+     * the setting exists to withhold, and `limit` has no upper bound, so
+     * one request returns all of it.
+     *
+     * Refusing rather than filtering is the maintainer's call (2026-08-28):
+     * a leaderboard scoped per viewer is no longer the leaderboard. The
+     * hook is the right lever for that - `Dashboard::loadAllWidgets` drops
+     * the widget from the Add Widget gallery, and `loadWidget` throws for
+     * `renderWidget` / `renderWrapper`, so a board that already carries one
+     * keeps its layout and simply renders nothing in that cell.
+     *
+     * Same predicate as the `organisation_index` dynamic check in
+     * ACLComponent.php:1171, and as the copies in NewOrgsWidget and
+     * OrgsContributorsGeneric. The structural twin
+     * UserContributionToplistWidget has carried the equivalent gate
+     * (`User::canSeeEmails`) for the identities *it* names all along.
+     */
+    public function checkPermissions($user)
+    {
+        if (Configure::read('Security.hide_organisation_index_from_users')) {
+            return !empty($user['Role']['perm_sharing_group']);
+        }
+        return true;
     }
 }

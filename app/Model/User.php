@@ -20,6 +20,8 @@ App::uses('BlowfishConstantPasswordHasher', 'Controller/Component/Auth');
 class User extends AppModel
 {
     private const PERIODIC_USER_SETTING_KEY = 'periodic_notification_filters';
+    private const GPG_PUBLIC_KEY_CACHE_KEY = 'misp:instance_gpg_public_key';
+    private const GPG_PUBLIC_KEY_CACHE_TTL = 180;
     public const PERIODIC_NOTIFICATIONS = ['notification_daily', 'notification_weekly', 'notification_monthly'];
 
     public $displayField = 'email';
@@ -217,8 +219,9 @@ class User extends AppModel
             'finderQuery' => '',
             'counterQuery' => ''
         ),
-        'Post',
-        'UserSetting',
+        'UserSetting' => array(
+            'dependent' => true
+        ),
         'UserLoginProfile'
         // 'AuthKey' - readd once the initial update storm is over
     );
@@ -250,14 +253,38 @@ class User extends AppModel
     /** @var CryptGpgExtended|null|false */
     private $gpg;
 
+    /**
+     * Whether $user may be shown other users' e-mail addresses.
+     *
+     * Site admins always may; everyone else only on an instance that has
+     * opted in with `Security.disclose_user_emails` (default off, and
+     * described as "allow for the user e-mail addresses to be shown to
+     * non site-admin users"). Static so the dashboard widgets, which hold
+     * an auth-user array rather than a model instance, can share it -
+     * NewUsersWidget and UserContributionToplistWidget each carried their
+     * own copy of this expression, and DashboardsController::listTemplates
+     * carried a fourth, different rule that was gated on the render mode.
+     *
+     * @param array $user An auth user array.
+     * @return bool
+     */
+    public static function canSeeEmails(array $user)
+    {
+        if (!empty($user['Role']['perm_site_admin'])) {
+            return true;
+        }
+        return !empty(Configure::read('Security.disclose_user_emails'));
+    }
+
     public function __construct($id = false, $table = null, $ds = null)
     {
         parent::__construct($id, $table, $ds);
 
         // bind AuthKey just when authkey table already exists. This is important for updating from old versions
         if (in_array('auth_keys', $this->getDataSource()->listSources(), true)) {
+            // dependent: a deleted user's keys would otherwise pass to a user given its id again
             $this->bindModel([
-                'hasMany' => ['AuthKey']
+                'hasMany' => ['AuthKey' => ['dependent' => true]]
             ], false);
         }
     }
@@ -793,7 +820,7 @@ class User extends AppModel
     }
 
     /**
-     * Fetch all users that have access to an event / discussion for e-mailing (or maybe something else in the future.
+     * Fetch all users that have access to an event for e-mailing (or maybe something else in the future.
      * parameters are an array of org IDs that are owners (for an event this would be orgc and org)
      * @param array $owners Event owners
      * @param int $distribution
@@ -1012,6 +1039,13 @@ class User extends AppModel
                 'fields' => array('User.id', 'User.email', 'User.org_id')
             ));
         }
+        // With neither an org admin nor a site admin on the instance both finds
+        // come back empty, and the caller tests isset($admin['email']) - so
+        // return the shape it expects rather than reading a key off an empty
+        // array.
+        if (empty($admin['User'])) {
+            return array();
+        }
 
         return $admin['User'];
     }
@@ -1115,6 +1149,38 @@ class User extends AppModel
                 'User.id', 'User.email'
             )
         ));
+    }
+
+    /**
+     * Role IDs that grant site admin privileges.
+     * @return array
+     */
+    public function getSiteAdminRoleIds()
+    {
+        return $this->Role->find('column', array(
+            'conditions' => array('Role.perm_site_admin' => 1),
+            'fields' => array('Role.id')
+        ));
+    }
+
+    /**
+     * Whether the given user ID belongs to a site admin. Unlike getSiteAdmins(),
+     * this deliberately ignores the disabled flag: a disabled site admin must
+     * still be protected from lower-privileged (org) admins.
+     * @param int $userId
+     * @return bool
+     */
+    public function isUserSiteAdmin($userId)
+    {
+        if (empty($userId)) {
+            return false;
+        }
+        $target = $this->find('first', array(
+            'recursive' => -1,
+            'conditions' => array('User.id' => $userId),
+            'contain' => array('Role' => array('fields' => array('perm_site_admin')))
+        ));
+        return !empty($target['Role']['perm_site_admin']);
     }
 
     public function verifyPassword($user_id, $password)
@@ -1260,16 +1326,22 @@ class User extends AppModel
 
     public function resetauthkey($user, $id, $alert = false, $keyId = null)
     {
-        $this->id = $id;
-        if (!$id || !$this->exists($id)) {
+        $updatedUser = $this->find('first', array(
+            'conditions' => ['User.id' => $id],
+            'recursive' => -1,
+            'contain' => ['Role']
+        ));
+        if (empty($updatedUser)) {
             return false;
         }
-        $updatedUser = $this->read();
+        if (empty($user['Role']['perm_site_admin']) && !empty($updatedUser['Role']['perm_site_admin'])) {                                                                                              
+            return false;                                           
+        }        
         if (empty($user['Role']['perm_site_admin']) && !($user['Role']['perm_admin'] && $user['org_id'] == $updatedUser['User']['org_id']) && ($user['id'] != $id)) {
             return false;
         }
         if (empty(Configure::read('Security.advanced_authkeys'))) {
-            $oldKey = $this->data['User']['authkey'];
+            $oldKey = $updatedUser['User']['authkey'];
             $newkey = $this->generateAuthKey();
             $this->updateField($updatedUser['User'], 'authkey', $newkey);
             $this->extralog(
@@ -1358,20 +1430,54 @@ class User extends AppModel
     }
 
     /**
+     * Instance public key, cached in redis to avoid a gnupg export on every
+     * request - the endpoint serving it is reachable unauthenticated.
+     *
      * @return array|null
      * @throws Exception
      */
     public function getGpgPublicKey()
     {
+        try {
+            $redis = RedisTool::init();
+        } catch (Exception $e) {
+            $redis = false;
+        }
+        if ($redis) {
+            try {
+                $cached = $redis->get(self::GPG_PUBLIC_KEY_CACHE_KEY);
+                if (!empty($cached)) {
+                    $cached = RedisTool::deserialize($cached);
+                    if (is_array($cached) && count($cached) === 2) {
+                        return $cached;
+                    }
+                }
+            } catch (Exception $e) {
+                // Cached value could not be fetched or read, generate it again
+            }
+        }
+
         $cryptGpg = $this->initializeGpg();
-        $this->CryptoGraphicKey = ClassRegistry::init('CrytpographicKey');
+        $this->CryptoGraphicKey = ClassRegistry::init('CryptographicKey');
         $fingerprint = $this->CryptoGraphicKey->ingestInstanceKey();
         if (!$fingerprint) {
             return null;
         }
 
         $publicKey = $cryptGpg->exportPublicKey($fingerprint);
-        return array($fingerprint, $publicKey);
+        $key = array($fingerprint, $publicKey);
+        if ($redis) {
+            try {
+                $redis->setex(
+                    self::GPG_PUBLIC_KEY_CACHE_KEY,
+                    self::GPG_PUBLIC_KEY_CACHE_TTL,
+                    RedisTool::serialize($key)
+                );
+            } catch (Exception $e) {
+                // Caching the key is best effort only
+            }
+        }
+        return $key;
     }
 
     public function getOrgActivity($orgId, $params=array())
@@ -1393,11 +1499,7 @@ class User extends AppModel
         $sparklineData = array();
         foreach ($events as $event) {
             $date = date("Y-m-d", $event['Event']['timestamp']);
-            if (!isset($sparklineData[$event['Event']['attribute_count']][$date])) {
-                $sparklineData[$date] = $event['Event']['attribute_count'];
-            } else {
-                $sparklineData[$date] += $event['Event']['attribute_count'];
-            }
+            $sparklineData[$date] = ($sparklineData[$date] ?? 0) + (int)$event['Event']['attribute_count'];
         }
 
         // get first and last timestamp
@@ -2106,13 +2208,7 @@ class User extends AppModel
         }
 
         list($cutoff, $allcutoff) = $redis->mGet(['misp:session_destroy:' . $id, 'misp:session_destroy:all']);
-        if (
-            empty($cutoff) ||
-            (
-                !empty($allcutoff) &&
-                $allcutoff < $cutoff
-            )
-        ) {
+        if (empty($cutoff) || (!empty($allcutoff) && $allcutoff > $cutoff)) {
             $cutoff = $allcutoff;
         }
         if ($cutoff && $sessionCreationTimestamp < $cutoff) {
@@ -2167,14 +2263,21 @@ class User extends AppModel
         if (empty($user)) {
             return false;
         }
+        $baseurl = Configure::read('MISP.external_baseurl');
+        if (empty($baseurl) && !Configure::read('BaseurlFromRequest')) {
+            $baseurl = Configure::read('MISP.baseurl');
+        }
+        if (empty($baseurl)) {
+            $this->log('Password reset needs MISP.baseurl or MISP.external_baseurl to be set, no reset mail was sent.', LOG_ERR);
+            return false;
+        }
         $token = RandomTool::random_str(true, 40);
         RedisTool::init()->set('misp:forgot:' . $token, $user['User']['id'], ['nx', 'ex' => 600]);
-        $baseurl = Configure::check('MISP.external_baseurl') ? Configure::read('MISP.external_baseurl') : Configure::read('MISP.baseurl');
         $default_forgot_email = [];
         $default_forgot_email['enc'] = Configure::read('MISP.forgotPasswordText') ? 
-            Configure::read('MISP.default_forgot_email') :
+            Configure::read('MISP.forgotPasswordText') :
                 'Dear MISP user,\n\nyou have requested a password reset on the MISP instance at $misp. Click the link below to change your password.\n\n\$reset_link\n\nThe link above is only valid for 10 minutes, feel free to request a new one if it has expired.\n\nIf you haven\'t requested a password reset, reach out to your admin team and let them know that someone has attempted it in your stead.\n\nMake sure you keep the contents of this e-mail confidential, do NOT ever forward it as it contains a reset token that is equivalent of a password if acted upon. The IP used to trigger the request was: $ip\n\nBest regards,\nYour MISP admin team';
-        $default_forgot_email['no_enc'] = Configure::read('MISP.default_forgot_email_no_enc') ? 
+        $default_forgot_email['no_enc'] = Configure::read('MISP.forgotPasswordTextNoEnc') ? 
             Configure::read('MISP.forgotPasswordTextNoEnc') :
                 'Dear MISP user,\n\nyou have requested a password reset on the MISP instance at $misp, however, no valid encryption key was found for your user and thus we cannot deliver your reset token. Please get in touch with your org admin / with an instance site admin to ask for a reset.\n\nThe IP used to trigger the request was: $ip\n\nBest regards,\nYour MISP admin team';
         $body = [];
@@ -2237,11 +2340,8 @@ class User extends AppModel
                 'perm_tagger' => 1,
             ]];
             $this->Role->save($siteAdmin);
-            // PostgreSQL: update value of auto incremented serial primary key after setting the column by force
-            if (!$this->isMysql()) {
-                $sql = "SELECT setval('roles_id_seq', (SELECT MAX(id) FROM roles));";
-                $this->Role->query($sql);
-            }
+            // The id was set by force above, so the sequence has to catch up.
+            $this->Role->resetAutoIncrement();
         }
 
         if (!$this->Organisation->hasAny(['Organisation.local' => true])) {
@@ -2255,11 +2355,8 @@ class User extends AppModel
                 'local' => 1,
             ]];
             $this->Organisation->save($org);
-            // PostgreSQL: update value of auto incremented serial primary key after setting the column by force
-            if (!$this->isMysql()) {
-                $sql = "SELECT setval('organisations_id_seq', (SELECT MAX(id) FROM organisations));";
-                $this->Organisation->query($sql);
-            }
+            // The id was set by force above, so the sequence has to catch up.
+            $this->Organisation->resetAutoIncrement();
             $orgId = $this->Organisation->id;
         }
 

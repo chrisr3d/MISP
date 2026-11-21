@@ -18,13 +18,18 @@ echo $this->element(
                 'path' => 'TaxiiServer.owner'
             ],
             [
-                'key' => __('Base URL'),
-                'path' => 'TaxiiServer.baseurl'
-            ],
-            [
                 'key' => __('Skip Proxy'),
                 'path' => 'TaxiiServer.skip_proxy',
                 'type' => 'json'
+            ],
+            [
+                'key' => __('Enabled'),
+                'path' => 'TaxiiServer.enabled',
+                'type' => 'json'
+            ],
+            [
+                'key' => __('Discovery URL'),
+                'path' => 'TaxiiServer.discovery_url'
             ],
             [
                 'key' => __('API Root'),
@@ -51,8 +56,14 @@ echo $this->element(
                 'model' => 'organisations'
             ],
             [
-                'key' => __('API key'),
-                'path' => 'TaxiiServer.api_key'
+                'key' => __('Authentication Type'),
+                'path' => 'TaxiiServer.auth_type',
+                'callback' => 'ucfirst'
+            ],
+            [
+                'key' => __('Token'),
+                'path' => 'TaxiiServer.api_key',
+                'privacy' => true
             ],
             [
                 'key' => __('Description'),

@@ -14,6 +14,8 @@ class Job extends AppModel
         WORKER_CACHE = 'cache',
         WORKER_UPDATE = 'update';
 
+    public $actsAs = array('Containable');
+
     public $belongsTo = array(
         'Org' => array(
             'className' => 'Organisation',
@@ -173,5 +175,27 @@ class Job extends AppModel
             $this->logException("Could not save progress for job $jobId", $e, LOG_NOTICE);
         }
         return false;
+    }
+
+    /**
+     * Records how a job's process ended, unless the job already marked its row
+     * failed or completed itself.
+     *
+     * @param int $jobId
+     * @param bool $success
+     * @param string|null $message
+     * @return bool
+     */
+    public function saveExitStatus($jobId, $success, $message = null)
+    {
+        $job = $this->find('first', [
+            'conditions' => ['Job.id' => $jobId],
+            'fields' => ['Job.status'],
+            'recursive' => -1,
+        ]);
+        if (empty($job) || in_array((int)$job['Job']['status'], [self::STATUS_FAILED, self::STATUS_COMPLETED], true)) {
+            return false;
+        }
+        return $this->saveStatus($jobId, $success, $message);
     }
 }

@@ -58,7 +58,7 @@ class ServerShell extends AppShell
     public function test()
     {
         if (empty($this->args[0])) {
-            die('Usage: ' . $this->Server->command_line_functions['console_automation_tasks']['data']['Test'] . PHP_EOL);
+            $this->error('Usage: ' . $this->Server->command_line_functions['console_automation_tasks']['data']['Test']);
         }
 
         $serverId = intval($this->args[0]);
@@ -80,7 +80,7 @@ class ServerShell extends AppShell
     public function pullAll()
     {
         if (empty($this->args[0])) {
-            die('Usage: ' . $this->Server->command_line_functions['console_automation_tasks']['data']['PullAll'] . PHP_EOL);
+            $this->error('Usage: ' . $this->Server->command_line_functions['console_automation_tasks']['data']['PullAll']);
         }
 
         $userId = $this->args[0];
@@ -131,7 +131,7 @@ class ServerShell extends AppShell
     public function pull()
     {
         if (empty($this->args[0]) || empty($this->args[1])) {
-            die('Usage: ' . $this->Server->command_line_functions['console_automation_tasks']['data']['Pull'] . PHP_EOL);
+            $this->error('Usage: ' . $this->Server->command_line_functions['console_automation_tasks']['data']['Pull']);
         }
         $userId = $this->args[0];
         $user = $this->getUser($userId);
@@ -159,7 +159,7 @@ class ServerShell extends AppShell
         try {
             $result = $this->Server->pull($user, $technique, $server, $jobId, $force);
             if (is_array($result)) {
-                $message = __('Pull completed. %s events pulled, %s events could not be pulled, %s proposals pulled, %s sightings pulled, %s clusters pulled, %s analyst data pulled.', count($result[0]), count($result[1]), $result[2], $result[3], $result[4], $result[5]);
+                $message = __('Pull completed. %s events pulled, %s events could not be pulled, %s proposals pulled, %s sightings pulled, %s clusters pulled, %s analyst data pulled, %s collections pulled.', count($result[0]), count($result[1]), $result[2], $result[3], $result[4], $result[5], $result[6]);
                 $this->Job->saveStatus($jobId, true, $message);
             } else {
                 $message = __('ERROR: %s', $result);
@@ -175,7 +175,7 @@ class ServerShell extends AppShell
     public function push()
     {
         if (empty($this->args[0]) || empty($this->args[1])) {
-            die('Usage: ' . $this->Server->command_line_functions['console_automation_tasks']['data']['Push'] . PHP_EOL);
+            $this->error('Usage: ' . $this->Server->command_line_functions['console_automation_tasks']['data']['Push']);
         }
         
         $userId = $this->args[0];
@@ -300,7 +300,7 @@ class ServerShell extends AppShell
     public function viewFeed()
     {
         if (empty($this->args[0])) {
-            die('Usage: ' . $this->Server->command_line_functions['console_automation_tasks']['data']['View Feed'] . PHP_EOL);
+            $this->error('Usage: ' . $this->Server->command_line_functions['console_automation_tasks']['data']['View feed']);
         }
         $feed = $this->Feed->find('first', [
             'conditions' => [
@@ -330,7 +330,7 @@ class ServerShell extends AppShell
     public function toggleFeed()
     {
         if (empty($this->args[0])) {
-            die('Usage: ' . $this->Server->command_line_functions['console_automation_tasks']['data']['Toggle feed fetching'] . PHP_EOL);
+            $this->error('Usage: ' . $this->Server->command_line_functions['console_automation_tasks']['data']['Toggle feed fetching']);
         }
         $feed = $this->Feed->find('first', [
             'conditions' => [
@@ -352,7 +352,7 @@ class ServerShell extends AppShell
     public function toggleFeedCaching()
     {
         if (empty($this->args[0])) {
-            die('Usage: ' . $this->Server->command_line_functions['console_automation_tasks']['data']['Toggle feed caching'] . PHP_EOL);
+            $this->error('Usage: ' . $this->Server->command_line_functions['console_automation_tasks']['data']['Toggle feed caching']);
         }
         $feed = $this->Feed->find('first', [
             'conditions' => [
@@ -380,7 +380,7 @@ class ServerShell extends AppShell
     public function fetchFeed()
     {
         if (empty($this->args[0]) || empty($this->args[1])) {
-            die('Usage: ' . $this->Server->command_line_functions['console_automation_tasks']['data']['Fetch feeds as local data'] . PHP_EOL);
+            $this->error('Usage: ' . $this->Server->command_line_functions['console_automation_tasks']['data']['Fetch feeds as local data']);
         }
         
         $userId = $this->args[0];
@@ -436,7 +436,7 @@ class ServerShell extends AppShell
     public function cacheServer()
     {
         if (empty($this->args[0]) || empty($this->args[1])) {
-            die('Usage: ' . $this->Server->command_line_functions['console_automation_tasks']['data']['Cache server'] . PHP_EOL);
+            $this->error('Usage: ' . $this->Server->command_line_functions['console_automation_tasks']['data']['Cache server']);
         }
         
         $userId = $this->args[0];
@@ -507,7 +507,7 @@ class ServerShell extends AppShell
     public function cacheFeed()
     {
         if (empty($this->args[0]) || empty($this->args[1])) {
-            die('Usage: ' . $this->Server->command_line_functions['console_automation_tasks']['data']['Cache feeds for quick lookups'] . PHP_EOL);
+            $this->error('Usage: ' . $this->Server->command_line_functions['console_automation_tasks']['data']['Cache feeds for quick lookups']);
         }
         
         $userId = $this->args[0];
@@ -547,7 +547,7 @@ class ServerShell extends AppShell
     public function enqueuePull()
     {
         if (empty($this->args[0]) || empty($this->args[1]) || empty($this->args[2])) {
-            die('Usage: ' . $this->Server->command_line_functions['console_automation_tasks']['data']['Enqueue pull'] . PHP_EOL);
+            $this->error('Usage: ' . $this->Server->command_line_functions['console_automation_tasks']['data']['Enqueue pull']);
         }
 
         $timestamp = $this->args[0];
@@ -609,7 +609,7 @@ class ServerShell extends AppShell
     public function enqueueFeedFetch()
     {
         if (empty($this->args[0]) || empty($this->args[1]) || empty($this->args[2])) {
-            die('Usage: ' . $this->Server->command_line_functions['console_automation_tasks']['data']['Enqueue feed fetch'] . PHP_EOL);
+            $this->error('Usage: ' . $this->Server->command_line_functions['console_automation_tasks']['data']['Enqueue feed fetch']);
         }
 
         $timestamp = $this->args[0];
@@ -658,7 +658,7 @@ class ServerShell extends AppShell
     public function enqueueFeedCache()
     {
         if (empty($this->args[0]) || empty($this->args[1]) || empty($this->args[2])) {
-            die('Usage: ' . $this->Server->command_line_functions['console_automation_tasks']['data']['Enqueue feed cache'] . PHP_EOL);
+            $this->error('Usage: ' . $this->Server->command_line_functions['console_automation_tasks']['data']['Enqueue feed cache']);
         }
 
         $timestamp = $this->args[0];
@@ -714,7 +714,7 @@ class ServerShell extends AppShell
     public function enqueuePush()
     {
         if (empty($this->args[0]) || empty($this->args[1]) || empty($this->args[2])) {
-            die('Usage: ' . $this->Server->command_line_functions['console_automation_tasks']['data']['Enqueue push'] . PHP_EOL);
+            $this->error('Usage: ' . $this->Server->command_line_functions['console_automation_tasks']['data']['Enqueue push']);
         }
 
         $timestamp = $this->args[0];
@@ -820,7 +820,7 @@ class ServerShell extends AppShell
             'recursive' => -1,
         ]);
         if (!$server) {
-            $this->error("Server with ID $serverId doesn't exists.");
+            $this->error("Server with ID $serverId doesn't exist.");
         }
         return $server;
     }
@@ -828,20 +828,46 @@ class ServerShell extends AppShell
     public function push_taxii()
     {
         if (empty($this->args[0]) || empty($this->args[1])) {
-            die('Usage: ' . $this->Server->command_line_functions['console_automation_tasks']['data']['Push Taxii'] . PHP_EOL);
+            $this->error('Usage: ' . $this->Server->command_line_functions['console_automation_tasks']['data']['Push Taxii']);
         }
-        
+
         $userId = $this->args[0];
         $user = $this->getUser($userId);
-        $serverId = $this->args[1];
+        $taxiiServerId = $this->args[1];
         if (!empty($this->args[2])) {
             $jobId = $this->args[2];
         } else {
-            $jobId = $this->Job->createJob($user, Job::WORKER_DEFAULT, 'push_taxii', 'Server: ' . $serverId, 'Pushing.');
+            $jobId = $this->Job->createJob($user, Job::WORKER_DEFAULT, 'push_taxii', 'TAXII Server: ' . $taxiiServerId, 'Pushing.');
         }
         $this->Job->read(null, $jobId);
 
-        $result = $this->TaxiiServer->push($serverId, $user, $jobId);
+        if ($taxiiServerId === 'all') {
+            $taxiiServerIds = $this->TaxiiServer->find('column', [
+                'fields' => ['TaxiiServer.id'],
+                'conditions' => ['TaxiiServer.enabled' => 1],
+            ]);
+
+            $successes = 0;
+            $fails = 0;
+            $total = count($taxiiServerIds);
+            foreach ($taxiiServerIds as $k => $taxiiServerId) {
+                $this->Job->saveProgress($jobId, 'Pushing TAXII server: ' . $taxiiServerId, $total > 0 ? 100 * $k / $total : 100);
+                $result = $this->TaxiiServer->push($taxiiServerId, $user, $jobId);
+                if ($result === true || is_array($result)) {
+                    $successes++;
+                } else {
+                    $fails++;
+                    CakeLog::error('TAXII push failed for server ' . $taxiiServerId . ': ' . $result);
+                }
+            }
+
+            $message = 'Job done. ' . $successes . ' TAXII servers pushed successfully, ' . $fails . ' TAXII servers could not be pushed.';
+            $this->Job->saveStatus($jobId, $fails === 0, $message);
+            echo $message . PHP_EOL;
+            return;
+        }
+
+        $result = $this->TaxiiServer->push($taxiiServerId, $user, $jobId);
         if ($result !== true && !is_array($result)) {
             $message = 'Job failed. Reason: ' . $result;
             $this->Job->saveStatus($jobId, false, $message);

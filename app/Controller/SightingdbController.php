@@ -43,6 +43,9 @@ class SightingdbController extends AppController
             'order' => ['LOWER(Organisation.name)'],
             'fields' => ['Organisation.id', 'Organisation.name']
         ]);
+        if ($this->theme === 'Overmind' && $this->request->is('ajax')) {
+            $this->layout = false;
+        }
         $this->set('orgs', $orgs);
     }
 
@@ -73,6 +76,9 @@ class SightingdbController extends AppController
             'order' => ['LOWER(Organisation.name)'],
             'fields' => ['Organisation.id', 'Organisation.name']
         ]);
+        if ($this->theme === 'Overmind' && $this->request->is('ajax')) {
+            $this->layout = false;
+        }
         $this->set('id', $id);
         $this->set('orgs', $orgs);
         $this->render('/Sightingdb/add');
@@ -88,6 +94,22 @@ class SightingdbController extends AppController
         }
     }
 
+    public function deleteSelection($id = null)
+    {
+        return $this->CRUD->deleteSelection($id, [
+            'modelName' => 'Sightingdb',
+            'restName' => 'Sightingdbs',
+            'itemName' => 'sightingdb',
+            'view' => 'ajax/sightingdbDeleteConfirmationForm',
+            'checkModifyCallback' => function($itemId) {
+                return $this->userRole['perm_site_admin'];
+            },
+            'multiSuccessMessageCallback' => function($count) {
+                return __n('%s sightingdb deleted.', '%s sightingdbs deleted.', $count, $count);
+            }
+        ]);
+    }
+
     public function index()
     {
         $params = [
@@ -95,6 +117,15 @@ class SightingdbController extends AppController
             'quickFilters' => ['name', 'owner', 'host'],
             'contain' => ['SightingdbOrg' => 'Organisation'],
             'afterFind' => function ($data) {
+                if ($this->theme === 'Overmind' && !$this->IndexFilter->isRest()) {
+                    foreach ($data as &$element) {
+                        $element['Sightingdb']['Organisation'] = Hash::extract(
+                            $element['SightingdbOrg'] ?? [],
+                            '{n}.Organisation'
+                        );
+                    }
+                    unset($element);
+                }
                 return $this->Sightingdb->extractOrgIdsFromList($data);
             }
         ];

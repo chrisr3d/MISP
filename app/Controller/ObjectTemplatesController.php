@@ -134,6 +134,16 @@ class ObjectTemplatesController extends AppController
         }
         $this->set('id', $id);
         $this->set('template', $this->viewVars['data']);
+        $this->set('templateElements', $this->ObjectTemplate->ObjectTemplateElement->find('all', [
+            'recursive' => -1,
+            'conditions' => ['ObjectTemplateElement.object_template_id' => $id],
+            'fields' => [
+                'ObjectTemplateElement.object_relation', 'ObjectTemplateElement.type',
+                'ObjectTemplateElement.multiple', 'ObjectTemplateElement.disable_correlation',
+                'ObjectTemplateElement.description', 'ObjectTemplateElement.ui-priority',
+            ],
+            'order' => ['ObjectTemplateElement.ui-priority DESC', 'ObjectTemplateElement.object_relation'],
+        ]));
     }
 
     public function delete($id)
@@ -144,10 +154,26 @@ class ObjectTemplatesController extends AppController
         }
     }
 
+    public function deleteSelection($id = null)
+    {
+        return $this->CRUD->deleteSelection($id, [
+            'modelName' => 'ObjectTemplate',
+            'restName' => 'ObjectTemplates',
+            'itemName' => 'ObjectTemplate',
+            'view' => 'ajax/objectTemplateDeleteConfirmationForm',
+            'checkModifyCallback' => function() {
+                return $this->userRole['perm_site_admin'];
+            },
+            'multiSuccessMessageCallback' => function($count) {
+                return __n('%s object template deleted.', '%s object templates deleted.', $count, $count);
+            }
+        ]);
+    }
+
     public function index($all = false)
     {
         $conditions = [];
-        if (!$all || !$this->_isSiteAdmin()) {
+        if ((!$all || !$this->_isSiteAdmin()) && $this->theme !== "Overmind") {
             $conditions['ObjectTemplate.active'] = 1;
             $this->set('all', false);
         } else {
@@ -168,7 +194,7 @@ class ObjectTemplatesController extends AppController
             return $this->restResponsePayload;
         }
         $this->set('list', $this->viewVars['data']);
-        $this->set('passedArgs', json_encode($this->passedArgs));
+        $this->set('passedArgs', JsonTool::encodeForScript($this->passedArgs));
         $this->set('passedArgsArray', []);
     }
 
@@ -179,6 +205,12 @@ class ObjectTemplatesController extends AppController
         }
         if (!empty($this->params['named']['force'])) {
             $force = $this->params['named']['force'];
+        }
+        if ($this->theme === 'Overmind' && $this->request->is('ajax') && $this->request->is('get')) {
+            $this->set('templateName', $type);
+            $this->set('force', !empty($force));
+            $this->layout = false;
+            return $this->render('ajax/update_confirmation');
         }
         $result = $this->ObjectTemplate->update($this->Auth->user(), $type, $force);
         $this->loadModel('ObjectRelationship');
@@ -248,7 +280,18 @@ class ObjectTemplatesController extends AppController
             }
             $this->Flash->success($message);
         }
-        $this->redirect(array('controller' => 'ObjectTemplates', 'action' => 'index'));
+        if ($this->theme === 'Overmind' && $type) {
+            $latest = $this->ObjectTemplate->find('first', [
+                'recursive' => -1,
+                'conditions' => ['ObjectTemplate.name' => $type],
+                'fields' => ['ObjectTemplate.id'],
+                'order' => ['ObjectTemplate.version DESC', 'ObjectTemplate.id DESC'],
+            ]);
+            if (!empty($latest)) {
+                return $this->redirect(['controller' => 'objectTemplates', 'action' => 'view', $latest['ObjectTemplate']['id']]);
+            }
+        }
+        $this->redirect(array('controller' => 'objectTemplates', 'action' => 'index'));
     }
 
     public function activate()
@@ -263,6 +306,71 @@ class ObjectTemplatesController extends AppController
         }
         $message = (($result == 1) ? 'activated' : 'disabled');
         return new CakeResponse(array('body'=> json_encode(array('saved' => true, 'success' => 'Template ' . $message . '.')), 'status' => 200, 'type' => 'json'));
+    }
+
+    public function toggleActive($id)
+    {
+        $this->request->allowMethod(['post']);
+
+        if (!is_numeric($id)) {
+            $message = __('Invalid object template.');
+            if ($this->_isRest()) {
+                return $this->RestResponse->saveFailResponse('ObjectTemplate', 'toggleActive', $id, $message);
+            } else {
+                $this->Flash->error($message);
+                return $this->redirect($this->referer());
+            }
+        }
+
+        $template = $this->ObjectTemplate->find('first', [
+            'recursive' => -1,
+            'conditions' => ['ObjectTemplate.id' => $id]
+        ]);
+
+        if (empty($template)) {
+            $message = __('Object template not found.');
+            if ($this->_isRest()) {
+                return $this->RestResponse->saveFailResponse('ObjectTemplate', 'toggleActive', $id, $message);
+            } else {
+                $this->Flash->error($message);
+                return $this->redirect($this->referer());
+            }
+        }
+
+        $result = $this->ObjectTemplate->setActive($id);
+
+        if ($result === false) {
+            $message = __('Could not toggle template state.');
+            if ($this->_isRest()) {
+                return $this->RestResponse->saveFailResponse('ObjectTemplate', 'toggleActive', $id, $message);
+            } else {
+                $this->Flash->error($message);
+                return $this->redirect($this->referer());
+            }
+        }
+        $newState = $result ? 1 : 0;
+        $text = $newState ? 'activated' : 'disabled';
+        $action = $newState ? 'activate' : 'deactivate';
+
+        $this->Log = ClassRegistry::init('Log');
+        $this->Log->create();
+        $this->Log->saveOrFailSilently([
+            'org' => $this->Auth->user('Organisation')['name'],
+            'model' => 'ObjectTemplate',
+            'model_id' => $id,
+            'email' => $this->Auth->user('email'),
+            'action' => $action,
+            'user_id' => $this->Auth->user('id'),
+            'title' => 'Object template ' . $text,
+            'change' => $template['ObjectTemplate']['name'] . ' - ' . $text,
+        ]);
+
+        if ($this->_isRest()) {
+            return $this->RestResponse->saveSuccessResponse('ObjectTemplate', 'toggleActive', $id, $this->response->type());
+        } else {
+            $this->Flash->success(__('Template %s.', $text));
+            return $this->redirect($this->referer());
+        }
     }
 
     public function getToggleField()

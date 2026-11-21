@@ -19,9 +19,21 @@ class TaxiiServer extends AppModel
         'Containable'
     ];
 
+    public $validate = [
+        'name' => [
+            'rule' => 'notBlank',
+            'required' => 'create',
+            'message' => 'Please provide a name for the server.',
+        ],
+        'discovery_url' => [
+            'rule' => ['custom', '/^https?:\/\//i'],
+            'allowEmpty' => true,
+            'message' => 'The URL has to start with http:// or https://',
+        ],
+    ];
+
     private $Job = null;
     private $Event = null;
-    private $Allowedlist = null;
 
     public function beforeValidate($options = array())
     {
@@ -33,10 +45,16 @@ class TaxiiServer extends AppModel
         if (!isset($this->data['TaxiiServer']['skip_proxy'])) {
             $this->data['TaxiiServer']['skip_proxy'] = false;
         }
+        if (!isset($this->data['TaxiiServer']['enabled']) && empty($this->id)) {
+            $this->data['TaxiiServer']['enabled'] = true;
+        }
 
         // Validate skip_proxy as a boolean
         if (isset($this->data['TaxiiServer']['skip_proxy']) && !is_bool($this->data['TaxiiServer']['skip_proxy'])) {
             $this->data['TaxiiServer']['skip_proxy'] = $this->data['TaxiiServer']['skip_proxy'] ? true : false; // Convert to boolean
+        }
+        if (isset($this->data['TaxiiServer']['enabled']) && !is_bool($this->data['TaxiiServer']['enabled'])) {
+            $this->data['TaxiiServer']['enabled'] = $this->data['TaxiiServer']['enabled'] ? true : false;
         }
         return true;
     }
@@ -73,6 +91,12 @@ class TaxiiServer extends AppModel
             'recursive' => -1,
             'conditions' => ['TaxiiServer.id' => $id]
         ]);
+        if (empty($taxii_server)) {
+            return __('Invalid TAXII server.');
+        }
+        if (empty($taxii_server['TaxiiServer']['enabled'])) {
+            return __('TAXII server is disabled.');
+        }
         $filters = $this->__setPushFilters($taxii_server);
         $elementCounter = 0;
         $eventid = $this->Event->filterEventIds($user, $filters, $elementCounter);
@@ -83,7 +107,6 @@ class TaxiiServer extends AppModel
         $exportTool = ['memory_scaling_factor' => $attribute_coefficient];
         $eventids_chunked = $this->Event->clusterEventIds($exportTool, $eventid);
         $i = 1;
-        $this->Allowedlist = ClassRegistry::init('Allowedlist');
         foreach ($eventids_chunked as $eventids) {
             $this->__pushEvents($user, $taxii_server, $filters, $eventids, $i, $jobId, $eventCount);
         }
@@ -106,8 +129,6 @@ class TaxiiServer extends AppModel
             unset($filters['tags']['NOT']);
         }
         $result = $this->Event->fetchEvent($user, $filters, true);
-        
-        $result = $this->Allowedlist->removeAllowedlistedFromArray($result, false);
         $temporaryFolder = $this->temporaryFolder();
         $temporaryFolderPath = $temporaryFolder['dir']->path;
         $this->Job->id = $jobId;
@@ -131,11 +152,29 @@ class TaxiiServer extends AppModel
             ProcessTool::pythonBin(),
             $scriptFile,
             '--dir', $temporaryFolder['dir']->path,
-            '--baseurl',  $taxii_server['TaxiiServer']['baseurl'],
             '--api_root', $taxii_server['TaxiiServer']['api_root'],
             '--key', $taxii_server['TaxiiServer']['api_key'],
             '--collection', $taxii_server['TaxiiServer']['collection']
         ];
+        if (empty($taxii_server['TaxiiServer']['skip_proxy'])) {
+            $proxy = Configure::read('Proxy');
+            if (!empty($proxy['host'])) {
+                $command[] = '--proxy_host';
+                $command[] = $proxy['host'];
+                $command[] = '--proxy_port';
+                $command[] = $proxy['port'] ?? 3128;
+                if (!empty($proxy['method'])) {
+                    $command[] = '--proxy_method';
+                    $command[] = $proxy['method'];
+                }
+                if (isset($proxy['user'], $proxy['password'])) {
+                    $command[] = '--proxy_user';
+                    $command[] = $proxy['user'];
+                    $command[] = '--proxy_password';
+                    $command[] = $proxy['password'];
+                }
+            }
+        }
         $result = ProcessTool::execute($command, null, true);
         $temporaryFolder['dir']->delete();
         if ($jobId) {
@@ -161,12 +200,29 @@ class TaxiiServer extends AppModel
         return new File($temporaryFolder . '/' . $random . '.json', true, 0644);
     }
 
+    public function beforeSave($options = array())
+    {
+        parent::beforeSave($options);
+        if (isset($this->data['TaxiiServer']['auth_type']) && $this->data['TaxiiServer']['auth_type'] === 'basic') {
+            if (!empty($this->data['TaxiiServer']['username']) && !empty($this->data['TaxiiServer']['password'])) {
+                $this->data['TaxiiServer']['api_key'] = base64_encode($this->data['TaxiiServer']['username'] . ':' . $this->data['TaxiiServer']['password']);
+            }
+        }
+        return true;
+    }
+
     public function queryInstance($options)
     {
-        $url = $options['TaxiiServer']['baseurl'] . $options['TaxiiServer']['uri'];
+        $url = rtrim($options['TaxiiServer']['api_root'], '/') . '/'
+            . ltrim($options['TaxiiServer']['path'], '/');
+        error_log($url);
         App::uses('HttpSocket', 'Network/Http');
         $HttpSocket = new HttpSocket();
-        if (!$options['TaxiiServer']['skip_proxy']) {
+        $caPath = Configure::read('MISP.ca_path');
+        if (!empty($caPath)) {
+            $HttpSocket->config['ssl_cafile'] = $caPath;
+        }
+        if (empty($options['TaxiiServer']['skip_proxy'])) {
             $proxy = Configure::read('Proxy');
             if (isset($proxy['host']) && !empty($proxy['host'])) {
                 $HttpSocket->configProxy($proxy['host'], $proxy['port'], $proxy['method'], $proxy['user'], $proxy['password']);
@@ -178,8 +234,20 @@ class TaxiiServer extends AppModel
                 'Content-type' => 'application/taxii+json;version=2.1'
             ]
         ];
-        if (!empty($options['TaxiiServer']['api_key'])) {
-            $request['header']['Authorization'] = 'Basic ' . $options['TaxiiServer']['api_key'];
+        $authType = $options['TaxiiServer']['auth_type'] ?? 'basic';
+        $apiKey = $options['TaxiiServer']['api_key'] ?? '';
+        // Form discovery runs before beforeSave encodes Basic credentials.
+        if ($authType === 'basic' &&
+            !empty($options['TaxiiServer']['username']) &&
+            !empty($options['TaxiiServer']['password'])) {
+            $apiKey = base64_encode(
+                $options['TaxiiServer']['username'] . ':'
+                . $options['TaxiiServer']['password']
+            );
+        }
+        if (!empty($apiKey)) {
+            $authMethod = $authType === 'bearer' ? 'Bearer ' : 'Basic ';
+            $request['header']['Authorization'] = $authMethod . $apiKey;
         }
         try {
             if (!empty($options['type']) && $options['type'] === 'post') {
@@ -200,7 +268,7 @@ class TaxiiServer extends AppModel
         } catch (SocketException $e) {
             throw new BadRequestException(__('Something went wrong. Error returned: %s', $e->getMessage()));
         }
-        if ($response->code === 403 || $response->code === 401) {
+        if ((int)$response->code === 403 || (int)$response->code === 401) {
             throw new ForbiddenException(__('Authentication failed.'));
         }
         throw new BadRequestException(__('Something went wrong with the request or the remote side is having issues.'));
@@ -212,7 +280,7 @@ class TaxiiServer extends AppModel
             'recursive' => -1,
             'conditions' => ['TaxiiServer.id' => $id]
         ]);
-        $taxii_server['TaxiiServer']['uri'] = '/' . $taxii_server['TaxiiServer']['api_root'] . '/collections/';
+        $taxii_server['TaxiiServer']['path'] = '/collections/';
         $response = $this->queryInstance([
             'TaxiiServer' => $taxii_server['TaxiiServer'],
             'type' => 'get'
@@ -232,7 +300,7 @@ class TaxiiServer extends AppModel
         if (empty($collection_id)) {
             $collection_id = $taxii_server['TaxiiServer']['collection'];
         }
-        $taxii_server['TaxiiServer']['uri'] = '/' . $taxii_server['TaxiiServer']['api_root'] . '/collections/' . $collection_id . '/objects/';
+        $taxii_server['TaxiiServer']['path'] = '/collections/' . $collection_id . '/objects/';
         $response = $this->queryInstance([
             'TaxiiServer' => $taxii_server['TaxiiServer'],
             'type' => 'get',
@@ -253,7 +321,7 @@ class TaxiiServer extends AppModel
             'recursive' => -1,
             'conditions' => ['TaxiiServer.id' => $server_id]
         ]);
-        $taxii_server['TaxiiServer']['uri'] = '/' . $taxii_server['TaxiiServer']['api_root'] . '/collections/' . $collection_id . '/objects/' . $id . '/';
+        $taxii_server['TaxiiServer']['path'] = '/collections/' . $collection_id . '/objects/' . $id . '/';
         $response = $this->queryInstance([
             'TaxiiServer' => $taxii_server['TaxiiServer'],
             'type' => 'get'

@@ -26,7 +26,8 @@ class AuditLog extends AppModel
         ACTION_REMOVE_GALAXY = 'remove_galaxy',
         ACTION_REMOVE_GALAXY_LOCAL = 'remove_local_galaxy',
         ACTION_PUBLISH = 'publish',
-        ACTION_PUBLISH_SIGHTINGS = 'publish_sightings';
+        ACTION_PUBLISH_SIGHTINGS = 'publish_sightings',
+        ACTION_INSTANTIATE = 'instantiate';
 
     const REQUEST_TYPE_DEFAULT = 0,
         REQUEST_TYPE_API = 1,
@@ -151,7 +152,9 @@ class AuditLog extends AppModel
      */
     private function encodeChange($change)
     {
-        $change = JsonTool::encode($change);
+        // Substitute invalid UTF-8 bytes with U+FFFD instead of throwing — the change array may carry
+        // arbitrary attribute values (e.g. half UTF-16 surrogates, mojibake) that would otherwise abort the save.
+        $change = JsonTool::encode($change, false, false, true);
         if ($this->compressionEnabled && strlen($change) >= self::COMPRESS_MIN_LENGTH) {
             return self::BROTLI_HEADER . brotli_compress($change, 4, BROTLI_TEXT);
         }
@@ -275,6 +278,7 @@ class AuditLog extends AppModel
                 if ($syslogIdent) {
                     $options['ident'] = $syslogIdent;
                 }
+                App::uses('SysLog', 'SysLog.Lib');
                 $this->syslog = new SysLog($options);
             } else {
                 $this->syslog = false;
@@ -344,7 +348,7 @@ class AuditLog extends AppModel
             return; // Table is missing when updating, so this is intentional
         }
         if ($this->save(['AuditLog' => $data], ['atomic' => false]) === false) {
-            throw new Exception($this->validationErrors);
+            throw new Exception("Could not save audit log because of validation errors: " . JsonTool::encode($this->validationErrors));
         }
     }
 
@@ -394,30 +398,27 @@ class AuditLog extends AppModel
             $conditions['org_id'] = $org['id'];
         }
 
-        if ($this->isMysql()) {
-            $validDates = $this->find('all', [
-                'recursive' => -1,
-                'fields' => ['DISTINCT UNIX_TIMESTAMP(DATE(created)) AS Date', 'count(id) AS count'],
-                'conditions' => $conditions,
-                'group' => ['Date'],
-                'order' => ['Date'],
-                'callbacks' => false,
-            ]);
-        } else {
-            if (!empty($conditions['org_id'])) {
-                $condOrg = sprintf('WHERE org_id = %s', intval($conditions['org_id']));
-            } else {
-                $condOrg = '';
-            }
-            $sql = 'SELECT DISTINCT EXTRACT(EPOCH FROM CAST(created AS DATE)) AS "Date", COUNT(id) AS count
-                    FROM audit_logs
-                    ' . $condOrg . '
-                    GROUP BY "Date" ORDER BY "Date"';
-            $validDates = $this->query($sql);
-        }
+        // One query for both engines. The PostgreSQL half used to drop out of
+        // the ORM and be written by hand, because DboSource's field quoting
+        // mangles the bare DATE keyword inside a CAST - which the dialect's
+        // cast spelling does not contain.
+        $dialect = $this->getSqlDialect();
+        $day = $dialect->unixTimestamp($dialect->dateOf('created'));
+        // Lower-case alias on purpose: an unquoted `AS Date` comes back as
+        // `Date` from MySQL and as `date` from PostgreSQL, which folds unquoted
+        // identifiers. Reading the row by a key only one engine produces would
+        // have collapsed every bucket into one.
+        $validDates = $this->find('all', [
+            'recursive' => -1,
+            'fields' => ['DISTINCT ' . $day . ' AS date', 'count(id) AS count'],
+            'conditions' => $conditions,
+            'group' => ['date'],
+            'order' => ['date'],
+            'callbacks' => false,
+        ]);
         $data = [];
         foreach ($validDates as $date) {
-            $data[(int)$date[0]['Date']] = (int)$date[0]['count'];
+            $data[(int)$date[0]['date']] = (int)$date[0]['count'];
         }
         return $data;
     }

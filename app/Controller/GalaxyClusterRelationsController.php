@@ -52,32 +52,26 @@ class GalaxyClusterRelationsController extends AppController
             );
         }
 
+        $user = $this->Auth->user();
+        $this->CRUD->index([
+            'conditions' => array(
+                'AND' => array($contextConditions, $searchConditions, $aclConditions)
+            ),
+            'contain' => array('SharingGroup', 'SourceCluster' => ['Org', 'Orgc'], 'TargetCluster', 'GalaxyClusterRelationTag' => array('Tag')),
+            // Post-fetch ACL scrub — the same pruning the legacy index applied.
+            'afterFind' => function (array $data) use ($user) {
+                return $this->GalaxyClusterRelation->removeNonAccessibleTargetCluster($user, $data);
+            },
+            'limit' => $this->paginate['limit'],
+            'maxLimit' => $this->paginate['maxLimit'],
+        ]);
         if ($this->_isRest()) {
-            $relations = $this->GalaxyClusterRelation->find(
-                'all',
-                array(
-                    'recursive' => -1,
-                    'conditions' => array(
-                        'AND' => array($contextConditions, $searchConditions, $aclConditions)
-                    ),
-                    'contain' => array('SharingGroup', 'SourceCluster', 'TargetCluster', 'GalaxyClusterRelationTag' => array('Tag'))
-                )
-            );
-            $relations = $this->GalaxyClusterRelation->removeNonAccessibleTargetCluster($this->Auth->user(), $relations);
-            return $this->RestResponse->viewData($relations, $this->response->type());
-        } else {
-            $this->paginate['conditions']['AND'][] = $contextConditions;
-            $this->paginate['conditions']['AND'][] = $searchConditions;
-            $this->paginate['conditions']['AND'][] = $aclConditions;
-            $this->paginate['contain'] = array('SharingGroup', 'SourceCluster' => ['Org', 'Orgc'], 'TargetCluster', 'GalaxyClusterRelationTag' => array('Tag'));
-            $relations = $this->paginate();
-            $relations = $this->GalaxyClusterRelation->removeNonAccessibleTargetCluster($this->Auth->user(), $relations);
-            $this->loadModel('MispAttribute');
-            $distributionLevels = $this->MispAttribute->distributionLevels;
-            unset($distributionLevels[5]);
-            $this->set('distributionLevels', $distributionLevels);
-            $this->set('data', $relations);
+            return $this->restResponsePayload;
         }
+        $this->loadModel('MispAttribute');
+        $distributionLevels = $this->MispAttribute->distributionLevels;
+        unset($distributionLevels[5]);
+        $this->set('distributionLevels', $distributionLevels);
     }
 
     public function view($id)
@@ -132,6 +126,14 @@ class GalaxyClusterRelationsController extends AppController
                 $errors = array($clusterSource['error']);
             }
 
+            // Distribution 4 = sharing group: the user must have access to the SG to scope a
+            // relation to it. editRelation() already enforces this via checkIfAuthorised; the
+            // add path (saveRelation) did not, letting a galaxy editor assign a relation to a
+            // sharing group they cannot access (scope-FK injection).
+            if (empty($errors) && $relation['GalaxyClusterRelation']['distribution'] == 4 && !$this->SharingGroup->checkIfAuthorised($this->Auth->user(), $relation['GalaxyClusterRelation']['sharing_group_id'])) {
+                $errors[] = __('Galaxy Cluster Relation could not be saved: The user has to have access to the sharing group in order to be able to use it.');
+            }
+
             if (!empty($relation['GalaxyClusterRelation']['tags'])) {
                 $tags = explode(',', $relation['GalaxyClusterRelation']['tags']);
                 $tags = array_map('trim', $tags);
@@ -181,6 +183,9 @@ class GalaxyClusterRelationsController extends AppController
         $this->set('initialDistribution', $initialDistribution);
         $this->set('sharingGroups', $sgs);
         $this->set('action', 'add');
+        if ($this->theme === 'Overmind') {
+            $this->layout = false;
+        }
     }
 
     public function edit($id)
@@ -217,6 +222,13 @@ class GalaxyClusterRelationsController extends AppController
             }
             $relation = $this->request->data;
             $relation['GalaxyClusterRelation']['id'] = $id;
+            // Pin the source cluster to the stored relation's source. Both the authorisation
+            // check below and editRelation() derive the saved galaxy_cluster_id from this uuid;
+            // reading it from the request body let a user who could merely VIEW a relation
+            // re-parent it onto a cluster they own (cross-cluster relation hijack), because edit
+            // authorised the body-supplied source cluster, not the relation's actual one.
+            // delete() already authorises against the stored source uuid - match it here.
+            $relation['GalaxyClusterRelation']['galaxy_cluster_uuid'] = $existingRelation['GalaxyClusterRelation']['galaxy_cluster_uuid'];
             if ($relation['GalaxyClusterRelation']['distribution'] != 4) {
                 $relation['GalaxyClusterRelation']['sharing_group_id'] = null;
             }
@@ -224,8 +236,12 @@ class GalaxyClusterRelationsController extends AppController
             $clusterSource = $this->GalaxyClusterRelation->SourceCluster->fetchIfAuthorized($this->Auth->user(), $relation['GalaxyClusterRelation']['galaxy_cluster_uuid'], array('edit', 'publish'), $throwErrors=false, $full=false);
             if (isset($clusterSource['authorized']) && !$clusterSource['authorized']) {
                 $errors = array($clusterSource['error']);
+            } else {
+                // Only present on success; reading it when the auth check failed (now reachable
+                // since the source uuid is pinned to the stored, possibly un-owned, cluster)
+                // would dereference a missing key.
+                $relation['GalaxyClusterRelation']['galaxy_cluster_id'] = $clusterSource['GalaxyCluster']['id'];
             }
-            $relation['GalaxyClusterRelation']['galaxy_cluster_id'] = $clusterSource['GalaxyCluster']['id'];
 
             if (!empty($relation['GalaxyClusterRelation']['tags'])) {
                 $tags = explode(',', $relation['GalaxyClusterRelation']['tags']);
@@ -271,38 +287,58 @@ class GalaxyClusterRelationsController extends AppController
         $this->set('initialDistribution', $initialDistribution);
         $this->set('sharingGroups', $sgs);
         $this->set('action', 'edit');
+        if ($this->theme === 'Overmind') {
+            $this->layout = false;
+        }
         $this->render('add');
     }
 
     public function delete($id)
     {
-        if ($this->request->is('post')) {
-            $relation = $this->GalaxyClusterRelation->fetchRelations($this->Auth->user(), array('conditions' => array('GalaxyClusterRelation.id' => $id)));
+        // Overmind non-POST request: render the themed BS5 confirmation fragment
+        // (injected into #mainModalBody by openModal()) instead of the legacy
+        // /genericTemplates/delete confirm.
+        if ($this->theme === 'Overmind' && !$this->_isRest()
+            && !$this->request->is('post') && !$this->request->is('delete')
+        ) {
+            $relation = $this->GalaxyClusterRelation->fetchRelations($this->Auth->user(), array(
+                'conditions' => array('GalaxyClusterRelation.id' => $id),
+                'contain' => array('SourceCluster', 'TargetCluster'),
+            ));
             if (empty($relation)) {
                 throw new NotFoundException(__('Relation not found.'));
             }
-            $relation = $relation[0];
-            $clusterSource = $this->GalaxyClusterRelation->SourceCluster->fetchIfAuthorized($this->Auth->user(), $relation['GalaxyClusterRelation']['galaxy_cluster_uuid'], array('edit', 'publish'), $throwErrors=true, $full=false);
-            $result = $this->GalaxyClusterRelation->delete($id, true);
-            if ($result) {
-                $this->GalaxyClusterRelation->SourceCluster->touchTimestamp($clusterSource['GalaxyCluster']['id']);
-                $this->GalaxyClusterRelation->SourceCluster->unpublish($clusterSource['GalaxyCluster']['id']);
-                $message = __('Galaxy cluster relationship successfully deleted.');
-                if ($this->_isRest()) {
-                    return $this->RestResponse->saveSuccessResponse('GalaxyClusterRelation', 'delete', $id, $this->response->type());
-                } else {
-                    $this->Flash->success($message);
-                    $this->redirect($this->referer());
-                }
-            } else {
-                $message = __('Galaxy cluster relationship could not be deleted.');
-                if ($this->_isRest()) {
-                    return $this->RestResponse->saveFailResponse('GalaxyClusterRelation', 'delete', $id, $message, $this->response->type());
-                } else {
-                    $this->Flash->error($message);
-                    $this->redirect($this->referer());
-                }
-            }
+            // NB: do NOT seed request->data[...]['id'] here — FormHelper would
+            // switch the confirm form to _method=PUT, which CRUD->delete ignores
+            // (it only accepts POST/DELETE). The id travels in the URL.
+            $this->set('relation', $relation[0]);
+            $this->layout = false;
+            return $this->render('ajax/galaxyClusterRelationDeleteConfirmationForm');
+        }
+        $user = $this->Auth->user();
+        $this->CRUD->delete($id, [
+            // ACL scoping — mirrors the fetchRelations() the bespoke delete used.
+            'conditions' => $this->GalaxyClusterRelation->buildConditions($user),
+            'contain' => ['SourceCluster'],
+            'beforeDelete' => function (array $relation) use ($user) {
+                // Throws if the user may not edit/publish the source cluster.
+                $this->GalaxyClusterRelation->SourceCluster->fetchIfAuthorized(
+                    $user,
+                    $relation['GalaxyClusterRelation']['galaxy_cluster_uuid'],
+                    array('edit', 'publish'),
+                    $throwErrors = true,
+                    $full = false
+                );
+                return $relation;
+            },
+            'afterDelete' => function (array $relation) {
+                $clusterId = $relation['GalaxyClusterRelation']['galaxy_cluster_id'];
+                $this->GalaxyClusterRelation->SourceCluster->touchTimestamp($clusterId);
+                $this->GalaxyClusterRelation->SourceCluster->unpublish($clusterId);
+            },
+        ]);
+        if ($this->IndexFilter->isRest()) {
+            return $this->restResponsePayload;
         }
     }
 }

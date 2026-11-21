@@ -18,20 +18,29 @@ class CryptographicKeysController extends AppController
         if (empty($type) || empty($parent_id)) {
             throw new MethodNotAllowedException(__('No type and/or parent_id supplied.'));
         }
-        if ($type === 'Event') {
-            $existingEvent = $this->CryptographicKey->Event->fetchSimpleEvent(
-                $this->Auth->user(),
-                $parent_id,
-                [
-                    'conditions' => [
-                        'Event.orgc_id' => $this->Auth->user('org_id')
-                    ]
-                ]
-            );
-            if (empty($existingEvent)) {
-                throw new MethodNotAllowedException(__('Invalid Event.'));
-            }
+        // DPT-7: Event is the only supported/consumed parent type (the model
+        // belongsTo only Event). Any other type was previously saved with NO
+        // ownership check - parent_type/parent_id are forced from the route,
+        // so a perm_add user could attach a key to an arbitrary parent of any
+        // other type. Reject unsupported types so the ownership check below
+        // always applies.
+        if ($type !== 'Event') {
+            throw new MethodNotAllowedException(__('Unsupported parent type.'));
         }
+        $existingEvent = $this->CryptographicKey->Event->fetchSimpleEvent(
+            $this->Auth->user(),
+            $parent_id,
+            [
+                'conditions' => [
+                    'Event.orgc_id' => $this->Auth->user('org_id')
+                ]
+            ]
+        );
+        if (empty($existingEvent)) {
+            throw new MethodNotAllowedException(__('Invalid Event.'));
+        }
+        // A sync user's own key on a protected event would let it sign edits.
+        $this->CryptographicKey->Event->assertNotProtectedFromSyncUser($this->Auth->user(), $existingEvent);
         $params = [
             'beforeSave' => function ($data) use($type, $parent_id) {
                 $data['CryptographicKey']['parent_type'] = $type;
@@ -51,14 +60,40 @@ class CryptographicKeysController extends AppController
         $instanceKey = file_exists(APP . 'webroot/gpg.asc') ? FileAccessTool::readFromFile(APP . 'webroot/gpg.asc') : '';
         $this->set('instanceKey', $instanceKey);
         $this->set('menuData', array('menuList' => 'cryptographic_keys', 'menuItem' => 'add_cryptographic_key'));
+        if ($this->theme === 'Overmind') {
+            $this->layout = false;
+            $this->render('add');
+        }
     }
 
     public function delete($id)
     {
         $user = $this->Auth->user();
+        if (
+            $this->theme === 'Overmind' &&
+            !$this->IndexFilter->isRest() &&
+            !$this->request->is('post') &&
+            !$this->request->is('delete')
+        ) {
+            // Overmind: render the BS5 confirmation fragment for the delete
+            // modal. The actual deletion (POST) still flows through
+            // CRUD->delete below, so the ownership gate in beforeDelete is
+            // unchanged - this branch only themes the confirm dialog.
+            $this->layout = false;
+            $this->set('id', $id);
+            $this->render('ajax/cryptographicKeyDeleteConfirmationForm');
+            return;
+        }
         $this->CRUD->delete($id, [
             'beforeDelete' => function ($data) use($user) {
                 $parent_type = $data['CryptographicKey']['parent_type'];
+                // DPT-7: Event is the only supported parent type with an
+                // ownership model. For any other type (inert/unconsumed rows)
+                // fall back to site-admin only, rather than allowing an
+                // unauthorised delete with no check at all.
+                if ($parent_type !== 'Event') {
+                    return $user['Role']['perm_site_admin'] ? $data : false;
+                }
                 $tempModel = ClassRegistry::init($parent_type);
                 $existingData = $tempModel->find('first', [
                     'conditions' => [
@@ -66,10 +101,11 @@ class CryptographicKeysController extends AppController
                     ],
                     'recursive' => -1
                 ]);
-                if ($parent_type === 'Event') {
-                    if (!$user['Role']['perm_site_admin'] && $existingData['Event']['orgc_id'] !== $user['org_id']) {
-                        return false;
-                    }
+                if (!$user['Role']['perm_site_admin'] && $existingData['Event']['orgc_id'] !== $user['org_id']) {
+                    return false;
+                }
+                if ($tempModel->isProtectedFromSyncUser($user, $existingData)) {
+                    return false;
                 }
                 return $data;
            }
@@ -81,11 +117,35 @@ class CryptographicKeysController extends AppController
 
     public function view($id)
     {
+        $user = $this->Auth->user();
         $key = $this->CryptographicKey->find('first', [
             'recursive' => -1,
-            'fields' => ['id', 'type', 'key_data', 'fingerprint'],
+            'fields' => ['id', 'type', 'key_data', 'fingerprint', 'parent_id', 'parent_type'],
             'conditions' => ['CryptographicKey.id' => $id]
         ]);
+        if (empty($key)) {
+            throw new NotFoundException(__('Invalid key.'));
+        }
+        // Authorise through the parent event. Unlike add()/delete(), which
+        // require ownership of the event, this is the plain read ACL: the
+        // "Inspect key" link is rendered for every user who can see a
+        // protected event, not only for its creator org.
+        $parent_type = $key['CryptographicKey']['parent_type'];
+        if ($parent_type !== 'Event') {
+            // Same fallback as delete(): inert rows with no ownership model
+            // are site-admin only rather than open to everyone.
+            if (empty($user['Role']['perm_site_admin'])) {
+                throw new NotFoundException(__('Invalid key.'));
+            }
+        } else {
+            $event = $this->CryptographicKey->Event->fetchSimpleEvent(
+                $user,
+                $key['CryptographicKey']['parent_id']
+            );
+            if (empty($event)) {
+                throw new NotFoundException(__('Invalid key.'));
+            }
+        }
         $this->set('id', $id);
         $this->set('title', __('Viewing %s key #%s', h($key['CryptographicKey']['type']), h($key['CryptographicKey']['id'])));
         $this->set(
@@ -96,7 +156,11 @@ class CryptographicKeysController extends AppController
             )
         );
         $this->layout = false;
-        $this->render('/genericTemplates/display');
+        if ($this->theme === 'Overmind') {
+            $this->render('view');
+        } else {
+            $this->render('/genericTemplates/display');
+        }
     }
 
     public function serverSign()

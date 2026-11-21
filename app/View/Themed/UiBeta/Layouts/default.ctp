@@ -15,6 +15,7 @@
             ['chosen.min', ['preload' => true]],
             ['main', ['preload' => true]],
             ['main-beta', ['preload' => true]],
+            ['components-beta', ['preload' => true]],
             ['print', ['media' => 'print']],
         ];
         if (Configure::read('MISP.custom_css')) {
@@ -102,6 +103,10 @@
         endif;
     ?>
         var baseurl = '<?php echo $baseurl; ?>';
+        // CSRF token for hand-built same-origin AJAX, which has no rendered form
+        // to carry _Token fields. Sent as the X-CSRF-Token header - see
+        // BetterSecurityComponent::_validateCsrf().
+        var csrfToken = <?= json_encode(isset($this->request->params['_Token']['key']) ? $this->request->params['_Token']['key'] : '') ?>;
         var here = '<?php
                 if (substr($this->params['action'], 0, 6) === 'admin_') {
                     echo $baseurl . '/admin/' . h($this->params['controller']) . '/' . h(substr($this->params['action'], 6));

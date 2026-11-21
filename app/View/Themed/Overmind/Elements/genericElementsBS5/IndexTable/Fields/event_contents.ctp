@@ -1,28 +1,32 @@
 <?php
 $event = Hash::get($row, $field['data_path']);
-
 $attrCount = (int)Hash::get($event, 'attribute_count', 0);
+$objCount = (int)Hash::get($event, 'object_count', 0);
 $corrCount = (int)Hash::get($event, 'correlation_count', 0);
 
-// On définit les styles ici pour ne pas encombrer le HTML
-$styleGreen = "background: linear-gradient(180deg, #2ecc71 0%, #27ae60 50%, #1e8449 100%); -webkit-background-clip: text; -webkit-text-fill-color: transparent;";
-$styleOrange = "background: linear-gradient(180deg, #f39c12 0%, #e67e22 50%, #d35400 100%); -webkit-background-clip: text; -webkit-text-fill-color: transparent;";
 ?>
 
-<div class="d-flex flex-wrap gap-3">
+<div class="d-flex flex-column flex-wrap gap-2">
 
     <?php if ($attrCount !== 0): ?>
-        <div class="d-inline-flex align-items-center fw-bold text-nowrap" style="<?= $styleGreen ?>">
-            <i class="fas fa-inbox me-1"></i>
-            <span><?= h($attrCount) ?> Attributes</span>
-        </div>
+        <a class="d-inline-flex align-items-center fw-bold text-nowrap text-decoration-none text-attribute" href="<?= $this->Html->url(['action' => 'view2', $event['id']]) ?>#tab-attributes">
+            <span class="misp-icon misp-icon-attribute misp-simple misp-icon-md me-1"></span>
+            <span><?= h($attrCount) ?> <?= $attrCount > 1 ? __('Attributes') : __('Attribute') ?></span>
+        </a>
+    <?php endif; ?>
+
+    <?php if ($objCount !== 0): ?>
+        <a class="d-inline-flex align-items-center fw-bold text-nowrap text-decoration-none text-object" href="<?= $this->Html->url(['action' => 'view2', $event['id']]) ?>#tab-objects">
+            <span class="misp-icon misp-icon-object misp-simple misp-icon-md me-1"></span>
+            <span><?= h($objCount) ?> <?= $objCount > 1 ? __('Objects') : __('Object') ?></span>
+        </a>
     <?php endif; ?>
 
     <?php if ($corrCount !== 0): ?>
-        <div class="d-inline-flex align-items-center fw-bold text-nowrap" style="<?= $styleOrange ?>">
+        <a class="d-inline-flex align-items-center fw-bold text-nowrap text-decoration-none text-correlation" href="<?= $this->Html->url(['action' => 'view2', $event['id']]) ?>#tab-correlation">
             <i class="fas fa-link me-1"></i>
             <span><?= h($corrCount) ?> Correlations</span>
-        </div>
+        </a>
     <?php endif; ?>
 
 </div>

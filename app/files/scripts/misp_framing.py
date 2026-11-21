@@ -50,7 +50,7 @@ if __name__ == "__main__":
     stix1_parser.set_defaults(func=stix_framing)
 
     stix2_parser = subparsers.add_parser('stix2', help='STIX2 framing.')
-    stix2_parser.add_argument('-v', '--version', default='2.0', choices=['2.0', '2.1'], help='STIX2 version (2.0 or 2.1).')
+    stix2_parser.add_argument('-v', '--version', default='2.1', choices=['2.0', '2.1'], help='STIX2 version (2.0 or 2.1).')
     stix2_parser.add_argument('--uuid', help='UUID used to identity the STIX2 bundle.')
     stix2_parser.set_defaults(func=stix2_framing)
 
@@ -59,3 +59,9 @@ if __name__ == "__main__":
         print(json.dumps(args.func(args)))
     except SystemExit:
         print(json.dumps({'error': 'Framing arguments error, please check requirements for each return format.'}))
+    except Exception as e:
+        # PHP JSON-decodes stdout; a bare traceback there reads as "could not
+        # get results from framing cmd" and loses the actual cause.
+        error = f'{type(e).__name__}: {e}'
+        print(json.dumps({'error': error}))
+        print(error, file=sys.stderr)

@@ -35,6 +35,15 @@ class GalaxyClustersController extends AppController
         )
     );
 
+    public function beforeFilter()
+    {
+        parent::beforeFilter();
+        // The delete and restore confirmations post a hand-built body through
+        // fetch(), so there is no field hash for _validatePost() to compare.
+        // CSRF is still enforced, through the X-CSRF-Token header.
+        $this->_csrfTokenHeaderOnly(['delete', 'deleteSelection', 'restore']);
+    }
+
     public function index($galaxyId)
     {
         $galaxyId = $this->Toolbox->findIdByUuid($this->GalaxyCluster->Galaxy, $galaxyId);
@@ -48,12 +57,11 @@ class GalaxyClustersController extends AppController
         $exception = false;
         $filters = $this->_harvestParameters($filterData, $exception);
         $aclConditions = $this->GalaxyCluster->buildConditions($this->Auth->user());
-        $contextConditions = array();
         if (empty($filters['context'])) {
             $filters['context'] = 'all';
-        } else {
-            $contextConditions = array('GalaxyCluster.deleted' => false);
         }
+        // Deleted clusters are hidden everywhere except the explicit "deleted" context.
+        $contextConditions = array('GalaxyCluster.deleted' => false);
 
         if ($filters['context'] == 'default') {
             $contextConditions['GalaxyCluster.default'] = true;
@@ -67,7 +75,7 @@ class GalaxyClustersController extends AppController
             $contextConditions['GalaxyCluster.deleted'] = true;
         }
 
-        $this->set('passedArgs', json_encode(array('context' => $filters['context'], 'searchall' => isset($filters['searchall']) ? $filters['searchall'] : '')));
+        $this->set('passedArgs', JsonTool::encodeForScript(array('context' => $filters['context'], 'searchall' => isset($filters['searchall']) ? $filters['searchall'] : '')));
         $this->set('context', $filters['context']);
         $searchConditions = array();
         if (empty($filters['searchall'])) {
@@ -115,6 +123,18 @@ class GalaxyClustersController extends AppController
             return $this->RestResponse->viewData($clusters, $this->response->type());
         }
 
+        // For the Deleted toggle: the whole galaxy, whatever the search says.
+        $this->set('deletedCount', $this->GalaxyCluster->find('count', [
+            'recursive' => -1,
+            'conditions' => [
+                'AND' => [
+                    $aclConditions,
+                    'GalaxyCluster.galaxy_id' => $galaxyId,
+                    'GalaxyCluster.deleted' => true,
+                ],
+            ],
+        ]));
+
         $this->paginate['conditions']['AND'][] = $contextConditions;
         $this->paginate['conditions']['AND'][] = $searchConditions;
         $this->paginate['conditions']['AND'][] = $aclConditions;
@@ -140,9 +160,12 @@ class GalaxyClustersController extends AppController
                 $clusters[$k]['GalaxyCluster']['synonyms'][] = $element['value'];
             }
             $clusters[$k]['GalaxyCluster']['event_count'] = 0; // real number is assigned later
+            $clusters[$k]['GalaxyCluster']['attribute_count'] = 0; // real number is assigned later
         }
 
         $eventCountsForTags = $this->GalaxyCluster->Tag->EventTag->countForTags($tagIds, $this->Auth->user());
+        $this->loadModel('AttributeTag');
+        $attributeCountsForTags = $this->AttributeTag->countForTags($tagIds, $this->Auth->user());
 
         $this->loadModel('Sighting');
         $csvForTags = $this->Sighting->tagsSparkline($tagIds, $this->Auth->user(), '0');
@@ -153,6 +176,9 @@ class GalaxyClustersController extends AppController
                 }
                 if (isset($eventCountsForTags[$cluster['GalaxyCluster']['tag_id']])) {
                     $clusters[$k]['GalaxyCluster']['event_count'] = $eventCountsForTags[$cluster['GalaxyCluster']['tag_id']];
+                }
+                if (isset($attributeCountsForTags[$cluster['GalaxyCluster']['tag_id']])) {
+                    $clusters[$k]['GalaxyCluster']['attribute_count'] = $attributeCountsForTags[$cluster['GalaxyCluster']['tag_id']];
                 }
             }
         }
@@ -172,8 +198,8 @@ class GalaxyClustersController extends AppController
 
         if ($this->request->is('ajax')) {
             $this->layout = false;
-            $this->render('ajax/index');
         }
+        $this->render('ajax/index');
     }
 
     /**
@@ -185,9 +211,7 @@ class GalaxyClustersController extends AppController
         $this->GalaxyCluster->includeAnalystDataRecursive = true;
         $cluster = $this->GalaxyCluster->fetchIfAuthorized($this->Auth->user(), $id, 'view', $throwErrors=true, $full=true);
         $tag = $this->GalaxyCluster->Tag->find('first', array(
-            'conditions' => array(
-                'LOWER(name)' => strtolower($cluster['GalaxyCluster']['tag_name']),
-            ),
+            'conditions' => $this->GalaxyCluster->Tag->nameCondition($cluster['GalaxyCluster']['tag_name']),
             'fields' => array('id'),
             'recursive' => -1,
             'contain' => array('EventTag.event_id')
@@ -284,7 +308,10 @@ class GalaxyClustersController extends AppController
             }
             $cluster['GalaxyCluster']['galaxy_id'] = $galaxyId;
             $cluster['GalaxyCluster']['published'] = false;
-            if (isset($cluster['GalaxyCluster']['distribution']) && $cluster['GalaxyCluster']['distribution'] == 4) {
+            if (
+                !empty($cluster['GalaxyCluster']['sharing_group_id']) ||
+                (isset($cluster['GalaxyCluster']['distribution']) && $cluster['GalaxyCluster']['distribution'] == 4)
+            ) {
                 $canSGBeUsed = $this->SharingGroup->checkIfCanBeUsed($this->Auth->user(), $this->_isRest(), $cluster, 'GalaxyCluster');
                 if ($canSGBeUsed !== true) {
                     throw new MethodNotAllowedException($canSGBeUsed);
@@ -365,6 +392,9 @@ class GalaxyClustersController extends AppController
         $sgs = $this->SharingGroup->fetchAllAuthorised($this->Auth->user(), 'name', 1);
         $this->set('sharingGroups', $sgs);
         $this->set('action', 'add');
+        if ($this->theme === 'Overmind' && $this->request->is('ajax')) {
+            $this->layout = false;
+        }
     }
 
     /**
@@ -416,7 +446,10 @@ class GalaxyClustersController extends AppController
                 $cluster['GalaxyCluster']['id'] = $id;
             }
 
-            if (isset($cluster['GalaxyCluster']['distribution']) && $cluster['GalaxyCluster']['distribution'] == 4) {
+            if (
+                !empty($cluster['GalaxyCluster']['sharing_group_id']) ||
+                (isset($cluster['GalaxyCluster']['distribution']) && $cluster['GalaxyCluster']['distribution'] == 4)
+            ) {
                 $canSGBeUsed = $this->SharingGroup->checkIfCanBeUsed($this->Auth->user(), $this->_isRest(), $cluster, 'GalaxyCluster');
                 if ($canSGBeUsed !== true) {
                     throw new MethodNotAllowedException($canSGBeUsed);
@@ -499,6 +532,9 @@ class GalaxyClustersController extends AppController
         $this->set('clusterId', $id);
         $this->set('defaultCluster', $cluster['GalaxyCluster']['default']);
         $this->set('action', 'edit');
+        if ($this->theme === 'Overmind' && $this->request->is('ajax')) {
+            $this->layout = false;
+        }
         $this->render('add');
     }
 
@@ -544,6 +580,9 @@ class GalaxyClustersController extends AppController
         } else {
             $this->set('cluster', $cluster);
             $this->set('type', 'publish');
+            if ($this->theme === 'Overmind' && $this->request->is('ajax')) {
+                $this->layout = false;
+            }
             $this->render('ajax/publishConfirmationForm');
         }
     }
@@ -618,15 +657,97 @@ class GalaxyClustersController extends AppController
     /**
      * @param  mixed $id ID or UUID of the cluster
      */
+    public function deleteSelection($id = null, $hard = false)
+    {
+        $ids = [];
+        if (isset($this->request->data['GalaxyCluster']['ids'])) {
+            $raw = $this->request->data['GalaxyCluster']['ids'];
+            $ids = is_array($raw) ? $raw : json_decode($raw, true);
+        } elseif ($id !== null) {
+            $ids = is_numeric($id) ? [$id] : json_decode(htmlspecialchars_decode(urldecode($id)), true);
+        }
+        $ids = is_array($ids) ? $ids : [];
+
+        if ($this->request->is('post') || $this->request->is('put') || $this->request->is('delete')) {
+            if (!empty($this->request->data['hard'])) {
+                $hard = true;
+            }
+            $deleted = [];
+            foreach ($ids as $cid) {
+                $cluster = $this->GalaxyCluster->fetchIfAuthorized($this->Auth->user(), $cid, 'delete', false, false);
+                if (empty($cluster) || (isset($cluster['authorized']) && $cluster['authorized'] === false)) {
+                    continue;
+                }
+                if ($this->GalaxyCluster->deleteCluster($cluster['GalaxyCluster']['id'], $hard)) {
+                    $deleted[] = $cluster['GalaxyCluster']['id'];
+                }
+            }
+            $count = count($deleted);
+            $message = __n('%s galaxy cluster deleted.', '%s galaxy clusters deleted.', $count, $count);
+            if ($this->request->is('ajax') || $this->_isRest()) {
+                return new CakeResponse([
+                    'body' => json_encode([
+                        'saved' => $count > 0,
+                        'success' => $message,
+                        'errors' => $count > 0 ? '' : __('No galaxy cluster deleted.'),
+                        'ids' => $deleted,
+                    ]),
+                    'status' => 200,
+                    'type' => 'json',
+                ]);
+            }
+            if ($count > 0) {
+                $this->Flash->success($message);
+            } else {
+                $this->Flash->error(__('No galaxy cluster deleted.'));
+            }
+            $this->redirect($this->referer(array('controller' => 'galaxies', 'action' => 'index')));
+        } else {
+            $ids = array_map('intval', $ids);
+            $deletedFlags = empty($ids) ? [] : $this->GalaxyCluster->find('list', [
+                'conditions' => ['GalaxyCluster.id' => $ids],
+                'fields' => ['GalaxyCluster.id', 'GalaxyCluster.deleted'],
+                'recursive' => -1,
+            ]);
+            $liveIds = [];
+            foreach ($deletedFlags as $clusterId => $deleted) {
+                if (!$deleted) {
+                    $liveIds[] = (int)$clusterId;
+                }
+            }
+            $this->set('idArray', $ids);
+            // A selection that is already soft-deleted can only go for good.
+            // The `/true` the index toolbar appends is not a choice: the modal
+            // offers soft or permanent.
+            $this->set('hard', !empty($deletedFlags) && empty($liveIds));
+            $this->set('countedIds', $liveIds);
+            if ($this->theme === 'Overmind') {
+                $this->layout = false;
+            }
+            $this->render('ajax/galaxy_cluster_delete_confirmation');
+        }
+    }
+
     public function delete($id, $hard=false)
     {
         $cluster = $this->GalaxyCluster->fetchIfAuthorized($this->Auth->user(), $id, 'delete', $throwErrors=true, $full=false);
         if ($this->request->is('post')) {
-            if (!empty($this->request->data['hard'])) {
+            if (!empty($this->request->data['hard']) || !empty($this->request->data['GalaxyCluster']['hard'])) {
                 $hard = true;
             }
             $result = $this->GalaxyCluster->deleteCluster($cluster['GalaxyCluster']['id'], $hard=$hard);
             $galaxyId = $cluster['GalaxyCluster']['galaxy_id'];
+            if ($this->request->is('ajax')) {
+                if ($result) {
+                    $message = __(
+                        'Galaxy cluster successfully %s deleted%s.',
+                        $hard ? __('hard') : __('soft'),
+                        $hard ? __(' and added to the block list') : ''
+                    );
+                    return new CakeResponse(['body' => json_encode(['saved' => true, 'success' => $message]), 'status' => 200, 'type' => 'json']);
+                }
+                return new CakeResponse(['body' => json_encode(['saved' => false, 'errors' => __('Galaxy cluster could not be %s deleted.', $hard ? __('hard') : __('soft'))]), 'status' => 200, 'type' => 'json']);
+            }
             if ($result) {
                 $message = __(
                     'Galaxy cluster successfully %s deleted%s.',
@@ -650,8 +771,17 @@ class GalaxyClustersController extends AppController
             }
         } else {
             if ($this->request->is('ajax')) {
+                $isDeleted = !empty($cluster['GalaxyCluster']['deleted']);
                 $this->set('id', $cluster['GalaxyCluster']['id']);
                 $this->set('cluster', $cluster['GalaxyCluster']);
+                $this->set('hard', (bool)$hard || $isDeleted);
+                $this->set('countedIds', $isDeleted ? [] : [(int)$cluster['GalaxyCluster']['id']]);
+                // Opened from the cluster's own page, which a permanent
+                // deletion leaves with nothing to show.
+                $this->set('ownPage', ($this->request->params['named']['origin'] ?? '') === 'view');
+                if ($this->theme === 'Overmind') {
+                    $this->layout = false;
+                }
                 $this->render('ajax/galaxy_cluster_delete_confirmation');
             } else {
                 throw new MethodNotAllowedException(__('This function can only be reached via AJAX.'));
@@ -665,6 +795,12 @@ class GalaxyClustersController extends AppController
         if ($this->request->is('post')) {
             $result = $this->GalaxyCluster->restoreCluster($cluster['GalaxyCluster']['id']);
             $galaxyId = $cluster['GalaxyCluster']['galaxy_id'];
+            if ($this->request->is('ajax')) {
+                if ($result) {
+                    return new CakeResponse(['body' => json_encode(['saved' => true, 'success' => __('Galaxy cluster successfully restored.')]), 'status' => 200, 'type' => 'json']);
+                }
+                return new CakeResponse(['body' => json_encode(['saved' => false, 'errors' => __('Galaxy cluster could not be restored.')]), 'status' => 200, 'type' => 'json']);
+            }
             if ($result) {
                 $message = __('Galaxy cluster successfully restored.');
                 if ($this->_isRest()) {
@@ -683,7 +819,17 @@ class GalaxyClustersController extends AppController
                 }
             }
         } else {
-            throw new MethodNotAllowedException(__('This function can only be reached via POST.'));
+            if ($this->request->is('ajax') || $this->theme === 'Overmind') {
+                $this->set('id', $cluster['GalaxyCluster']['id']);
+                $this->set('cluster', $cluster['GalaxyCluster']);
+                $this->set('ownPage', ($this->request->params['named']['origin'] ?? '') === 'view');
+                if ($this->theme === 'Overmind') {
+                    $this->layout = false;
+                }
+                $this->render('ajax/galaxy_cluster_restore_confirmation');
+            } else {
+                throw new MethodNotAllowedException(__('This function can only be reached via POST.'));
+            }
         }
     }
 
@@ -701,6 +847,9 @@ class GalaxyClustersController extends AppController
             $this->set('galaxy', $galaxy);
             $this->set('galaxy_id', $galaxy['Galaxy']['id']);
             $this->set('convertedCluster', $convertedCluster);
+            if ($this->theme === 'Overmind' && $this->request->is('ajax')) {
+                $this->layout = false;
+            }
             $this->render('cluster_export_misp_galaxy');
         }
     }
@@ -915,6 +1064,9 @@ class GalaxyClustersController extends AppController
         if (!$this->request->is('ajax')) {
             throw new MethodNotAllowedException('This function can only be reached via AJAX.');
         }
+        if ($this->theme === 'Overmind') {
+            $this->layout = false;
+        }
         $cluster = $this->GalaxyCluster->fetchIfAuthorized($this->Auth->user(), $id, 'view', true, true);
         $existingRelations = $this->GalaxyCluster->GalaxyClusterRelation->getExistingRelationships();
         $cluster = $this->GalaxyCluster->attachClusterToRelations($this->Auth->user(), $cluster, $includeInbound);
@@ -933,7 +1085,7 @@ class GalaxyClustersController extends AppController
                 $relations[] = $targetingCluster;
             }
         }
-        $this->set('passedArgs', json_encode([]));
+        $this->set('passedArgs', JsonTool::encodeForScript([]));
         $this->set('relations', $relations);
         $this->set('tree', $tree);
         $this->set('includeInbound', $includeInbound);
@@ -961,5 +1113,91 @@ class GalaxyClustersController extends AppController
         $this->set('includeInbound', $includeInbound);
         $this->set('testtest', 'testtest');
         $this->render('/Elements/GalaxyClusters/view_relation_tree');
+    }
+
+    /**
+     * Lean read-only search across galaxy clusters scoped to a single
+     * Galaxy.type. Built for the event-template user-form's inline
+     * cluster picker (PRD §10.4); paginates client-side via the q
+     * query parameter rather than offset/limit, and returns at most
+     * 50 rows per call so the typeahead stays cheap.
+     *
+     *   GET /galaxy_clusters/search?galaxy_type=tlp&q=amber
+     *
+     * Response: array of {value, label, description, uuid} where
+     * `value` is the canonical tag_name (what the instantiator
+     * stores) and `label` is the human-readable cluster value.
+     */
+    public function search()
+    {
+        $galaxyType = isset($this->request->query['galaxy_type'])
+            ? trim((string)$this->request->query['galaxy_type'])
+            : '';
+        if ($galaxyType === '') {
+            throw new BadRequestException(
+                __('galaxy_type query parameter is required.')
+            );
+        }
+        $q = isset($this->request->query['q'])
+            ? trim((string)$this->request->query['q'])
+            : '';
+
+        $galaxy = $this->GalaxyCluster->Galaxy->find('first', array(
+            'recursive' => -1,
+            'conditions' => array('Galaxy.type' => $galaxyType),
+            'fields' => array('Galaxy.id', 'Galaxy.type', 'Galaxy.name'),
+        ));
+        if (empty($galaxy)) {
+            // Unknown galaxy type — empty result rather than 404 so the
+            // typeahead degrades to "no matches" instead of a popup.
+            return $this->RestResponse->viewData(array(), 'json');
+        }
+
+        $aclConditions = $this->GalaxyCluster->buildConditions($this->Auth->user());
+        $conditions = array(
+            'GalaxyCluster.galaxy_id' => $galaxy['Galaxy']['id'],
+            'GalaxyCluster.deleted' => false,
+        );
+        if (!empty($aclConditions)) {
+            $conditions['AND'][] = $aclConditions;
+        }
+        if ($q !== '') {
+            $like = '%' . strtolower($q) . '%';
+            $conditions['AND'][] = array(
+                'OR' => array(
+                    'LOWER(GalaxyCluster.value) LIKE' => $like,
+                    'LOWER(GalaxyCluster.tag_name) LIKE' => $like,
+                    'LOWER(GalaxyCluster.description) LIKE' => $like,
+                ),
+            );
+        }
+
+        $rows = $this->GalaxyCluster->find('all', array(
+            'recursive' => -1,
+            'conditions' => $conditions,
+            'fields' => array(
+                'GalaxyCluster.id',
+                'GalaxyCluster.uuid',
+                'GalaxyCluster.value',
+                'GalaxyCluster.tag_name',
+                'GalaxyCluster.description',
+            ),
+            'order' => array('GalaxyCluster.value' => 'ASC'),
+            'limit' => 50,
+        ));
+
+        $payload = array();
+        foreach ($rows as $row) {
+            $cluster = $row['GalaxyCluster'];
+            $payload[] = array(
+                'value' => $cluster['tag_name'],
+                'label' => $cluster['value'],
+                'description' => isset($cluster['description'])
+                    ? (string)$cluster['description']
+                    : '',
+                'uuid' => $cluster['uuid'],
+            );
+        }
+        return $this->RestResponse->viewData($payload, 'json');
     }
 }

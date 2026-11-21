@@ -74,6 +74,92 @@ class AuthKeysController extends AppController
         }
     }
 
+    public function deleteSelection($id = null)
+    {
+        return $this->CRUD->deleteSelection($id, [
+            'modelName' => 'AuthKey',
+            'restName' => 'AuthKeys',
+            'itemName' => 'auth key',
+            'view' => 'ajax/authKeyDeleteConfirmationForm',
+            'checkModifyCallback' => function ($itemId, $item) {
+                return $this->AuthKey->canEditAuthKey($this->Auth->user(), $itemId);
+            },
+            'multiSuccessMessageCallback' => function ($count) {
+                return __n('%s auth key deleted.', '%s auth keys deleted.', $count, $count);
+            }
+        ]);
+    }
+
+    /**
+     * Revoke an auth key by expiring it right away.
+     *
+     * @param int $id
+     */
+    public function revoke($id)
+    {
+        if (!$this->AuthKey->canEditAuthKey($this->Auth->user(), $id)) {
+            throw new MethodNotAllowedException(__('Invalid user or insufficient privileges to interact with an authkey for the given user.'));
+        }
+        $conditions = $this->__prepareConditions();
+        $conditions['AND'][]['AuthKey.id'] = $id;
+        $authKey = $this->AuthKey->find('first', [
+            'conditions' => $conditions,
+            'recursive' => 1,
+        ]);
+        if (empty($authKey)) {
+            throw new NotFoundException(__('Invalid auth key.'));
+        }
+        $expiration = (int)$authKey['AuthKey']['expiration'];
+        $alreadyExpired = $expiration !== 0 && $expiration <= time();
+
+        if ($this->request->is(['post', 'put'])) {
+            if ($alreadyExpired) {
+                $message = __('Auth key #%s has already expired.', $id);
+                if ($this->IndexFilter->isRest()) {
+                    return $this->RestResponse->saveFailResponse(
+                        'AuthKeys', 'revoke', $id, $message, $this->response->type()
+                    );
+                }
+                $this->Flash->error($message);
+                return $this->redirect($this->referer(['action' => 'index']));
+            }
+            $saved = $this->AuthKey->save(
+                ['AuthKey' => [
+                    'id' => $authKey['AuthKey']['id'],
+                    'user_id' => $authKey['AuthKey']['user_id'],
+                    'expiration' => time(),
+                ]],
+                ['validate' => false, 'fieldList' => ['expiration']]
+            );
+            $message = $saved ?
+                __('Auth key #%s revoked.', $id) :
+                __('Auth key #%s could not be revoked.', $id);
+            if ($this->IndexFilter->isRest()) {
+                return $saved ?
+                    $this->RestResponse->saveSuccessResponse(
+                        'AuthKeys', 'revoke', $id, $this->response->type(), $message
+                    ) :
+                    $this->RestResponse->saveFailResponse(
+                        'AuthKeys', 'revoke', $id, $message, $this->response->type()
+                    );
+            }
+            if ($saved) {
+                $this->Flash->success($message);
+            } else {
+                $this->Flash->error($message);
+            }
+            return $this->redirect($this->referer(['action' => 'index']));
+        }
+
+        if (!$this->request->is('ajax')) {
+            throw new MethodNotAllowedException(__('This action expects a POST request.'));
+        }
+        $this->set('id', $authKey['AuthKey']['id']);
+        $this->set('alreadyExpired', $alreadyExpired);
+        $this->layout = false;
+        $this->render('ajax/authKeyRevokeConfirmationForm');
+    }
+
     public function edit($id)
     {
         if(!$this->AuthKey->canEditAuthKey($this->Auth->user(), $id)) {
@@ -95,10 +181,19 @@ class AuthKeysController extends AppController
         if ($this->IndexFilter->isRest()) {
             return $this->restResponsePayload;
         }
+        // Build the user dropdown from the authkey's actual owner, not from request->data:
+        // on a failed validation POST the latter reflects attacker-supplied input, which would
+        // let a user enumerate arbitrary user emails. Access to this owner is already authorised
+        // by the canEditAuthKey() check at the top of this action.
+        $ownerUserId = $this->AuthKey->find('column', [
+            'fields' => ['AuthKey.user_id'],
+            'conditions' => ['AuthKey.id' => $id],
+        ]);
+        $ownerUserId = $ownerUserId[0] ?? null;
         $this->set('dropdownData', [
             'user' => $this->User->find('list', [
                 'sort' => ['username' => 'asc'],
-                'conditions' => ['id' => $this->request->data['AuthKey']['user_id']],
+                'conditions' => ['id' => $ownerUserId],
             ])
         ]);
         $this->set('menuData', [
@@ -108,6 +203,9 @@ class AuthKeysController extends AppController
         $this->set('edit', true);
         $this->set('validity', Configure::read('Security.advanced_authkeys_validity'));
         $this->set('title_for_layout', __('Edit auth key'));
+        if ($this->theme === 'Overmind' && $this->request->is('ajax')) {
+            $this->layout = false;
+        }
         $this->render('add');
     }
 
@@ -119,7 +217,10 @@ class AuthKeysController extends AppController
         }
         $params = [
             'displayOnSuccess' => 'authkey_display',
-            'override' => ['authkey' => null], // do not allow to use own key, always generate random one
+            'override' => [
+                'authkey' => null, // do not allow to use own key, always generate random one
+                'unique_ips' => null, // derived over time from key usage, never user-settable on creation
+            ],
             'afterFind' => function (array $authKey, array $savedData) { // remove hashed key from response
                 unset($authKey['AuthKey']['authkey']);
                 $authKey['AuthKey']['authkey_raw'] = $savedData['AuthKey']['authkey_raw'];
@@ -128,6 +229,19 @@ class AuthKeysController extends AppController
         ];
         if ($user_id === 'me' || $user_id === false) {
             $user_id = $this->Auth->user('id');
+        }
+        // A JSON float passes an (int) check, yet Cake saves it rounded up.
+        if (!is_int($user_id) &&
+            !(is_string($user_id) && ctype_digit($user_id))
+        ) {
+            throw new MethodNotAllowedException(__('Invalid user or insufficient privileges to interact with an authkey for the given user.'));
+        }
+        $user_id = (int)$user_id;
+        // For modal display in Overmind (the add form on GET, the
+        // generated-key display on POST success, or the form+errors on failure).
+        // Must be set BEFORE CRUD->add, which renders displayOnSuccess internally.
+        if ($this->theme === 'Overmind' && $this->request->is('ajax')) {
+            $this->layout = false;
         }
         $selectConditions = [];
         if ($user_id) {
@@ -188,9 +302,16 @@ class AuthKeysController extends AppController
         ]);
     }
 
-    public function pin($id, $ip) {
+    public function pin($id, $ip = null) {
         if(!$this->AuthKey->canEditAuthKey($this->Auth->user(), $id)) {
             throw new MethodNotAllowedException(__('Invalid user or insufficient privileges to interact with an authkey for the given user.'));
+        }
+        // An IPv6 address cannot ride in the URL: its colons are read as a named parameter.
+        if ($ip === null && isset($this->request->data['ip'])) {
+            $ip = $this->request->data['ip'];
+        }
+        if ($ip === null || filter_var($ip, FILTER_VALIDATE_IP) === false) {
+            throw new BadRequestException(__('Invalid IP address.'));
         }
         if ($this->request->is('post')) {
             // find entry, to confirm user is authorized
@@ -226,6 +347,14 @@ class AuthKeysController extends AppController
             $conditions = []; // site admin can see/edit all keys
         } else if ($user['Role']['perm_admin']) {
             $conditions['AND'][]['User.org_id'] = $user['org_id']; // org admin can see his/her user org auth keys
+            $siteAdminRoleIds = $this->AuthKey->User->Role->find('list', [
+                'recursive' => -1,
+                'fields' => ['Role.id', 'Role.id'],
+                'conditions' => ['Role.perm_site_admin' => true],
+            ]);
+            if (!empty($siteAdminRoleIds)) {
+                $conditions['AND'][]['User.role_id NOT IN'] = array_keys($siteAdminRoleIds);
+            }
         } else {
             $conditions['AND'][]['User.id'] = $user['id'];
         }

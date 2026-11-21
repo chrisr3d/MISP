@@ -39,6 +39,17 @@ class JsonTool
     }
 
     /**
+     * JSON for a <script> block: < > & ' " come out as \u escapes, so no value
+     * can end the block or change how the HTML parser reads it.
+     * @param mixed $value
+     * @return string|false
+     */
+    public static function encodeForScript($value)
+    {
+        return json_encode($value, JSON_HEX_TAG | JSON_HEX_AMP | JSON_HEX_APOS | JSON_HEX_QUOT);
+    }
+
+    /**
      * @param string $value
      * @return SimdJsonBase64Encode|string
      */
@@ -143,6 +154,22 @@ class JsonTool
         }
 
         return htmlspecialchars_decode(htmlspecialchars($string, ENT_SUBSTITUTE, 'UTF-8'));
+    }
+
+    /**
+     * Make string safe to store in a MySQL utf8mb3 (a.k.a. utf8) column by replacing invalid UTF-8 bytes
+     * and stripping 4-byte UTF-8 characters (Supplementary Multilingual Plane and above, U+10000..U+10FFFF)
+     * with the Unicode Replacement Character U+FFFD.
+     * @param string $string
+     * @return string
+     */
+    public static function sanitizeForUtf8mb3($string)
+    {
+        if (!is_string($string) || $string === '') {
+            return $string;
+        }
+        $string = self::escapeNonUnicode($string);
+        return preg_replace('/[\x{10000}-\x{10FFFF}]/u', "\xEF\xBF\xBD", $string);
     }
 
     /**

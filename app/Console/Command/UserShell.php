@@ -28,7 +28,7 @@ class UserShell extends AppShell
             'parser' => [
                 'arguments' => [
                     'email' => ['help' => __('E-mail address (also used as the username.'), 'required' => true],
-                    'role_id' => ['help' => __('Role ID of the user. For a list of available roles, use `cake Roles list`.'), 'required' => true],
+                    'role_id' => ['help' => __('Role ID of the user. For a list of available roles, use `cake Role list`.'), 'required' => true],
                     'org_id' => ['help' => __('Organisation under which the user should be created'), 'required' => true],
                     'password' => ['help' => __('Enter a password to assign to the user (optional) - if none is set, the user will receive a temporary password.')]
                 ],
@@ -414,12 +414,22 @@ class UserShell extends AppShell
         if (!is_array($auth)) {
             throw new Exception("`Security.auth` config value must be array.");
         }
-        if (!in_array('OidcAuth.Oidc', $auth, true)) {
-            $this->error('This method is currently supported just by OIDC auth provider');
+        $hasOidc = in_array('OidcAuth.Oidc', $auth, true);
+        $hasLdap = in_array('LdapAuth.Ldap', $auth, true);
+        if (!$hasOidc && !$hasLdap) {
+            $this->error('This method is currently supported just by the OIDC and LDAP auth providers');
         }
 
-        App::uses('Oidc', 'OidcAuth.Lib');
-        $oidc = new Oidc($this->User);
+        // Both providers expose isUserValid()/blockInvalidUser(), so the loop
+        // below does not care which one it is talking to. OIDC wins when both
+        // are enabled, which is what this command did before LDAP was added.
+        if ($hasOidc) {
+            App::uses('Oidc', 'OidcAuth.Lib');
+            $provider = new Oidc($this->User);
+        } else {
+            App::uses('LdapSync', 'LdapAuth.Lib');
+            $provider = new LdapSync($this->User);
+        }
 
         $conditions = ['User.disabled' => false]; // fetch just not disabled users
 
@@ -445,9 +455,9 @@ class UserShell extends AppShell
             $user = $user['User'];
 
             if ($blockInvalid) {
-                $result = $oidc->blockInvalidUser($user, true, $update);
+                $result = $provider->blockInvalidUser($user, true, $update);
             } else {
-                $result = $oidc->isUserValid($user, true, $update);
+                $result = $provider->isUserValid($user, true, $update);
             }
 
             $this->out("{$user['email']}: " . ($result ? '<success>valid</success>' : '<error>invalid</error>'));

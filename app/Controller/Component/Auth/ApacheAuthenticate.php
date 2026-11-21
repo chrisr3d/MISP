@@ -55,7 +55,7 @@ class ApacheAuthenticate extends BaseAuthenticate
 
         // Get information user for MISP auth
         $envvar = $this->settings['fields']['envvar'];
-        $mispUsername = $_SERVER[$envvar];
+        $mispUsername = ldap_escape($_SERVER[$envvar], '', LDAP_ESCAPE_FILTER);
 
         // make LDAP request to get user email required for MISP auth
         $ldapdn = Configure::read('ApacheSecureAuth.ldapDN');
@@ -92,9 +92,9 @@ class ApacheAuthenticate extends BaseAuthenticate
             // example for searchAttribut: '(uuid=ApacheUser)'
             // searchAttribut is a typo left in for backward compatibility
             if (!empty($ldapSearchFilter)) {
-                $filter = '(&' . $ldapSearchFilter . '(' . Configure::read('ApacheSecureAuth.ldapSearchAttribut') . '=' . $_SERVER[$envvar] . '))';
+                $filter = '(&' . $ldapSearchFilter . '(' . Configure::read('ApacheSecureAuth.ldapSearchAttribut') . '=' . $mispUsername . '))';
             } else {
-                $filter = '(' . Configure::read('ApacheSecureAuth.ldapSearchAttribut') . '=' . $_SERVER[$envvar] . ')';
+                $filter = '(' . Configure::read('ApacheSecureAuth.ldapSearchAttribut') . '=' . $mispUsername . ')';
             }
             // example: mail
             $getLdapUserInfo = Configure::read('ApacheSecureAuth.ldapFilter');
@@ -180,11 +180,17 @@ class ApacheAuthenticate extends BaseAuthenticate
                 $user['email'] = $mispUsername;
                 $user['org_id'] = $org_id;
                 $user['role_id'] = $roleId;
-                # Reenable user in case it has been disabled
-                $user['disabled'] = 0;
+                $disabled = !empty($user['disabled']);
+                if ($disabled && Configure::read('ApacheSecureAuth.unblock')) {
+                    $user['disabled'] = 0;
+                }
             }
 
             $userModel->save($user, false);
+
+            if (!empty($disabled) && !Configure::read('ApacheSecureAuth.unblock')) {
+                return false;
+            }
         }
 
         return $this->_findUser(

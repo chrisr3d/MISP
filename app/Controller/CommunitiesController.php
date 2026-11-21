@@ -24,7 +24,7 @@ class CommunitiesController extends AppController
         } else {
             $filters['value'] = false;
         }
-        $community_list = $this->Community->getCommunityList($filters['context'], $filters['value']);
+        $community_list = $this->Community->getCommunityList($filters['context'], $filters['value'], $this->theme === "Overmind");
 
         //foreach ($community)
         if ($this->_isRest()) {
@@ -45,6 +45,12 @@ class CommunitiesController extends AppController
             return $this->RestResponse->viewData($community, $this->response->type());
         } else {
             $this->set('community', $community);
+            $this->loadModel('Organisation');
+            $this->set('hostOrg', empty($community['org_uuid']) ? null : $this->Organisation->find('first', [
+                'recursive' => -1,
+                'fields' => ['Organisation.id', 'Organisation.uuid', 'Organisation.name'],
+                'conditions' => ['Organisation.uuid' => $community['org_uuid']],
+            ]));
         }
     }
 
@@ -172,6 +178,9 @@ Thank you in advance!',
             if (!empty($this->request->data['Server']['mock'])) {
                 $this->set('mock', $this->request->data['Server']['mock']);
             }
+        }
+        if ($this->theme === "Overmind"){
+            $this->layout=false;
         }
         $this->set('community', $community);
     }

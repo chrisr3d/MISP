@@ -3,6 +3,9 @@ App::uses('AppShell', 'Console/Command');
 App::uses('ProcessTool', 'Tools');
 App::uses('FileAccessTool', 'Tools');
 App::uses('JsonTool', 'Tools');
+App::uses('AbstractMigration', 'Migration');
+App::uses('MigrationManager', 'Migration');
+App::uses('AbstractGrammar', 'Migration/Grammar');
 
 /**
  * @property Server $Server
@@ -20,12 +23,10 @@ class AdminShell extends AppShell
 {
     public $uses = [
         'Event',
-        'Post',
         'MispAttribute',
         'Job',
         'User',
         'Task',
-        'Allowedlist',
         'Server',
         'Organisation',
         'AdminSetting',
@@ -50,6 +51,12 @@ class AdminShell extends AppShell
         ));
         $parser->addSubcommand('updateJSONLite', array(
             'help' => __('***TESTING ONLY*** Update the JSON definitions of MISP - but with a minimal set, only meant for testing.'),
+        ));
+        $parser->addSubcommand('checkUserValidity', array(
+            'help' => __('Report users that the external identity provider no longer backs. Schedulable as an Admin task.'),
+        ));
+        $parser->addSubcommand('blockInvalidUsers', array(
+            'help' => __('Disable users that the external identity provider no longer backs, and apply role and organisation changes. Schedulable as an Admin task.'),
         ));
         $parser->addSubcommand('updateWarningLists', array(
             'help' => __('Update the JSON definition of warninglists.'),
@@ -117,6 +124,9 @@ class AdminShell extends AppShell
         $parser->addSubcommand('dumpCurrentDatabaseSchema', [
             'help' => __('Dump current database schema to JSON file.'),
         ]);
+        $parser->addSubcommand('updateAsnCountryMap', [
+            'help' => __('Regenerate app/files/geo-open/asn-country.json from the GeoOpen-Country-ASN mmdb (requires the python maxminddb package). Run after the mmdb is updated; also part of preRelease.'),
+        ]);
         $parser->addSubcommand('removeOrphanedCorrelations', [
             'help' => __('Remove orphaned correlations.'),
         ]);
@@ -128,6 +138,22 @@ class AdminShell extends AppShell
         ]);
         $parser->addSubcommand('redisReady', [
             'help' => __('Check if it is possible connect to Redis.'),
+        ]);
+        $parser->addSubcommand('redisRepairSerialization', [
+            'help' => __('Rewrite the values in Redis that were stored PHP-serialized back to their raw form.'),
+            'parser' => [
+                'arguments' => [
+                    'jobId' => ['help' => __('Job to report progress to.'), 'required' => false],
+                ],
+                'options' => [
+                    'dry-run' => [
+                        'short' => 'd',
+                        'help' => __('Count what would be repaired, without changing anything.'),
+                        'default' => false,
+                        'boolean' => true,
+                    ],
+                ],
+            ],
         ]);
         $parser->addSubcommand('securityAudit', [
             'help' => __('Run security audit.'),
@@ -166,19 +192,101 @@ class AdminShell extends AppShell
         $parser->addSubcommand('schemaDiagnostics', [
             'help' => __('Check differences between current and expected database schema')
         ]);
+        $parser->addSubcommand('migrationStatus', [
+            'help' => __('Report the database migrations: which have been applied, which are still pending, and which failed.'),
+            'parser' => [
+                'options' => [
+                    'json' => [
+                        'help' => __('Print the same report as JSON. What a regenerated install baseline needs, to seed the ledger with the migrations already baked into it.'),
+                        'default' => false,
+                        'boolean' => true,
+                    ],
+                ],
+            ],
+        ]);
+        $parser->addSubcommand('migrationApply', [
+            'help' => __('Apply every pending database migration in order, stopping at the first failure.'),
+            'parser' => [
+                'options' => [
+                    'id' => [
+                        'help' => __('Apply only the migration carrying this id. Default: every pending one, in order.'),
+                    ],
+                    'dry-run' => [
+                        'short' => 'd',
+                        'help' => __('Print the SQL the migrations would emit, for every engine MISP supports, without executing anything.'),
+                        'default' => false,
+                        'boolean' => true,
+                    ],
+                ],
+            ],
+        ]);
+        $parser->addSubcommand('migrationCreate', [
+            'help' => __('Scaffold a new migration class from the stub.'),
+            'parser' => [
+                'arguments' => [
+                    'slug' => [
+                        'help' => __('Short name for the migration - letters, digits and underscores only. The id is the current timestamp followed by this slug.'),
+                        'required' => true,
+                    ],
+                ],
+                'options' => [
+                    'description' => [
+                        'help' => __('One line on what the migration is for, written into the scaffolded class.'),
+                    ],
+                ],
+            ],
+        ]);
+        $parser->addSubcommand('dumpInstallBaseline', [
+            'help' => __('Render an install baseline (the INSTALL/<ENGINE>.sql a fresh instance loads) from a reference MySQL database at the frozen db_version. For developers.'),
+            'parser' => [
+                'options' => [
+                    'engine' => [
+                        'help' => __('Which engine to render for: mysql or pgsql.'),
+                        'choices' => ['mysql', 'pgsql'],
+                        'required' => true,
+                    ],
+                    'database' => [
+                        'help' => __('The reference database on the connected MySQL server - a clean install brought to the frozen db_version. Default: the connected database.'),
+                    ],
+                    'output' => [
+                        'help' => __('Write the baseline here instead of printing it. The notes on what could not be rendered as-is always go to stderr.'),
+                    ],
+                ],
+            ],
+        ]);
+        $parser->addSubcommand('verifyInstallBaseline', [
+            'help' => __('Read a database an install baseline was loaded into back through its own driver, and diff it against the reference the baseline was generated from. For developers.'),
+            'parser' => [
+                'options' => [
+                    'connection' => [
+                        'help' => __('The app/Config/database.php connection the baseline was loaded into.'),
+                        'required' => true,
+                    ],
+                    'database' => [
+                        'help' => __('The reference database on the connected MySQL server. Default: the connected database.'),
+                    ],
+                ],
+            ],
+        ]);
         return $parser;
     }
 
     public function jobForgot()
     {
         if (empty($this->args[0])) {
-            die('Usage: ' . $this->Server->command_line_functions['console_admin_tasks']['data']['Forgot'] . PHP_EOL);
+            $this->error('Usage: MISP/app/Console/cake Admin jobForgot [email] [ip] [job_id]');
         }
 
         $email = $this->args[0];
         $ip = empty($this->args[1]) ? null : $this->args[1];
         $jobId = empty($this->args[2]) ? null : $this->args[2];
-        $this->User->forgot($email, $ip, $jobId);
+        // User::forgot() takes two arguments; the job id is this shell's to
+        // resolve, exactly as every other job* method in this file does.
+        $this->User->forgot($email, $ip);
+        // Uniform whatever forgot() returned. Recording the hit or miss here
+        // would put an account-enumeration answer in the jobs table, which is
+        // the same reason forgotRouter() queues before it looks anybody up.
+        $this->Job->saveStatus($jobId, true, __('Password reset request processed.'));
     }
 
     public function jobGenerateCorrelation()
@@ -201,7 +309,7 @@ class AdminShell extends AppShell
     public function jobGenerateOccurrences()
     {
         if (empty($this->args[0])) {
-            die('Usage: ' . $this->Server->command_line_functions['console_admin_tasks']['data']['Generate over-correlation occurrences'] . PHP_EOL);
+            $this->error('Usage: ' . $this->Server->command_line_functions['console_admin_tasks']['data']['Generate over-correlation occurrences']);
         }
 
         $jobId = $this->args[0];
@@ -211,7 +319,7 @@ class AdminShell extends AppShell
     public function jobPurgeCorrelation()
     {
         if (empty($this->args[0])) {
-            die('Usage: ' . $this->Server->command_line_functions['console_admin_tasks']['data']['Purge correlation'] . PHP_EOL);
+            $this->error('Usage: ' . $this->Server->command_line_functions['console_admin_tasks']['data']['Purge correlation']);
         }
 
         $jobId = $this->args[0];
@@ -222,7 +330,7 @@ class AdminShell extends AppShell
     public function jobGenerateShadowAttributeCorrelation()
     {
         if (empty($this->args[0])) {
-            die('Usage: ' . $this->Server->command_line_functions['console_admin_tasks']['data']['Generate shadow attribute correlation'] . PHP_EOL);
+            $this->error('Usage: ' . $this->Server->command_line_functions['console_admin_tasks']['data']['Generate shadow attribute correlation']);
         }
 
         $jobId = $this->args[0];
@@ -241,7 +349,7 @@ class AdminShell extends AppShell
     public function updateAfterPull()
     {
         if (empty($this->args[0]) || empty($this->args[1]) || empty($this->args[2])) {
-            die('Usage: ' . $this->Server->command_line_functions['console_admin_tasks']['data']['Update after pull'] . PHP_EOL);
+            $this->error('Usage: ' . $this->Server->command_line_functions['console_admin_tasks']['data']['Update after pull']);
         }
 
         $this->loadModel('Job');
@@ -263,29 +371,47 @@ class AdminShell extends AppShell
     public function restartWorkers()
     {
         if (Configure::read('SimpleBackgroundJobs.enabled')) {
-            $this->error('This method does nothing when SimpleBackgroundJobs are enabled.');
+            try {
+                $this->getBackgroundJobsTool()->restartWorkers(true);
+            } catch (Throwable $e) {
+                $this->error(__('Could not restart the workers'), $e->getMessage());
+            }
+        } else {
+            $this->Server->restartWorkers();
         }
-
-        $this->Server->restartWorkers();
         echo PHP_EOL . 'Workers restarted.' . PHP_EOL;
     }
 
     public function restartWorker()
     {
-        if (Configure::read('SimpleBackgroundJobs.enabled')) {
-            $this->error('This method does nothing when SimpleBackgroundJobs are enabled.');
+        $simpleBackgroundJobs = (bool)Configure::read('SimpleBackgroundJobs.enabled');
+
+        // Supervisor identifies its programs by name, CakeResque by PID.
+        if (empty($this->args[0]) || (!$simpleBackgroundJobs && !is_numeric($this->args[0]))) {
+            $this->error('Usage: ' . $this->Server->command_line_functions['worker_management_tasks']['data']['Restart a worker']);
         }
 
-        if (empty($this->args[0]) || !is_numeric($this->args[0])) {
-            die('Usage: ' . $this->Server->command_line_functions['worker_management_tasks']['data']['Restart a worker'] . PHP_EOL);
-        }
-
-        $pid = $this->args[0];
-        $result = $this->Server->restartWorker($pid);
-        if ($result === true) {
-            $response = __('Worker restarted.');
+        $worker = $this->args[0];
+        if ($simpleBackgroundJobs) {
+            try {
+                $tool = $this->getBackgroundJobsTool();
+                $tool->stopWorker($worker, true);
+                if (is_numeric($worker)) {
+                    $tool->restartDeadWorkers(true);
+                } else {
+                    $tool->startWorker($worker, true);
+                }
+                $response = __('Worker restarted.');
+            } catch (Throwable $e) {
+                $response = __('Could not restart the worker. Reason: %s', $e->getMessage());
+            }
         } else {
-            $response = __('Could not restart the worker. Reason: %s', $result);
+            $result = $this->Server->restartWorker($worker);
+            if ($result === true) {
+                $response = __('Worker restarted.');
+            } else {
+                $response = __('Could not restart the worker. Reason: %s', $result);
+            }
         }
         echo sprintf(
             '%s%s%s',
@@ -297,16 +423,22 @@ class AdminShell extends AppShell
 
     public function killWorker()
     {
-        if (Configure::read('SimpleBackgroundJobs.enabled')) {
-            $this->error('This method does nothing when SimpleBackgroundJobs are enabled.');
+        $simpleBackgroundJobs = (bool)Configure::read('SimpleBackgroundJobs.enabled');
+
+        if (empty($this->args[0]) || (!$simpleBackgroundJobs && !is_numeric($this->args[0]))) {
+            $this->error('Usage: ' . $this->Server->command_line_functions['worker_management_tasks']['data']['Kill a worker']);
         }
 
-        if (empty($this->args[0]) || !is_numeric($this->args[0])) {
-            die('Usage: ' . $this->Server->command_line_functions['worker_management_tasks']['data']['Kill a worker'] . PHP_EOL);
+        $worker = $this->args[0];
+        if ($simpleBackgroundJobs) {
+            try {
+                $this->getBackgroundJobsTool()->stopWorker($worker, true);
+            } catch (Throwable $e) {
+                $this->error(__('Could not kill the worker'), $e->getMessage());
+            }
+        } else {
+            $this->Server->killWorker($worker, false);
         }
-
-        $pid = $this->args[0];
-        $result = $this->Server->killWorker($pid, false);
         echo sprintf(
             '%s%s%s',
             PHP_EOL,
@@ -317,16 +449,22 @@ class AdminShell extends AppShell
 
     public function startWorker()
     {
-        if (Configure::read('SimpleBackgroundJobs.enabled')) {
-            $this->error('This method does nothing when SimpleBackgroundJobs are enabled.');
-        }
-
         if (empty($this->args[0])) {
-            die('Usage: ' . $this->Server->command_line_functions['worker_management_tasks']['data']['Start a worker'] . PHP_EOL);
+            $this->error('Usage: ' . $this->Server->command_line_functions['worker_management_tasks']['data']['Start a worker']);
         }
 
         $queue = $this->args[0];
-        $this->Server->startWorker($queue);
+        if (Configure::read('SimpleBackgroundJobs.enabled')) {
+            try {
+                if (!$this->getBackgroundJobsTool()->startWorkerByQueue($queue)) {
+                    $this->error(__('Could not start a worker for queue %s', $queue), __('No stopped worker found for that queue.'));
+                }
+            } catch (Throwable $e) {
+                $this->error(__('Could not start the worker'), $e->getMessage());
+            }
+        } else {
+            $this->Server->startWorker($queue);
+        }
         echo sprintf(
             '%s%s%s',
             PHP_EOL,
@@ -359,6 +497,10 @@ class AdminShell extends AppShell
     public function updateJSON()
     {
         $this->out('Updating all JSON structures.');
+
+        $userId = empty($this->args[0])  ? null : $this->args[0];
+        $jobId = empty($this->args[1])  ? null : $this->args[1];
+
         $overallSuccess = true;
         foreach ($this->Server->updateJSON() as $type => $result) {
             $type = Inflector::pluralize(Inflector::humanize($type));
@@ -372,8 +514,15 @@ class AdminShell extends AppShell
         }
         if ($overallSuccess) {
             $this->out('All JSON structures updated. Thank you and have a very safe and productive day.');
+            if (!is_null($jobId)) {
+                $this->Job->saveProgress($jobId, 'All JSON structures updated', 100);
+                $job['Job']['status'] = Job::STATUS_COMPLETED;
+            }
         } else {
             $this->error('Some structure could no be updated');
+            if (!is_null($jobId)) {
+                $this->Job->saveStatus($jobId, false, 'Some JSON structures could not be updated');
+            }
         }
     }
 
@@ -441,6 +590,61 @@ class AdminShell extends AppShell
         }
     }
 
+    /**
+     * Report which users the identity provider no longer backs. Changes nothing.
+     */
+    public function checkUserValidity()
+    {
+        $this->__runUserValidityCheck(false);
+    }
+
+    /**
+     * Disable users the identity provider no longer backs, and apply role and
+     * organisation changes it dictates.
+     */
+    public function blockInvalidUsers()
+    {
+        $this->__runUserValidityCheck(true);
+    }
+
+    /**
+     * Both of the above, so a scheduled run and `cake User check_validity`
+     * cannot diverge: this dispatches that command rather than repeating it.
+     *
+     * @param bool $enforce Disable invalid users and write back role/org.
+     */
+    private function __runUserValidityCheck($enforce)
+    {
+        $jobId = empty($this->args[0]) ? null : $this->args[0];
+
+        $command = 'User check_validity';
+        if ($enforce) {
+            $command .= ' --block_invalid --update';
+        }
+
+        try {
+            // The dispatched command prints a line per user, which the worker
+            // captures as the job's output.
+            $this->dispatchShell($command);
+        } catch (Exception $e) {
+            $message = __('User validity check failed: %s', $e->getMessage());
+            $this->out($message);
+            if ($jobId !== null) {
+                $this->Job->saveStatus($jobId, false, $message);
+            }
+            $this->_stop(1);
+            return;
+        }
+
+        $message = $enforce
+            ? __('User validity check complete, invalid users disabled.')
+            : __('User validity check complete, no changes made.');
+        $this->out($message);
+        if ($jobId !== null) {
+            $this->Job->saveStatus($jobId, true, $message);
+        }
+    }
+
     public function updateWarningLists()
     {
         $jobId = empty($this->args[0]) ? null : $this->args[0];
@@ -487,7 +691,7 @@ class AdminShell extends AppShell
     public function updateObjectTemplates()
     {
         if (empty($this->args[0])) {
-            die('Usage: ' . $this->Server->command_line_functions['console_admin_tasks']['data']['Update object templates'] . PHP_EOL);
+            $this->error('Usage: ' . $this->Server->command_line_functions['console_admin_tasks']['data']['Update object templates']);
         } else {
             $userId = $this->args[0];
             $user = $this->User->getAuthUser($userId);
@@ -524,7 +728,7 @@ class AdminShell extends AppShell
     public function jobUpgrade24()
     {
         if (empty($this->args[0]) || empty($this->args[1])) {
-            die('Usage: ' . $this->Server->command_line_functions['console_admin_tasks']['data']['Job upgrade'] . PHP_EOL);
+            $this->error('Usage: ' . $this->Server->command_line_functions['console_admin_tasks']['data']['Job upgrade']);
         }
 
         $jobId = $this->args[0];
@@ -541,7 +745,7 @@ class AdminShell extends AppShell
     public function prune_update_logs()
     {
         if (empty($this->args[0]) || empty($this->args[1])) {
-            die('Usage: ' . $this->Server->command_line_functions['console_admin_tasks']['data']['Prune update logs'] . PHP_EOL);
+            $this->error('Usage: ' . $this->Server->command_line_functions['console_admin_tasks']['data']['Prune update logs']);
         }
 
         $jobId = $this->args[0];
@@ -618,7 +822,7 @@ class AdminShell extends AppShell
             $this->error(__('Setting change rejected.'), $message);
         }
 
-        // Convert value to boolean or to int
+        // Convert value to boolean, int or float
         if ($value !== null) {
             if ($setting['type'] === 'boolean') {
                 $value = $this->toBoolean($value);
@@ -630,6 +834,11 @@ class AdminShell extends AppShell
                 } else {
                     $this->error(__('Setting "%s" change rejected.', $settingName), __('Provided value %s is not a number.', $value));
                 }
+            } else if ($setting['type'] === 'float') {
+                if (!is_numeric($value)) {
+                    $this->error(__('Setting "%s" change rejected.', $settingName), __('Provided value %s is not a number.', $value));
+                }
+                $value = (float)$value;
             }
         }
 
@@ -645,7 +854,7 @@ class AdminShell extends AppShell
     public function setDatabaseVersion()
     {
         if (empty($this->args[0])) {
-            die('Usage: ' . $this->Server->command_line_functions['console_admin_tasks']['data']['Set database version'] . PHP_EOL);
+            $this->error('Usage: ' . $this->Server->command_line_functions['console_admin_tasks']['data']['Set database version']);
         } else {
             $db_version = $this->AdminSetting->find('first', array(
                 'conditions' => array('setting' => 'db_version')
@@ -662,20 +871,489 @@ class AdminShell extends AppShell
 
     public function runUpdates()
     {
-        $whoami = ProcessTool::whoami();
-        if (in_array($whoami, ['httpd', 'www-data', 'apache', 'wwwrun', 'travis', 'www'], true) || $whoami === Configure::read('MISP.osuser')) {
-            $this->out('Executing all updates to bring the database up to date with the current version.');
-            $lock = $this->AdminSetting->find('first', array('conditions' => array('setting' => 'update_locked')));
-            if (!empty($lock)) {
-                $this->AdminSetting->delete($lock['AdminSetting']['id']);
-            }
-            $processId = empty($this->args[0]) ? false : $this->args[0];
-            $this->Server->runUpdates(true, false, $processId);
+        $this->AdminSetting->resetUpdateFailNumber();
+        $this->__assertOsUserMayWrite();
+        $this->out('Executing all updates to bring the database up to date with the current version.');
+        $lock = $this->AdminSetting->find('first', array('conditions' => array('setting' => 'update_locked')));
+        if (!empty($lock)) {
+            $this->AdminSetting->delete($lock['AdminSetting']['id']);
+        }
+        $processId = empty($this->args[0]) ? false : $this->args[0];
+        $pendingBefore = $this->__pendingUpdateCount();
+        try {
+            $this->Server->runUpdates(true, false, $processId, true);
             $this->Server->cleanCacheFiles();
             $this->out('All updates completed.');
-        } else {
-            $this->error('This OS user is not allowed to run this command.', 'Run it under `www-data` or `httpd` or `apache` or `wwwrun` or set MISP.osuser in the configuration.' . PHP_EOL . 'You tried to run this command as: ' . $whoami);
+        } finally {
+            if ($this->__pendingUpdateCount() < $pendingBefore) {
+                $this->__adviseWebRestart();
+            }
         }
+    }
+
+    /**
+     * @return int
+     */
+    private function __pendingUpdateCount()
+    {
+        $version = $this->AdminSetting->getSetting('db_version');
+        return $this->Server->countPendingUpdates($version === false ? '0' : $version);
+    }
+
+    /**
+     * Cake's schema caches live in the web server's APCu where core.php picks
+     * it, out of reach of this process's flush.
+     *
+     * @return void
+     */
+    private function __adviseWebRestart()
+    {
+        $this->out('<warning>' . __('Restart PHP-FPM or Apache now (systemctl restart php8.x-fpm, or apache2 with mod_php). The web server keeps its own copy of the table list in memory (APCu), which a command line run cannot clear; until the restart, pages can fail with a missing table error.') . '</warning>');
+    }
+
+    /**
+     * Stop unless this process runs as the user the web server does.
+     *
+     * A command that writes to the database also writes cache files and, through
+     * a data migration, whatever else a model touches. Doing that as root or as
+     * a developer leaves files the web server cannot read behind, and the
+     * instance breaks some time later for reasons that no longer point here.
+     *
+     * @return void
+     */
+    private function __assertOsUserMayWrite()
+    {
+        $whoami = ProcessTool::whoami();
+        $allowed = ['httpd', 'www-data', 'apache', 'wwwrun', 'travis', 'www'];
+        if (in_array($whoami, $allowed, true) || $whoami === Configure::read('MISP.osuser')) {
+            return;
+        }
+        $this->error(
+            'This OS user is not allowed to run this command.',
+            'Run it under `www-data` or `httpd` or `apache` or `wwwrun` or set MISP.osuser in the configuration.' . PHP_EOL . 'You tried to run this command as: ' . $whoami
+        );
+    }
+
+    /**
+     * Report the migrations against the ledger: applied, failed, pending, and
+     * anything the ledger remembers that is no longer on disk.
+     *
+     * @return void
+     */
+    public function migrationStatus()
+    {
+        $manager = $this->__migrationManager();
+        $onDisk = $manager->migrations();
+        $ledger = $manager->ledger();
+        ksort($ledger);
+
+        $applied = [];
+        $failed = [];
+        $orphaned = [];
+        foreach ($ledger as $id => $row) {
+            if (!isset($onDisk[$id])) {
+                $orphaned[$id] = $row;
+            } elseif (isset($row['status']) && $row['status'] === MigrationManager::STATUS_FAILED) {
+                $failed[$id] = $row;
+            } else {
+                $applied[$id] = $row;
+            }
+        }
+        // pending() is everything on disk the ledger does not call applied, so
+        // it holds the failed ones too - they are a retry, not a decision.
+        $untried = array_diff_key($manager->pending(), $failed);
+
+        if (!empty($this->params['json'])) {
+            $this->__outMigrationStatusJson($manager, $onDisk, $applied, $failed, $untried, $orphaned);
+            return;
+        }
+
+        if (empty($onDisk) && empty($ledger)) {
+            $this->out(__('No migrations in %s, and nothing recorded in the ledger.', $manager->directory()));
+            return;
+        }
+
+        $width = 0;
+        foreach (array_merge(array_keys($ledger), array_keys($onDisk)) as $id) {
+            $width = max($width, strlen($id));
+        }
+
+        $this->out('# ' . __('Database migrations'));
+        $this->__outMigrationGroup(__('Applied (%s)', count($applied)), array_keys($applied), $ledger, $onDisk, $width);
+        $this->__outMigrationGroup(
+            __('Failed (%s) - retried before anything else on the next run', count($failed)),
+            array_keys($failed),
+            $ledger,
+            $onDisk,
+            $width
+        );
+        $this->__outMigrationGroup(__('Pending (%s)', count($untried)), array_keys($untried), $ledger, $onDisk, $width);
+        $this->__outMigrationGroup(
+            __('Recorded but no longer on disk (%s)', count($orphaned)),
+            array_keys($orphaned),
+            $ledger,
+            $onDisk,
+            $width
+        );
+
+        if (empty($untried) && empty($failed)) {
+            $this->out();
+            $this->out('<info>' . __('Everything on disk has been applied.') . '</info>');
+        }
+    }
+
+    /**
+     * One titled block of migrationStatus's report. Silent when the group is
+     * empty, so a healthy instance prints three lines rather than four headings.
+     *
+     * @param string $title
+     * @param array $ids
+     * @param array $ledger id => ledger row
+     * @param array $onDisk id => AbstractMigration
+     * @param int $width Widest id, so the columns line up across every group.
+     * @return void
+     */
+    private function __outMigrationGroup($title, array $ids, array $ledger, array $onDisk, $width)
+    {
+        if (empty($ids)) {
+            return;
+        }
+        $this->out();
+        $this->out($title . ':');
+        foreach ($ids as $id) {
+            $row = isset($ledger[$id]) ? $ledger[$id] : [];
+            $line = '  ' . str_pad($id, $width);
+            if (!empty($row['applied_at'])) {
+                $line .= '  ' . $row['applied_at'];
+            }
+            if (isset($row['duration_ms'])) {
+                $line .= '  ' . str_pad((int)$row['duration_ms'] . ' ms', 9, ' ', STR_PAD_LEFT);
+            }
+            if (!isset($onDisk[$id]) && !empty($row['status'])) {
+                $line .= '  ' . $row['status'];
+            }
+            $this->out(rtrim($line));
+            $description = isset($onDisk[$id]) ? trim((string)$onDisk[$id]->description) : '';
+            if ($description !== '') {
+                $this->out('    ' . $description);
+            }
+            if (!empty($row['error'])) {
+                $this->out('    <error>' . $row['error'] . '</error>');
+            }
+        }
+    }
+
+    /**
+     * migrationStatus's report as JSON.
+     *
+     * Exists for one job in particular: a regenerated install baseline already
+     * contains the effects of every migration applied when it was dumped, so it
+     * has to ship a matching schema_migrations row for each of them. Without
+     * that a fresh install re-applies them all - wasteful for schema work, which
+     * guards itself, and a double-seed bug for anything done in afterUp().
+     * `.applied[].id` is the list to embed.
+     *
+     * @param MigrationManager $manager
+     * @param array $onDisk id => AbstractMigration
+     * @param array $applied id => ledger row
+     * @param array $failed id => ledger row
+     * @param array $untried id => requiresLogout
+     * @param array $orphaned id => ledger row, for migrations no longer on disk
+     * @return void
+     */
+    private function __outMigrationStatusJson(
+        MigrationManager $manager,
+        array $onDisk,
+        array $applied,
+        array $failed,
+        array $untried,
+        array $orphaned
+    ) {
+        $describe = function (array $rows) use ($onDisk) {
+            $out = [];
+            foreach ($rows as $id => $row) {
+                $entry = ['id' => $id];
+                foreach (['applied_at', 'status', 'error'] as $field) {
+                    if (isset($row[$field])) {
+                        $entry[$field] = $row[$field];
+                    }
+                }
+                if (isset($row['duration_ms'])) {
+                    $entry['duration_ms'] = (int)$row['duration_ms'];
+                }
+                if (isset($onDisk[$id])) {
+                    $entry['description'] = (string)$onDisk[$id]->description;
+                }
+                $out[] = $entry;
+            }
+            return $out;
+        };
+
+        $pending = [];
+        foreach ($untried as $id => $requiresLogout) {
+            $pending[] = [
+                'id' => $id,
+                'description' => isset($onDisk[$id]) ? (string)$onDisk[$id]->description : '',
+                'requires_logout' => (bool)$requiresLogout,
+            ];
+        }
+
+        $this->out(JsonTool::encode([
+            'directory' => $manager->directory(),
+            'applied' => $describe($applied),
+            'failed' => $describe($failed),
+            'pending' => $pending,
+            'orphaned' => $describe($orphaned),
+        ], true));
+    }
+
+    /**
+     * Apply pending migrations, or render what they would do.
+     *
+     * @return void
+     */
+    public function migrationApply()
+    {
+        $manager = $this->__migrationManager();
+        $id = isset($this->params['id']) ? trim((string)$this->params['id']) : '';
+        if ($id !== '') {
+            if (!AbstractMigration::isMigrationId($id)) {
+                $this->error(
+                    __('"%s" is not a migration id.', $id),
+                    __('An id is YYYYMMDD_HHMMSS followed by a slug, which is the migration\'s file name without the Migration_ prefix.')
+                );
+            }
+            if (!$manager->has($id)) {
+                $this->error(
+                    __('No migration carries the id "%s".', $id),
+                    __('Expected %s.php in %s. `Admin migrationStatus` lists what is there.', AbstractMigration::classNameFromId($id), $manager->directory())
+                );
+            }
+        }
+
+        if (!empty($this->params['dry-run'])) {
+            $this->__migrationDryRun($manager, $id);
+            return;
+        }
+        $this->__assertOsUserMayWrite();
+
+        if ($id !== '') {
+            if (in_array($id, $manager->applied(), true)) {
+                $this->out(__('%s has already been applied - nothing to do.', $id));
+                return;
+            }
+            $this->out(__('Applying %s.', $id));
+            $results = [$id => $manager->apply($id)];
+        } else {
+            $pending = $manager->pending();
+            if (empty($pending)) {
+                $this->out(__('No pending migrations.'));
+                return;
+            }
+            $this->out(__n(
+                'Applying %s pending migration:',
+                'Applying %s pending migrations, in order:',
+                count($pending),
+                count($pending)
+            ));
+            foreach (array_keys($pending) as $each) {
+                $this->out('  ' . $each);
+            }
+            $this->out();
+            $results = $manager->applyPending();
+        }
+
+        // apply() records the timing and the error text in the ledger, so read
+        // the outcome back rather than keeping a second account of it here.
+        $ledger = $manager->ledger();
+        $failures = 0;
+        foreach ($results as $migrationId => $success) {
+            $row = isset($ledger[$migrationId]) ? $ledger[$migrationId] : [];
+            $duration = isset($row['duration_ms']) ? sprintf(' (%s ms)', (int)$row['duration_ms']) : '';
+            if ($success) {
+                $this->out('<info>' . __('applied') . '</info> ' . $migrationId . $duration);
+                continue;
+            }
+            $failures++;
+            $this->out('<error>' . __('FAILED') . '</error>  ' . $migrationId . $duration);
+            if (!empty($row['error'])) {
+                $this->out('  ' . $row['error']);
+            }
+        }
+
+        // applyPending() stops at the first failure and leaves the rest untried,
+        // which is the contract - say so rather than letting them look skipped.
+        if ($id === '') {
+            $untried = array_diff_key($manager->pending(), $results);
+            if (!empty($untried)) {
+                $this->out(__('Not attempted: %s', implode(', ', array_keys($untried))));
+            }
+        }
+
+        // Whatever runs next must not describe a table from before this ran.
+        $manager->inspector()->flushSchemaCacheFiles();
+        if (in_array(true, $results, true)) {
+            $this->__adviseWebRestart();
+        }
+        if ($failures > 0) {
+            $this->error(
+                __('The run stopped at a failed migration.'),
+                __('Fix it and run this again - a failed migration is retried before the ones behind it.')
+            );
+        }
+    }
+
+    /**
+     * Print what a migration would emit, on every engine, without touching the
+     * database.
+     *
+     * Both flavours are always rendered, including the one this host cannot
+     * connect to - that is the whole point, since a MySQL box is exactly where
+     * an unexamined PostgreSQL rendering goes wrong.
+     *
+     * @param MigrationManager $manager
+     * @param string $id Empty for every pending migration.
+     * @return void
+     */
+    private function __migrationDryRun(MigrationManager $manager, $id)
+    {
+        $ids = $id === '' ? array_keys($manager->pending()) : [$id];
+        if (empty($ids)) {
+            $this->out(__('No pending migrations - nothing to render.'));
+            return;
+        }
+        $live = AbstractGrammar::forDataSource($this->Server->getDataSource());
+        $failures = 0;
+        foreach ($ids as $each) {
+            $migration = $manager->migration($each);
+            $this->out('# ' . $each);
+            $description = trim((string)$migration->description);
+            if ($description !== '') {
+                $this->out('  ' . $description);
+            }
+            foreach (AbstractGrammar::flavours() as $flavour) {
+                $grammar = $flavour === $live->flavour() ? $live : AbstractGrammar::offline($flavour);
+                $this->out();
+                $this->out('## ' . $flavour . ($grammar === $live ? ' ' . __('(this instance)') : ''));
+                try {
+                    $statements = $manager->toSql($each, $grammar);
+                } catch (Exception $e) {
+                    $failures++;
+                    $this->out('  <error>' . __('Cannot be rendered for %s: %s', $flavour, $e->getMessage()) . '</error>');
+                    continue;
+                }
+                if (empty($statements)) {
+                    $this->out('  ' . __('No schema changes.'));
+                }
+                foreach ($statements as $statement) {
+                    $this->out('  ' . str_replace(PHP_EOL, PHP_EOL . '  ', $statement));
+                }
+                // Rendered as SQL comments so the whole block stays paste-able,
+                // and because a hint sat next to the statements at the same
+                // indent reads like one of them.
+                foreach ($grammar->takeDroppedHints() as $hint) {
+                    $this->out('  <warning>-- ' . $hint . '</warning>');
+                }
+            }
+            if ($this->__hasDataStep($migration, 'beforeUp')) {
+                $this->out();
+                $this->out('  <comment>' . __('This migration also has a beforeUp() data step, run before any of the SQL above and described by none of it.') . '</comment>');
+            }
+            if ($this->__hasDataStep($migration, 'afterUp')) {
+                $this->out();
+                $this->out('  <comment>' . __('This migration also has an afterUp() data step, which no SQL above describes.') . '</comment>');
+            }
+            $this->out();
+        }
+        if ($failures > 0) {
+            $this->error(__('%s rendering(s) failed.', $failures));
+        }
+    }
+
+    /**
+     * Does this migration do PHP data work on top of its DDL?
+     *
+     * Worth saying out loud in a dry run: the statements printed above are the
+     * whole of a schema-only migration, and only half of a data one.
+     *
+     * @param AbstractMigration $migration
+     * @param string $method 'beforeUp' or 'afterUp'
+     * @return bool
+     */
+    private function __hasDataStep(AbstractMigration $migration, $method)
+    {
+        $declaring = (new ReflectionMethod($migration, $method))->getDeclaringClass();
+        return $declaring->getName() !== 'AbstractMigration';
+    }
+
+    /**
+     * Scaffold a migration class from the stub.
+     *
+     * @return void
+     */
+    public function migrationCreate()
+    {
+        $slug = isset($this->args[0]) ? trim((string)$this->args[0]) : '';
+        if ($slug === '') {
+            $this->error(
+                __('A slug is required.'),
+                __('Usage: Console/cake Admin migrationCreate <slug>, for example `migrationCreate event_templates_exposed`.')
+            );
+        }
+        if (!preg_match('/^[A-Za-z0-9_]+$/', $slug)) {
+            $this->error(
+                __('"%s" cannot be used as a slug.', $slug),
+                __('Letters, digits and underscores only - the slug ends up inside a PHP class name.')
+            );
+        }
+
+        $manager = $this->Server->getMigrationManager();
+        $id = date('Ymd_His') . '_' . $slug;
+        if (!AbstractMigration::isMigrationId($id)) {
+            $this->error(__('The generated id "%s" is not a valid migration id.', $id));
+        }
+        $className = AbstractMigration::classNameFromId($id);
+        $path = $manager->directory() . DS . $className . '.php';
+        if (file_exists($path)) {
+            $this->error(__('%s already exists.', $path));
+        }
+
+        // The description is written into a docblock and into a single-quoted
+        // string literal, so it may not carry a line break or close either one.
+        $description = isset($this->params['description']) ? trim((string)$this->params['description']) : '';
+        $description = trim(str_replace(["\r", "\n", '*/'], ' ', $description));
+        if ($description === '') {
+            $description = __('TODO: one line on what this migration is for.');
+        }
+
+        $stub = FileAccessTool::readFromFile(APP . 'Lib' . DS . 'Migration' . DS . 'Migration.stub');
+        FileAccessTool::writeToFile($path, str_replace(
+            ['{{class}}', '{{id}}', '{{descriptionLiteral}}', '{{description}}'],
+            [$className, $id, addcslashes($description, "\\'"), $description],
+            $stub
+        ));
+
+        $this->out(__('Created %s', $path));
+        $this->out(__('Render it, on every engine, without running it: Console/cake Admin migrationApply --dry-run --id %s', $id));
+    }
+
+    /**
+     * The migration manager, with a discovery failure turned into a message
+     * rather than a stack trace - a malformed file name is an authoring
+     * mistake, and the exception already says exactly which file and why.
+     *
+     * @return MigrationManager
+     */
+    private function __migrationManager()
+    {
+        $manager = $this->Server->getMigrationManager();
+        try {
+            // Discovery is cached, so every later call is free.
+            $manager->migrations();
+        } catch (Exception $e) {
+            $this->error(__('The migrations on disk could not be read.'), $e->getMessage());
+        }
+        return $manager;
     }
 
     public function runDBScript()
@@ -718,8 +1396,8 @@ class AdminShell extends AppShell
             foreach ($aliasList as $alias => $data) {
                 $this->out('<info>' . $alias . ':</info> <comment>' . $data['help'] . '</comment>' . PHP_EOL);
             }
-            die('Usage: ' . $this->Server->command_line_functions['console_admin_tasks']['data']['Run DB Script'] . PHP_EOL);
-            die();
+            $this->out('Usage: ' . $this->Server->command_line_functions['console_admin_tasks']['data']['Run DB Script']);
+            return;
         }
 
         if (isset($aliasList[$script])) {
@@ -737,13 +1415,11 @@ class AdminShell extends AppShell
                     $this->out('<info>' . sprintf('Script %s of %s completed.', $i + 1, $count) . '</info>' . PHP_EOL);
                 } else {
                     $this->out('<error>' . sprintf('Script %s of %s failed.', $i + 1, $count) . '</error>' . PHP_EOL);
-                    $this->out(PHP_EOL . '<error>' . __('Invalid script') . '</error>' . PHP_EOL);
-                    die();
+                    $this->error(__('Invalid script'));
                 }
             }
         } else {
-            $this->out(PHP_EOL . '<error>' . __('Invalid script') . '</error>' . PHP_EOL);
-            die();
+            $this->error(__('Invalid script'));
         }
         $this->Server->updateDatabase($script);
     }
@@ -754,7 +1430,7 @@ class AdminShell extends AppShell
             $this->error('Advanced authkeys enabled, it is not possible to get user authkey.');
         }
         if (empty($this->args[0])) {
-            die('Usage: ' . $this->Server->command_line_functions['console_admin_tasks']['data']['Get authkey'] . PHP_EOL);
+            $this->error('Usage: ' . $this->Server->command_line_functions['console_admin_tasks']['data']['Get authkey']);
         } else {
             $user = $this->User->find('first', array(
                 'recursive' => -1,
@@ -792,11 +1468,40 @@ class AdminShell extends AppShell
         }
     }
 
+    public function redisRepairSerialization()
+    {
+        App::uses('RedisSerializerRepairTool', 'Tools');
+        $jobId = $this->args[0] ?? null;
+        $dryRun = !empty($this->params['dry-run']);
+        try {
+            $repairTool = new RedisSerializerRepairTool(RedisTool::connect(), $dryRun);
+            $lastPercent = -1;
+            $stats = $repairTool->run(function ($checked, $total) use ($jobId, &$lastPercent) {
+                $percent = $total ? min(99, intdiv(100 * $checked, $total)) : 0;
+                if ($percent !== $lastPercent) {
+                    $lastPercent = $percent;
+                    $this->Job->saveProgress($jobId, __('%s of about %s keys checked.', $checked, $total), $percent);
+                }
+            });
+        } catch (Exception $e) {
+            $this->Job->saveStatus($jobId, false, __('Redis repair failed: %s', $e->getMessage()));
+            $this->error(__('Redis repair failed.'), $e->getMessage());
+        }
+        if ($dryRun) {
+            $message = __('%s keys checked, %s values in %s keys would be repaired.', $stats['checked'], $stats['values'], $stats['keys']);
+        } else {
+            $message = __('%s keys checked, %s values repaired in %s keys.', $stats['checked'], $stats['values'], $stats['keys']);
+        }
+        $this->Job->saveStatus($jobId, true, $message);
+        $this->out($message);
+    }
+
     public function clearBruteforce()
     {
         $conditions = array('Bruteforce.username !=' => '');
         if (!empty($this->args[0])) {
-            $conditions = array('Bruteforce.username' => $this->args[0]);
+            $username = $this->Bruteforce->usernameKey($this->args[0]);
+            $conditions = array('Bruteforce.username' => $username);
         }
         $result = $this->Bruteforce->deleteAll($conditions, false, false);
         $target = empty($this->args[0]) ? 'all users' : $this->args[0];
@@ -818,7 +1523,7 @@ class AdminShell extends AppShell
             }
             $roles = implode(PHP_EOL, $roles);
             echo "Roles:\n" . $roles . $this->separator();
-            die('Usage: ' . $this->Server->command_line_functions['console_admin_tasks']['data']['Set default role'] . PHP_EOL);
+            $this->error('Usage: ' . $this->Server->command_line_functions['console_admin_tasks']['data']['Set default role']);
         } else {
             $role = $this->Role->find('first', array(
                 'recursive' => -1,
@@ -846,8 +1551,10 @@ class AdminShell extends AppShell
         $this->deprecated('cake user change_authkey [user_id]');
 
         if (empty($this->args[0])) {
-            echo 'MISP apikey command line tool' . PHP_EOL . 'To assign a new random API key for a user: ' . APP . 'Console/cake Admin change_authkey [user_email]' . PHP_EOL . 'To assign a fixed API key: ' . APP . 'Console/cake Admin change_authkey [user_email] [authkey]' . PHP_EOL;
-            die();
+            $this->error(
+                'MISP apikey command line tool',
+                'To assign a new random API key for a user: ' . APP . 'Console/cake Admin change_authkey [user_email]' . PHP_EOL . 'To assign a fixed API key: ' . APP . 'Console/cake Admin change_authkey [user_email] [authkey]'
+            );
         }
 
         if (!empty($this->args[1])) {
@@ -861,14 +1568,12 @@ class AdminShell extends AppShell
             'fields' => array('User.id', 'User.email', 'User.authkey')
         ));
         if (empty($user)) {
-            echo 'Invalid e-mail, user not found.' . PHP_EOL;
-            die();
+            $this->error('Invalid e-mail, user not found.');
         }
         $user['User']['authkey'] = $authKey;
         $fields = array('id', 'email', 'authkey');
         if (!$this->User->save($user, true, $fields)) {
-            echo 'Could not update authkey, reason:' . PHP_EOL . json_encode($this->User->validationErrors) . PHP_EOL;
-            die();
+            $this->error('Could not update authkey, reason:', json_encode($this->User->validationErrors));
         }
         echo 'Updated, new key:' . PHP_EOL . $authKey . PHP_EOL;
     }
@@ -921,11 +1626,10 @@ class AdminShell extends AppShell
     public function resetSyncAuthkeys()
     {
         if (empty($this->args[0])) {
-            echo sprintf(
-                __("MISP mass sync authkey reset command line tool" . PHP_EOL . "Usage: %sConsole/cake Admin resetSyncAuthkeys [user_id]" . PHP_EOL),
-                APP
+            $this->error(
+                'MISP mass sync authkey reset command line tool',
+                sprintf(__('Usage: %sConsole/cake Admin resetSyncAuthkeys [user_id]'), APP)
             );
-            die();
         } else {
             $userId = $this->args[0];
             $user = $this->User->getAuthUser($userId);
@@ -950,7 +1654,7 @@ class AdminShell extends AppShell
             (empty($this->args[0]) || !is_numeric($this->args[0])) ||
             (empty($this->args[1]) || !is_numeric($this->args[1]))
         ) {
-            die('Usage: ' . $this->Server->command_line_functions['console_admin_tasks']['data']['Purge feed events'] . PHP_EOL);
+            $this->error('Usage: ' . $this->Server->command_line_functions['console_admin_tasks']['data']['Purge feed events']);
         } else {
             $user_id = $this->args[0];
             $feed_id = $this->args[1];
@@ -960,6 +1664,133 @@ class AdminShell extends AppShell
             } else {
                 echo __("%s events purged.\n", $result);
             }
+        }
+    }
+
+    /**
+     * Render an install baseline from a reference database.
+     *
+     * The reference is a MySQL database a fresh install plus the frozen legacy
+     * corpus produced - what CI builds from INSTALL/MYSQL.sql and runUpdates -
+     * and it may sit beside the working database on the same server. The
+     * connected datasource is only the reader; the engine rendered for is
+     * whatever --engine asks, through the offline grammar when the host
+     * cannot connect to it.
+     *
+     * @return void
+     */
+    public function dumpInstallBaseline()
+    {
+        App::uses('BaselineGenerator', 'Migration');
+        App::uses('AbstractGrammar', 'Migration/Grammar');
+
+        $engine = isset($this->params['engine']) ? (string)$this->params['engine'] : '';
+        if (!in_array($engine, AbstractGrammar::flavours(), true)) {
+            $this->error(
+                __('"%s" is not an engine this can render for.', $engine),
+                __('Use --engine %s.', implode(' or --engine ', AbstractGrammar::flavours()))
+            );
+        }
+
+        $db = $this->Server->getDataSource();
+        try {
+            $generator = new BaselineGenerator(
+                $db,
+                empty($this->params['database']) ? null : (string)$this->params['database']
+            );
+        } catch (InvalidArgumentException $e) {
+            $this->error(__('The reference cannot be read through this connection.'), $e->getMessage());
+        }
+
+        $version = $generator->databaseVersion();
+        if ($version === null) {
+            $this->error(
+                __('The reference database "%s" has no db_version.', $generator->database()),
+                __('Point --database at a clean MISP install, or check that the connected user can read it.')
+            );
+        }
+        if ($version !== AppModel::DB_CHANGES_FREEZE) {
+            $this->error(
+                __('The reference database "%s" is at db_version %s, not %s.', $generator->database(), $version, AppModel::DB_CHANGES_FREEZE),
+                __('A baseline is generated at the frozen version and nowhere else: below it the legacy corpus still has work to do, and above it cannot exist.')
+            );
+        }
+
+        $live = AbstractGrammar::forDataSource($db);
+        $grammar = $live->flavour() === $engine ? $live : AbstractGrammar::offline($engine);
+
+        try {
+            $schema = $generator->readSchema();
+            $seeds = $generator->readSeedRows($schema);
+            $rendered = $generator->render($grammar, $schema, $seeds, $version);
+        } catch (Exception $e) {
+            $this->error(__('The baseline could not be rendered.'), $e->getMessage());
+        }
+
+        foreach ($rendered['notes'] as $note) {
+            $this->err('-- ' . $note);
+        }
+        $this->err(__n(
+            '-- %s table rendered for %s from %s; %s note.',
+            '-- %s tables rendered for %s from %s; %s notes.',
+            count($schema),
+            count($schema),
+            $engine,
+            $generator->database(),
+            count($rendered['notes'])
+        ));
+
+        if (!empty($this->params['output'])) {
+            FileAccessTool::writeToFile((string)$this->params['output'], $rendered['sql']);
+            $this->err(__('-- Written to %s', $this->params['output']));
+            return;
+        }
+        $this->out($rendered['sql'], 0);
+    }
+
+    /**
+     * The round trip that makes a generated baseline trustworthy: load it
+     * somewhere, read that back through the driver, diff against the
+     * reference. Exits non-zero on any finding.
+     *
+     * @return void
+     */
+    public function verifyInstallBaseline()
+    {
+        App::uses('BaselineGenerator', 'Migration');
+        App::uses('SchemaInspector', 'Migration');
+
+        $connection = isset($this->params['connection']) ? (string)$this->params['connection'] : '';
+        try {
+            $loaded = ConnectionManager::getDataSource($connection);
+        } catch (Exception $e) {
+            $this->error(__('No usable connection "%s" in app/Config/database.php.', $connection), $e->getMessage());
+        }
+        try {
+            $generator = new BaselineGenerator(
+                $this->Server->getDataSource(),
+                empty($this->params['database']) ? null : (string)$this->params['database']
+            );
+            $schema = $generator->readSchema();
+            $findings = $generator->compare(new SchemaInspector($loaded), $schema);
+        } catch (Exception $e) {
+            $this->error(__('The comparison could not be run.'), $e->getMessage());
+        }
+
+        foreach ($findings as $finding) {
+            $this->out('  ' . $finding);
+        }
+        $this->out(__n(
+            '%s table compared between "%s" and the reference "%s": %s finding.',
+            '%s tables compared between "%s" and the reference "%s": %s findings.',
+            count($schema),
+            count($schema),
+            $connection,
+            $generator->database(),
+            count($findings)
+        ));
+        if (!empty($findings)) {
+            $this->error(__('The loaded baseline does not match the reference.'));
         }
     }
 
@@ -988,12 +1819,26 @@ class AdminShell extends AppShell
         $this->out(__("> describeTypes.json dumped to disk"));
     }
 
+    public function updateAsnCountryMap()
+    {
+        $script = APP . 'files' . DS . 'scripts' . DS . 'generate_asn_country_map.py';
+        try {
+            $output = ProcessTool::execute([ProcessTool::pythonBin(), $script]);
+            $this->out(__('> %s', trim($output)));
+        } catch (Exception $e) {
+            $this->err(__('> Could not regenerate asn-country.json: %s', $e->getMessage()));
+            $this->err(__('> The shipped asn-country.json may be stale. Ensure the python maxminddb package is installed and GeoOpen-Country-ASN.mmdb is present.'));
+        }
+    }
+
     public function preRelease()
     {
         $this->out(__("Dumping database schema to disk"));
         $this->dumpCurrentDatabaseSchema();
         $this->out(__("Dumping describeTypes.json to disk"));
         $this->dumpDescribeTypes();
+        $this->out(__("Regenerating asn-country.json from the GeoOpen-Country-ASN mmdb"));
+        $this->updateAsnCountryMap();
     }
 
     /**
@@ -1004,7 +1849,7 @@ class AdminShell extends AppShell
         $this->deprecated('cake user user_ips [user_id]');
 
         if (empty($this->args[0])) {
-            die('Usage: ' . $this->Server->command_line_functions['console_admin_tasks']['data']['Get IPs for user ID'] . PHP_EOL);
+            $this->error('Usage: ' . $this->Server->command_line_functions['console_admin_tasks']['data']['Get IPs for user ID']);
         }
 
         $user_id = trim($this->args[0]);
@@ -1032,7 +1877,7 @@ class AdminShell extends AppShell
         $this->deprecated('cake user ip_user [ip]');
 
         if (empty($this->args[0])) {
-            die('Usage: ' . $this->Server->command_line_functions['console_admin_tasks']['data']['Get user ID for user IP'] . PHP_EOL);
+            $this->error('Usage: ' . $this->Server->command_line_functions['console_admin_tasks']['data']['Get user ID for user IP']);
         }
 
         $ip = trim($this->args[0]);
@@ -1095,8 +1940,9 @@ class AdminShell extends AppShell
             'width' => 50,
         ]);
 
+        $dialect = $this->Server->getSqlDialect();
         foreach ($tables as $table) {
-            $dataSource->query('OPTIMIZE TABLE ' . $dataSource->name($table));
+            $dataSource->query($dialect->optimizeTable($table));
             $progress->increment();
             $progress->draw();
         }
@@ -1130,6 +1976,29 @@ class AdminShell extends AppShell
     {
         $dbSchemaDiagnostics = $this->Server->dbSchemaDiagnostic();
 
+        // db_version is frozen, so the version pair no longer says whether
+        // schema work is outstanding - the ledger does.
+        $this->out('# Migrations');
+        $this->out(' Applied: ' . $dbSchemaDiagnostics['migrations_applied']);
+        $this->out(' Failed:  ' . $dbSchemaDiagnostics['migrations_failed']);
+        $this->out(' Pending: ' . $dbSchemaDiagnostics['migrations_pending']);
+        foreach ($dbSchemaDiagnostics['migrations_pending_ids'] as $id) {
+            $line = ' - ' . $id;
+            if (in_array($id, $dbSchemaDiagnostics['migrations_failed_ids'], true)) {
+                $line .= ' <error>' . __('(failed - retried before anything else on the next run)') . '</error>';
+            }
+            $this->out($line);
+        }
+        $this->out();
+
+        if (!empty($dbSchemaDiagnostics['warnings'])) {
+            $this->out('# Warnings');
+            foreach ($dbSchemaDiagnostics['warnings'] as $warning) {
+                $this->out(' - ' . $warning);
+            }
+            $this->out();
+        }
+
         $this->out('# Columns diagnostics');
         foreach ($dbSchemaDiagnostics['diagnostic'] as $tableName => $diagnostics) {
             $diagnostics = array_filter($diagnostics, function ($c) {
@@ -1142,7 +2011,9 @@ class AdminShell extends AppShell
             $this->out("Table `$tableName`:");
             foreach ($diagnostics as $diagnostic) {
                 $this->out(' - ' . $diagnostic['description']);
-                $this->out('   Expected: ' . implode(' ', $diagnostic['expected']));
+                if (!empty($diagnostic['expected'])) {
+                    $this->out('   Expected: ' . implode(' ', $diagnostic['expected']));
+                }
                 if (!empty($diagnostic['actual'])) {
                     $this->out('   Actual:   ' . implode(' ', $diagnostic['actual']));
                 }
@@ -1232,6 +2103,8 @@ class AdminShell extends AppShell
             /** @var Cerebrate $cerebrate */
             $cerebrate = ClassRegistry::init('Cerebrate');
             $cerebrate->reencryptAuthKeys($old, $new);
+
+            ClassRegistry::init('UserSetting')->reencryptOidcRefreshTokens($old, $new);
 
             $result = $this->Server->serverSettingsSaveValue('Security.encryption_key', $new, true);
 
@@ -1449,7 +2322,7 @@ class AdminShell extends AppShell
     public function truncateTable()
     {
         if (!isset($this->args[0])) {
-            die('Usage: ' . $this->Server->command_line_functions['console_admin_tasks']['data']['Truncate table correlation'] . PHP_EOL);
+            $this->error('Usage: ' . $this->Server->command_line_functions['console_admin_tasks']['data']['Truncate correlation table']);
         }
         $userId = $this->args[0];
         if ($userId) {
@@ -1464,7 +2337,7 @@ class AdminShell extends AppShell
             ];
         }
         if (empty($this->args[1])) {
-            die('Usage: ' . $this->Server->command_line_functions['console_admin_tasks']['data']['Truncate table correlation'] . PHP_EOL);
+            $this->error('Usage: ' . $this->Server->command_line_functions['console_admin_tasks']['data']['Truncate correlation table']);
         }
         if (!empty($this->args[2])) {
             $jobId = $this->args[2];

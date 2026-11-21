@@ -32,7 +32,7 @@ class GalaxyClusterBlocklistsController extends AppController
                 'cluster_orgc' => $this->params['named']['searchall']
             );
         }
-        $this->set('passedArgs', json_encode($passedArgs));
+        $this->set('passedArgs', JsonTool::encodeForScript($passedArgs));
         $this->set('passedArgsArray', $passedArgsArray);
         return $this->BlockList->index($this->_isRest(), $params);
     }
@@ -40,13 +40,32 @@ class GalaxyClusterBlocklistsController extends AppController
     public function add()
     {
         $this->set('action', 'add');
-        return $this->BlockList->add($this->_isRest());
+        $response = $this->BlockList->add($this->_isRest());
+        if ($this->_isRest()) {
+            return $response;
+        }
+        if ($this->theme === 'Overmind') {
+            $this->layout = false;
+            $this->render('add');
+        }
     }
 
     public function edit($id)
     {
         $this->set('action', 'edit');
-        return $this->BlockList->edit($this->_isRest(), $id);
+        $response = $this->BlockList->edit($this->_isRest(), $id);
+        if ($this->_isRest()) {
+            return $response;
+        }
+        if ($this->theme === 'Overmind') {
+            $this->layout = false;
+            $this->render('add');
+        }
+    }
+
+    public function deleteSelection($id = null)
+    {
+        return $this->BlockList->deleteSelection($this->_isRest(), $id);
     }
 
     public function delete($id)

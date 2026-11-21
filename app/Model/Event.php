@@ -126,6 +126,7 @@ class Event extends AppModel
         'stix2' => array('json', 'Stix2Export', 'json'),
         'suricata' => array('txt', 'NidsSuricataExport', 'rules'),
         'text' => array('text', 'TextExport', 'txt'),
+        'xlsx' => array('xlsx', 'XlsxExport', 'xlsx'),
         'xml' => array('xml', 'XmlExport', 'xml'),
         'yara' => array('txt', 'YaraExport', 'yara'),
         'yara-json' => array('json', 'YaraExport', 'json')
@@ -232,6 +233,10 @@ class Event extends AppModel
             'valueNotEmpty' => array(
                 'rule' => array('valueNotEmpty'),
                 'required' => true
+            ),
+            'maxBytes' => array(
+                'rule' => array('maxBytes', 65535),
+                'message' => 'Event info cannot be longer than 65535 bytes.',
             ),
         ),
         'user_id' => array(
@@ -370,15 +375,22 @@ class Event extends AppModel
         if (Configure::read('MISP.enableEventBlocklisting') !== false && empty($this->skipBlocklist)) {
             $this->EventBlocklist = ClassRegistry::init('EventBlocklist');
             $orgc = $this->Orgc->find('first', array('conditions' => array('Orgc.id' => $this->data['Event']['orgc_id']), 'recursive' => -1, 'fields' => array('Orgc.name')));
+            
+            // FIX: Scrub 4-byte UTF-8 characters (like emojis) to prevent PDOExceptions 
+            // on database tables using legacy 3-byte utf8 encoding.
+            $eventInfo = $this->data['Event']['info'];
+            if (!empty($eventInfo)) {
+                $eventInfo = preg_replace('/[\x{10000}-\x{10FFFF}]/u', '', $eventInfo);
+            }
+
             $this->EventBlocklist->create();
             $this->EventBlocklist->save(array(
                 'event_uuid' => $this->data['Event']['uuid'],
-                'event_info' => $this->data['Event']['info'],
+                'event_info' => $eventInfo,
                 'event_orgc' => $orgc['Orgc']['name'],
                 'comment' => __('Automatically blocked by deleting event'),
             ));
         }
-
         if (!empty($this->data['Event']['id'])) {
             if ($this->pubToZmq('event')) {
                 $pubSubTool = $this->getPubSubTool();
@@ -507,7 +519,19 @@ class Event extends AppModel
         if (empty($this->data['Event']['uuid'])) {
             $this->data['Event']['uuid'] = CakeText::uuid();
         }
-        $this->__beforeSaveData = $this->data['Event'];
+        // remember the stored distribution/SG so afterSave can tell whether
+        // this save actually changed them and refresh the correlations if so
+        $this->__beforeSaveData = null;
+        if (!empty($this->data['Event']['id'])) {
+            $stored = $this->find('first', [
+                'recursive' => -1,
+                'conditions' => ['Event.id' => $this->data['Event']['id']],
+                'fields' => ['Event.distribution', 'Event.sharing_group_id'],
+            ]);
+            if (!empty($stored)) {
+                $this->__beforeSaveData = $stored['Event'];
+            }
+        }
 
         $trigger_id = 'event-before-save';
         if ($this->isTriggerCallable($trigger_id)) {
@@ -672,13 +696,15 @@ class Event extends AppModel
      * Gets the logged in user + an array of events, attaches the correlation count to each
      * @param array $user
      * @param array $events
+     * @param bool $excludeNonCorrelating Count only the related events that the
+     *      event view can actually show a correlation for
      * @return array
      */
-    public function attachCorrelationCountToEvents(array $user, array $events)
+    public function attachCorrelationCountToEvents(array $user, array $events, bool $excludeNonCorrelating = false)
     {
         $sgids = $this->SharingGroup->authorizedIds($user);
         foreach ($events as &$event) {
-            $event['Event']['correlation_count'] = $this->getRelatedEventCount($user, $event['Event']['id'], $sgids);
+            $event['Event']['correlation_count'] = $this->getRelatedEventCount($user, $event['Event']['id'], $sgids, $excludeNonCorrelating);
         }
         return $events;
     }
@@ -694,6 +720,43 @@ class Event extends AppModel
         ));
         foreach ($events as $key => $event) {
             $events[$key]['Event']['sightings_count'] = isset($sightings[$event['Event']['id']]) ? $sightings[$event['Event']['id']] : 0;
+        }
+        return $events;
+    }
+
+    /**
+     * Attaches two extra counters to each event of an index list:
+     *  - `object_count`: number of (non-deleted) objects in the event
+     *  - `attribute_count_no_objects`: number of (non-deleted) attributes that
+     *    are NOT part of an object (object_id = 0).
+     *
+     * @param array $events
+     * @return array
+     */
+    public function attachObjectAndAttributeCountToEvents(array $events)
+    {
+        $eventIds = array_column(array_column($events, 'Event'), 'id');
+        if (empty($eventIds)) {
+            return $events;
+        }
+        $objectCounts = $this->Object->find('all', array(
+            'fields' => array('Object.event_id', 'COUNT(Object.id) as count'),
+            'conditions' => array('Object.event_id' => $eventIds, 'Object.deleted' => 0),
+            'recursive' => -1,
+            'group' => array('Object.event_id'),
+        ));
+        $objectCounts = Hash::combine($objectCounts, '{n}.Object.event_id', '{n}.0.count');
+        $attributeCounts = $this->Attribute->find('all', array(
+            'fields' => array('Attribute.event_id', 'COUNT(Attribute.id) as count'),
+            'conditions' => array('Attribute.event_id' => $eventIds, 'Attribute.deleted' => 0, 'Attribute.object_id' => 0),
+            'recursive' => -1,
+            'group' => array('Attribute.event_id'),
+        ));
+        $attributeCounts = Hash::combine($attributeCounts, '{n}.Attribute.event_id', '{n}.0.count');
+        foreach ($events as $key => $event) {
+            $eventId = $event['Event']['id'];
+            $events[$key]['Event']['object_count'] = isset($objectCounts[$eventId]) ? (int)$objectCounts[$eventId] : 0;
+            $events[$key]['Event']['attribute_count_no_objects'] = isset($attributeCounts[$eventId]) ? (int)$attributeCounts[$eventId] : 0;
         }
         return $events;
     }
@@ -714,44 +777,21 @@ class Event extends AppModel
         return $events;
     }
 
-    public function attachDiscussionsCountToEvents($user, $events)
-    {
-        $eventIds = array_column(array_column($events, 'Event'), 'id');
-        $this->Thread = ClassRegistry::init('Thread');
-        $threads = $this->Thread->find('list', array(
-            'conditions' => array('Thread.event_id' => $eventIds),
-            'fields' => array('Thread.event_id', 'Thread.id')
-        ));
-        $posts = $this->Thread->Post->find('all', array(
-            'conditions' => array('Post.thread_id' => $threads),
-            'recursive' => -1,
-            'fields' => array('Count(id) AS post_count', 'thread_id', 'max(date_modified) as last_post'),
-            'group' => array('Post.thread_id')
-        ));
-        $event_threads = array();
-        foreach ($posts as $k => $v) {
-            foreach ($threads as $k2 => $v2) {
-                if ($v2 == $v['Post']['thread_id']) {
-                    $event_threads[$k2] = array(
-                        'post_count' => $v[0]['post_count'],
-                        'last_post' => strtotime($v[0]['last_post'])
-                    );
-                }
-            }
-        }
-        foreach ($events as $k => $v) {
-            $events[$k]['Event']['post_count'] = !empty($event_threads[$events[$k]['Event']['id']]) ? $event_threads[$events[$k]['Event']['id']]['post_count'] : 0;
-            $events[$k]['Event']['last_post'] = !empty($event_threads[$events[$k]['Event']['id']]) ? $event_threads[$events[$k]['Event']['id']]['last_post'] : 0;
-        }
-        return $events;
-    }
-
-    public function getRelatedEventCount(array $user, $eventId, $sgids)
+    /**
+     * @param array $user
+     * @param int $eventId
+     * @param array $sgids
+     * @param bool $excludeNonCorrelating Count only the related events that
+     *      getRelatedAttributes() can actually return a correlation for - see
+     *      Correlation::getRelatedEventIds()
+     * @return int
+     */
+    public function getRelatedEventCount(array $user, $eventId, $sgids, bool $excludeNonCorrelating = false)
     {
         if (!isset($sgids) || empty($sgids)) {
             $sgids = array(-1);
         }
-        return count($this->Attribute->Correlation->getRelatedEventIds($user, $eventId, $sgids));
+        return count($this->Attribute->Correlation->getRelatedEventIds($user, $eventId, $sgids, $excludeNonCorrelating));
     }
 
     private function getRelatedEvents($user, $eventId, $sgids)
@@ -764,12 +804,14 @@ class Event extends AppModel
             return [];
         }
         // now look up the event data for these attributes
+        // the correlation row's distribution columns are a snapshot and carry no
+        // published flag, so scope the events themselves
+        $conditions = $this->createEventConditions($user);
+        $conditions['Event.id'] = $relatedEventIds;
         $relatedEvents =  $this->find(
             'all',
             [
-                'conditions' => [
-                    'Event.id' => $relatedEventIds
-                ],
+                'conditions' => $conditions,
                 'recursive' => -1,
                 'order' => 'date DESC',
                 'fields' => [
@@ -901,6 +943,7 @@ class Event extends AppModel
         if (!isset($server['Server']['internal'])) {
             throw new InvalidArgumentException('Invalid Server array provided.');
         }
+        $this->Server = ClassRegistry::init('Server');
 
         // This check is probably redundant, because it should be checked in also in `checkDistributionForPush`
         // But keep it here just for sure
@@ -935,6 +978,9 @@ class Event extends AppModel
     {
         $this->Server = ClassRegistry::init('Server');
 
+        if (empty($event['Event']['published'])) {
+            return 'The event is not published, which blocks it from being pushed.';
+        }
         if (empty($this->Server->eventFilterPushableServers($event, [$server]))) {
             return 'The server rules blocks it from being pushed.';
         }
@@ -1139,14 +1185,14 @@ class Event extends AppModel
                 $data['EventReport'][$key] = $this->__updateEventReportForSync($report, $server);
                 if (empty($data['EventReport'][$key])) {
                     unset($data['EventReport'][$key]);
+                } else {
+                    $data['EventReport'][$key] = $this->__removeNonExportableTags($data['EventReport'][$key], 'EventReport', $server);
                 }
             }
             $data['EventReport'] = array_values($data['EventReport']);
         }
         if (isset($data['EventReport']) && empty($data['EventReport'])) {
             unset($data['EventReport']);
-        } else {
-            $data['EventReport'][$key] = $this->__removeNonExportableTags($data['EventReport'][$key], 'EventReport', $server);
         }
         return $data;
     }
@@ -1347,13 +1393,6 @@ class Event extends AppModel
     public function quickDelete(array $event)
     {
         $id = (int)$event['Event']['id'];
-        $this->Thread = ClassRegistry::init('Thread');
-        $thread = $this->Thread->find('first', array(
-            'conditions' => array('Thread.event_id' => $id),
-            'fields' => array('Thread.id'),
-            'recursive' => -1
-        ));
-        $thread_id = !empty($thread) ? (int)$thread['Thread']['id'] : false;
         $relations = array(
             array(
                 'table' => 'attributes',
@@ -1372,11 +1411,6 @@ class Event extends AppModel
             ),
             array(
                 'table' => 'attribute_tags',
-                'foreign_key' => 'event_id',
-                'value' => $id
-            ),
-            array(
-                'table' => 'threads',
                 'foreign_key' => 'event_id',
                 'value' => $id
             ),
@@ -1404,15 +1438,23 @@ class Event extends AppModel
                 'table' => 'event_reports',
                 'foreign_key' => 'event_id',
                 'value' => $id
+            ),
+            array(
+                'table' => 'event_graph',
+                'foreign_key' => 'event_id',
+                'value' => $id
+            ),
+            array(
+                'table' => 'shadow_attribute_correlations',
+                'foreign_key' => 'event_id',
+                'value' => $id
+            ),
+            array(
+                'table' => 'shadow_attribute_correlations',
+                'foreign_key' => '1_event_id',
+                'value' => $id
             )
         );
-        if ($thread_id) {
-            $relations[] =  array(
-                'table' => 'posts',
-                'foreign_key' => 'thread_id',
-                'value' => $thread_id
-            );
-        }
         if (!Configure::read('MISP.completely_disable_correlation')) {
             $correlationTableName = $this->Attribute->Correlation->getTableName();
             array_push(
@@ -1430,8 +1472,36 @@ class Event extends AppModel
             );
         }
 
+        // rows keyed by the event's reports or attributes rather than the event itself,
+        // looked up before the raw deletes below remove their parents
+        $reportIds = $this->EventReport->find('column', [
+            'conditions' => ['EventReport.event_id' => $id],
+            'fields' => ['EventReport.id'],
+        ]);
+        $AttachmentScan = $this->loadAttachmentScan();
+        $scanTypes = ['attachment', 'malware-sample'];
+        $scannedIds = [
+            AttachmentScan::TYPE_ATTRIBUTE => $this->Attribute->find('column', [
+                'conditions' => ['Attribute.event_id' => $id, 'Attribute.type' => $scanTypes],
+                'fields' => ['Attribute.id'],
+            ]),
+            AttachmentScan::TYPE_SHADOW_ATTRIBUTE => $this->ShadowAttribute->find('column', [
+                'conditions' => ['ShadowAttribute.event_id' => $id, 'ShadowAttribute.type' => $scanTypes],
+                'fields' => ['ShadowAttribute.id'],
+            ]),
+        ];
+
         $db = $this->getDataSource();
         $db->begin();
+        if (!empty($reportIds)) {
+            $this->EventReport->EventReportTag->deleteAll(['EventReportTag.event_report_id' => $reportIds], false);
+        }
+        foreach ($scannedIds as $type => $ids) {
+            if (!empty($ids)) {
+                $AttachmentScan->deleteAll(['AttachmentScan.type' => $type, 'AttachmentScan.attribute_id' => $ids], false);
+            }
+        }
+        ClassRegistry::init('FuzzyCorrelateSsdeep')->purge($id);
         $connection = $db->getConnection();
         foreach ($relations as $relation) {
             $query = $connection->prepare('DELETE FROM ' . $db->name($relation['table']) . ' WHERE ' . $db->name($relation['foreign_key']) . ' = :value');
@@ -1480,28 +1550,29 @@ class Event extends AppModel
         $attributeParams = array('value1', 'value2', 'comment');
         foreach ($attributeParams as $attributeParam) {
             $subQueryOptions = array(
-                'conditions' => array('Attribute.' . $attributeParam . ' LIKE' => $params['wildcard']),
+                'conditions' => $this->visibleElementConditions(
+                    $options['user'],
+                    'Attribute',
+                    array('Attribute.' . $attributeParam . ' LIKE' => $params['wildcard'])
+                ),
                 'fields' => array('event_id')
             );
             $tempConditions[] = $this->subQueryGenerator($this->Attribute, $subQueryOptions, 'Event.id');
         }
-        $tagScopes = array('Event', 'Attribute');
-        $this->AttributeTag = ClassRegistry::init('AttributeTag');
-        $tagIds = $this->AttributeTag->Tag->find('column', array(
+        $tagIds = $this->EventTag->Tag->find('column', array(
             'recursive' => -1,
             'conditions' => array('Tag.name LIKE' => $params['wildcard']),
             'fields' => array('Tag.id')
         ));
         if (!empty($tagIds)) {
-            foreach ($tagScopes as $tagScope) {
-                $subQueryOptions = array(
-                    'conditions' => array(
-                        'tag_id' => $tagIds,
-                    ),
-                    'fields' => array('event_id')
-                );
-                $tempConditions[] = $this->subQueryGenerator($this->{$tagScope . 'Tag'}, $subQueryOptions, 'Event.id');
-            }
+            $subQueryOptions = array(
+                'conditions' => array(
+                    'tag_id' => $tagIds,
+                ),
+                'fields' => array('event_id')
+            );
+            $tempConditions[] = $this->subQueryGenerator($this->EventTag, $subQueryOptions, 'Event.id');
+            $tempConditions[] = $this->visibleAttributeTagSubquery($options['user'], $tagIds);
         }
         return $tempConditions;
     }
@@ -1553,7 +1624,8 @@ class Event extends AppModel
                 'filter' => 'wildcard',
                 'scope' => 'Event',
                 'pop' => false,
-                'context' => 'Event'
+                'context' => 'Event',
+                'user' => $user
             );
             $conditions['AND'][] = array('OR' => $this->set_filter_wildcard($params, $temp, $options));
         } else {
@@ -1588,7 +1660,6 @@ class Event extends AppModel
                     'object_template_version' => array('function' => 'set_filter_object_template_version')
                 ),
                 'Attribute' => array(
-                    'value' => array('function' => 'set_filter_value'),
                     'category' => array('function' => 'set_filter_simple_attribute'),
                     'type' => array('function' => 'set_filter_type'),
                     'object_relation' => array('function' => 'set_filter_simple_attribute'),
@@ -1607,7 +1678,8 @@ class Event extends AppModel
                             'filter' => $param,
                             'scope' => $scope,
                             'pop' => !empty($simple_param_scoped[$param]['pop']),
-                            'context' => 'Event'
+                            'context' => 'Event',
+                            'user' => $user
                         );
                         if (!empty($simple_param_scoped[$param]['skip_neg'])) {
                             $options['skip_neg'] = true;
@@ -1619,22 +1691,28 @@ class Event extends AppModel
                             $temp = $this->{$simple_param_scoped[$param]['function']}($params, $temp, $options);
                             if (!empty($temp)) {
                                 $subQueryOptions = array(
-                                    'conditions' => $temp,
+                                    'conditions' => $this->visibleElementConditions($user, $this->{$scope}->alias, $temp),
                                     'fields' => array(
                                         'event_id'
                                     )
                                 );
-                                $subQuery = $this->subQueryGenerator($this->{$scope}, $subQueryOptions, 'Event.id');
-                                if ($param === 'value') {
-                                    $subQuery[0] = explode('WHERE', $subQuery[0]);
-                                    //$subQuery[0][0] .= ' USE INDEX (value1, value2) ';
-                                    $subQuery[0] = implode('WHERE', $subQuery[0]);
-                                }
-                                $conditions['AND'][] = $subQuery;
+                                $conditions['AND'][] = $this->subQueryGenerator($this->{$scope}, $subQueryOptions, 'Event.id');
                             }
                         }
                     }
                 }
+            }
+            if (isset($params['value']) && $params['value'] !== false) {
+                // It reads the attributes in a subquery of its own, which a
+                // second one around it would run per event
+                $options = array(
+                    'filter' => 'value',
+                    'scope' => 'Attribute',
+                    'pop' => false,
+                    'context' => 'Event',
+                    'user' => $user
+                );
+                $conditions = $this->set_filter_value($params, $conditions, $options);
             }
         }
         $find_params = array(
@@ -1703,6 +1781,1941 @@ class Event extends AppModel
         $params['conditions'] = $conditions;
         $params['recursive'] = -1;
         return $this->find('first', $params);
+    }
+
+    /**
+     * Move each attribute's is_galaxy tags into a ['Galaxy'] array (grouped by
+     * galaxy, each carrying its GalaxyCluster list) and strip them from ['AttributeTag'] —
+     * so the Overmind galaxy field renders the real galaxy name/icon
+     * inside the event-view attribute and object tabs instead of falling back to the tag-derived name.
+     *
+     * @param array $attributes flat attributes, each with an 'AttributeTag' list
+     * @param array $user
+     * @return array same attributes, with 'Galaxy' set and galaxy tags removed
+     */
+    private function attributeGalaxiesFromTags(array $attributes, array $user)
+    {
+        // Gather galaxy tags across all attributes for a single lookup.
+        $galaxyTags = [];
+        foreach ($attributes as $attr) {
+            foreach (($attr['AttributeTag'] ?? []) as $at) {
+                if (!empty($at['Tag']['is_galaxy'])) {
+                    $galaxyTags[$at['Tag']['id']] = $at['Tag']['name'];
+                }
+            }
+        }
+
+        $clustersByTagId = [];
+        if (!empty($galaxyTags)) {
+            $GalaxyCluster = ClassRegistry::init('GalaxyCluster');
+            $clusters = $GalaxyCluster->getClustersByTags(
+                $galaxyTags, $user, true, false
+            );
+            $clustersByTagId = array_column(
+                array_column($clusters, 'GalaxyCluster'),
+                null,
+                'tag_id'
+            );
+        }
+
+        foreach ($attributes as &$attr) {
+            $galaxies = [];
+            $remainingTags = [];
+            foreach (($attr['AttributeTag'] ?? []) as $at) {
+                $tagId = $at['Tag']['id'] ?? null;
+                if (empty($at['Tag']['is_galaxy'])
+                    || !isset($clustersByTagId[$tagId])
+                ) {
+                    $remainingTags[] = $at;
+                    continue;
+                }
+                $cluster = $clustersByTagId[$tagId];
+                $galaxyId = $cluster['Galaxy']['id'];
+                $cluster['local'] = $at['local'] ?? false;
+                $cluster['attribute_tag_id'] = $at['id'] ?? null;
+                if (isset($galaxies[$galaxyId])) {
+                    unset($cluster['Galaxy']);
+                    $galaxies[$galaxyId]['GalaxyCluster'][] = $cluster;
+                } else {
+                    $galaxies[$galaxyId] = $cluster['Galaxy'];
+                    unset($cluster['Galaxy']);
+                    $galaxies[$galaxyId]['GalaxyCluster'] = [$cluster];
+                }
+            }
+            $attr['AttributeTag'] = $remainingTags;
+            $attr['Galaxy'] = array_values($galaxies);
+        }
+        unset($attr);
+
+        return $attributes;
+    }
+
+    /**
+     * Resolve the events that make up an extended / extending view.
+     *
+     * `extended` pulls in the events that extend the one being viewed (its
+     * children), `extending` pulls in the event it extends (its parent). Both
+     * may be on at once. The viewed event is always part of the set and always
+     * comes first, so callers that colour-code the origin land on a stable
+     * mapping.
+     *
+     * Only direct relatives are resolved — MISP's extension chain is not walked
+     * recursively, mirroring fetchEvent()'s own extended handling.
+     *
+     * @param array $user
+     * @param array $event     event with at least Event.id, Event.uuid and
+     *                         Event.extends_uuid
+     * @param bool  $extended  merge the events extending this one
+     * @param bool  $extending merge the event this one extends
+     * @return array [
+     *   'ids'    => int[] every event id in the view, viewed event first,
+     *   'events' => [id => [
+     *       'id', 'uuid', 'info', 'org_id', 'orgc_id', 'user_id',
+     *       'Orgc' => ['id', 'name'],
+     *       'role' => 'self'|'extension'|'extended',
+     *   ]],
+     * ]
+     */
+    public function getExtensionEventSet(
+        array $user,
+        array $event,
+        $extended = false,
+        $extending = false
+    ) {
+        $primaryId = (int)$event['Event']['id'];
+        $set = [
+            $primaryId => [
+                'id' => $primaryId,
+                'uuid' => $event['Event']['uuid'] ?? null,
+                'info' => $event['Event']['info'] ?? null,
+                'org_id' => $event['Event']['org_id'] ?? null,
+                'orgc_id' => $event['Event']['orgc_id'] ?? null,
+                'user_id' => $event['Event']['user_id'] ?? null,
+                'Orgc' => $event['Orgc'] ?? [],
+                'role' => 'self',
+            ],
+        ];
+
+        $lookups = [];
+        if ($extended && !empty($event['Event']['uuid'])) {
+            $lookups['extension'] = [
+                'Event.extends_uuid' => $event['Event']['uuid'],
+            ];
+        }
+        if ($extending && !empty($event['Event']['extends_uuid'])) {
+            $lookups['extended'] = [
+                'Event.uuid' => $event['Event']['extends_uuid'],
+            ];
+        }
+
+        foreach ($lookups as $role => $conditions) {
+            $relatives = $this->fetchSimpleEvents(
+                $user,
+                ['conditions' => $conditions],
+                true
+            );
+            foreach ($relatives as $relative) {
+                $relativeId = (int)$relative['Event']['id'];
+                if (isset($set[$relativeId])) {
+                    continue;
+                }
+                $set[$relativeId] = [
+                    'id' => $relativeId,
+                    'uuid' => $relative['Event']['uuid'],
+                    'info' => $relative['Event']['info'],
+                    'org_id' => $relative['Event']['org_id'] ?? null,
+                    'orgc_id' => $relative['Event']['orgc_id'] ?? null,
+                    'user_id' => $relative['Event']['user_id'] ?? null,
+                    'Orgc' => $relative['Orgc'] ?? [],
+                    'role' => $role,
+                ];
+            }
+        }
+
+        return [
+            'ids' => array_keys($set),
+            'events' => $set,
+        ];
+    }
+
+    /**
+     * What in an event is shared more narrowly than the event itself: the
+     * standalone attributes and the objects whose distribution is one of
+     * DistributionLevel::narrowerThan() the event's, per level, among the rows
+     * $user can see.
+     *
+     * @param array $user
+     * @param array $event ['Event' => id, distribution]
+     * @return array ['Attribute' => [level => count], 'Object' => [...]]
+     */
+    public function distributionOutliers(array $user, array $event)
+    {
+        App::uses('DistributionLevel', 'Tools');
+        $narrower = DistributionLevel::narrowerThan($event['Event']['distribution']);
+        if (empty($narrower)) {
+            return ['Attribute' => [], 'Object' => []];
+        }
+        $eventId = (int)$event['Event']['id'];
+        $isSiteAdmin = !empty($user['Role']['perm_site_admin']);
+        $sgids = $isSiteAdmin ? [] : $this->SharingGroup->authorizedIds($user);
+        $result = [];
+        foreach (['Attribute' => $this->Attribute, 'Object' => $this->Object] as $alias => $model) {
+            $conditions = [
+                $alias . '.event_id' => $eventId,
+                $alias . '.deleted' => 0,
+                $alias . '.distribution' => $narrower,
+            ];
+            if ($alias === 'Attribute') {
+                $conditions['Attribute.object_id'] = 0;
+            }
+            if (!$isSiteAdmin) {
+                $conditions['AND'][0]['OR'] = [
+                    ['AND' => [
+                        $alias . '.distribution >' => 0,
+                        $alias . '.distribution !=' => 4,
+                    ]],
+                    ['AND' => [
+                        $alias . '.distribution' => 4,
+                        $alias . '.sharing_group_id' => $sgids,
+                    ]],
+                    $this->eventOwnerSubquery($alias) . ' = ' . (int)$user['org_id'],
+                ];
+            }
+            $rows = $model->find('all', [
+                'conditions' => $conditions,
+                'fields' => [$alias . '.distribution', 'COUNT(*) AS count'],
+                'group' => [$alias . '.distribution'],
+                'recursive' => -1,
+            ]);
+            $result[$alias] = [];
+            foreach ($rows as $row) {
+                $result[$alias][(int)$row[$alias]['distribution']] = (int)$row[0]['count'];
+            }
+            ksort($result[$alias]);
+        }
+        return $result;
+    }
+
+    /**
+     * Fetch paginated standalone attributes (object_id=0)
+     * for a given event, with distribution-based ACL.
+     *
+     * @param array $user
+     * @param int   $eventId
+     * @param array $options  Keys:
+     *   - page (int, default 1)
+     *   - limit (int, default 60)
+     *   - sort (string, default 'timestamp')
+     *   - direction (string, default 'desc')
+     *   - deleted (int, 0=not-deleted, 1=both, 2=only-deleted)
+     *   - category (string|null)
+     *   - type (string|null)
+     *   - toIDS (int|null, 1=yes, 2=no)
+     *   - correlation, feed, warning, analystData (int|null, 1=has related
+     *     events / feed hits / warninglist hits / analyst data, 2=has none)
+     *   - tags (string|string[]|null) exact tag names
+     *   - galaxy (string|null) galaxy type, any of its clusters
+     *   - org (string|null) creator org name of the event a row belongs to
+     *   - searchFor (string|null) substring search over value, uuid and
+     *     comment
+     *   - eventIds (int[]|null) extended / extending view: every event whose
+     *     attributes belong in the list. $eventId stays the primary one.
+     * @return array ['Attribute' => [...], 'total' => int]
+     */
+    public function fetchPaginatedAttributes(
+        array $user,
+        $eventId,
+        array $options = []
+    ) {
+        $page = max(1, (int)($options['page'] ?? 1));
+        $limit = min(500, max(1, (int)($options['limit'] ?? 60)));
+        $sort = $options['sort'] ?? 'timestamp';
+        $direction = (
+            isset($options['direction']) &&
+            strtolower($options['direction']) === 'asc'
+        ) ? 'ASC' : 'DESC';
+
+        $allowedSortFields = [
+            'id', 'uuid', 'type', 'category', 'value',
+            'to_ids', 'timestamp', 'distribution', 'comment',
+            'first_seen', 'last_seen', 'event_id',
+        ];
+        if (!in_array($sort, $allowedSortFields, true)) {
+            $sort = 'timestamp';
+        }
+
+        // In an extended / extending view the list spans every event merged
+        // into it. $eventId stays the primary one: enrichment (correlations,
+        // feed hits) is still resolved against the event you are looking at.
+        $eventIds = empty($options['eventIds'])
+            ? [(int)$eventId]
+            : array_values(array_unique(array_map(
+                'intval', (array)$options['eventIds']
+            )));
+
+        // Creator org: only tells rows apart in an extended view, where the
+        // merged events can come from different organisations.
+        if (!empty($options['org'])) {
+            $eventIds = $this->__eventIdsOfOrg($eventIds, $options['org']);
+        }
+
+        // Base conditions
+        $conditions = [
+            'Attribute.event_id' => $eventIds,
+        ];
+        if (empty($options['flatten'])) {
+            $conditions['Attribute.object_id'] = 0;
+        }
+
+        // Deleted filter
+        $deleted = (int)($options['deleted'] ?? 0);
+        if ($deleted === 1) {
+            $conditions['Attribute.deleted'] = [0, 1];
+        } elseif ($deleted === 2) {
+            $conditions['Attribute.deleted'] = 1;
+        } else {
+            $conditions['Attribute.deleted'] = 0;
+        }
+        if ($deleted !== 0 && !$user['Role']['perm_sync']) {
+            // soft-deleted data is only shown to the event owner, as in fetchEvent()
+            $ownDeleted = [
+                'Attribute.deleted' => 1,
+                $this->eventOwnerSubquery('Attribute') . ' = ' . (int)$user['org_id'],
+            ];
+            unset($conditions['Attribute.deleted']);
+            $conditions[] = $deleted === 1
+                ? ['OR' => ['Attribute.deleted' => 0, 'AND' => $ownDeleted]]
+                : $ownDeleted;
+        }
+
+        // Optional filters
+        if (!empty($options['category'])) {
+            $conditions['Attribute.category'] = $options['category'];
+        }
+        if (!empty($options['type'])) {
+            $conditions['Attribute.type'] = $options['type'];
+        }
+        if (isset($options['toIDS']) && $options['toIDS'] != 0) {
+            $conditions['Attribute.to_ids'] =
+                $options['toIDS'] == 2 ? 0 : 1;
+        }
+        if (isset($options['distribution']) && $options['distribution'] !== '') {
+            $conditions['Attribute.distribution'] = (int)$options['distribution'];
+        }
+        if (!empty($options['searchFor'])) {
+            // Same reach as the classic event view's filter: a value, a UUID
+            // or a comment, so a deep link onto one attribute resolves as
+            // well as free text does. Appended at the top level, not under
+            // 'AND' - the ACL block below writes $conditions['AND'][0]['OR']
+            // by index and would overwrite anything sitting there.
+            $needle = '%' . $options['searchFor'] . '%';
+            $conditions[] = ['OR' => [
+                'Attribute.value LIKE' => $needle,
+                'Attribute.uuid LIKE' => $needle,
+                'Attribute.comment LIKE' => $needle,
+            ]];
+        }
+
+        $analystData = (int)($options['analystData'] ?? 0);
+        if ($analystData === 1 || $analystData === 2) {
+            $conditions[] = $this->Attribute->analystDataCondition(
+                $user,
+                $analystData === 1
+            );
+        }
+        if (!empty($options['tags'])) {
+            $conditions[] = $this->Attribute->tagCondition(
+                $options['tags'], null, $eventIds
+            );
+        }
+        if (!empty($options['galaxy'])) {
+            $conditions[] = $this->Attribute->tagCondition(
+                null, $options['galaxy'], $eventIds
+            );
+        }
+
+        // Proposals filter. The toggle narrows the list down to what carries
+        // a pending proposal instead of merely flagging it, so an attribute
+        // without one drops out. Standalone "new attribute" proposals have no
+        // attribute to match and are added as rows by __attachProposals().
+        if (!empty($options['proposal'])) {
+            $proposedIds = $this->proposedAttributeIds($eventIds);
+            $conditions['Attribute.id'] =
+                empty($proposedIds) ? [-1] : $proposedIds;
+        }
+
+        // Distribution-based ACL for non-site-admins
+        $isSiteAdmin = $user['Role']['perm_site_admin'];
+        if (!$isSiteAdmin) {
+            $sgids = $this->SharingGroup->authorizedIds($user);
+            $attributeCondSelect = $this->eventOwnerSubquery('Attribute');
+            $conditions['AND'][0]['OR'] = [
+                ['AND' => [
+                    'Attribute.distribution >' => 0,
+                    'Attribute.distribution !=' => 4,
+                ]],
+                ['AND' => [
+                    'Attribute.distribution' => 4,
+                    'Attribute.sharing_group_id' => $sgids,
+                ]],
+                $attributeCondSelect . ' = ' . (int)$user['org_id'],
+            ];
+            if (!empty($options['flatten'])) {
+                // object attributes are only in the list when flattening, and
+                // they still have to pass the object's own distribution ACL
+                $objectCondSelect = $this->eventOwnerSubquery('Object');
+                $objectAcl = $this->subQueryGenerator(
+                    $this->Object,
+                    [
+                        'fields' => ['Object.id'],
+                        'recursive' => -1,
+                        'conditions' => [
+                            'Object.event_id' => $eventIds,
+                            'OR' => [
+                                ['AND' => [
+                                    'Object.distribution >' => 0,
+                                    'Object.distribution !=' => 4,
+                                ]],
+                                ['AND' => [
+                                    'Object.distribution' => 4,
+                                    'Object.sharing_group_id' => $sgids,
+                                ]],
+                                $objectCondSelect . ' = ' . (int)$user['org_id'],
+                            ],
+                        ],
+                    ],
+                    'Attribute.object_id'
+                );
+                $conditions['AND'][] = [
+                    'OR' => [
+                        'Attribute.object_id' => 0,
+                        $objectAcl[0],
+                    ],
+                ];
+            }
+        }
+
+        // Warninglist filter. Kept last so the hit set is resolved against the
+        // fully built (and ACL-restricted) condition set.
+        if (!empty($options['warninglist'])) {
+            $conditions['Attribute.id'] =
+                $this->__attributeIdsMatchingWarninglist(
+                    $conditions,
+                    (int)$options['warninglist']
+                );
+        }
+
+        // Yes/no filters on what __enrichAttributes() computes (1 = has, 2 =
+        // has not). Same reason as above for resolving them last.
+        $hitFilters = [];
+        foreach (['warning', 'feed', 'correlation'] as $hitKey) {
+            $hitValue = (int)($options[$hitKey] ?? 0);
+            if ($hitValue === 1 || $hitValue === 2) {
+                $hitFilters[$hitKey] = $hitValue === 1;
+            }
+        }
+        if (!empty($hitFilters)) {
+            $conditions['Attribute.id'] =
+                $this->__attributeIdsMatchingHits(
+                    $user, $eventId, $conditions, $hitFilters
+                );
+        }
+
+        $fields = [
+            'Attribute.id',
+            'Attribute.type',
+            'Attribute.category',
+            'Attribute.value',
+            'Attribute.to_ids',
+            'Attribute.uuid',
+            'Attribute.event_id',
+            'Attribute.distribution',
+            'Attribute.timestamp',
+            'Attribute.comment',
+            'Attribute.sharing_group_id',
+            'Attribute.deleted',
+            'Attribute.disable_correlation',
+            'Attribute.first_seen',
+            'Attribute.last_seen',
+        ];
+
+        // Count total (for pagination metadata)
+        $total = $this->Attribute->find('count', [
+            'conditions' => $conditions,
+            'recursive' => -1,
+        ]);
+
+        // Standalone proposals are rows of their own, so they belong in the
+        // total: without them a page holding nothing else reports an empty
+        // list while __attachProposals() is about to render them.
+        if (!empty($options['proposal'])) {
+            $total += $this->ShadowAttribute->find('count', [
+                'conditions' => $this->__newProposalConditions(
+                    $eventIds, $options
+                ),
+                'recursive' => -1,
+            ]);
+        }
+
+        // Fetch page
+        $attributes = $this->Attribute->find('all', [
+            'conditions' => $conditions,
+            'fields' => $fields,
+            'recursive' => -1,
+            // The id as a tiebreaker: attributes saved in the same second
+            // share a timestamp, and without it PostgreSQL returns them in
+            // whatever physical order they happen to have - which changes
+            // when a row is updated - where MySQL happens to keep insertion
+            // order. Callers and tests read attributes[0] as "the first one".
+            'order' => ['Attribute.' . $sort => $direction, 'Attribute.id' => 'ASC'],
+            'limit' => $limit,
+            'offset' => ($page - 1) * $limit,
+        ]);
+
+        // Flatten CakePHP nested format
+        $flat = [];
+        foreach ($attributes as $a) {
+            $flat[] = $a['Attribute'];
+        }
+
+        // Bulk-load tags for fetched attributes
+        if (!empty($flat)) {
+            $attributeIds = array_column($flat, 'id');
+            $ats = $this->Attribute->AttributeTag->find('all', [
+                'conditions' => [
+                    'AttributeTag.attribute_id' => $attributeIds,
+                ],
+                'fields' => [
+                    'AttributeTag.id',
+                    'AttributeTag.attribute_id',
+                    'AttributeTag.tag_id',
+                    'AttributeTag.local',
+                    'AttributeTag.relationship_type',
+                ],
+                'recursive' => -1,
+            ]);
+
+            // Group by attribute_id
+            $tagsByAttr = [];
+            $tagIds = [];
+            foreach ($ats as $at) {
+                $row = $at['AttributeTag'];
+                $tagsByAttr[$row['attribute_id']][] = $row;
+                $tagIds[$row['tag_id']] = true;
+            }
+
+            // Fetch tag details in one query
+            $tagsById = [];
+            if (!empty($tagIds)) {
+                $tags = $this->EventTag->Tag->find('all', [
+                    'recursive' => -1,
+                    'conditions' => [
+                        'Tag.id' => array_keys($tagIds),
+                    ],
+                ]);
+                foreach ($tags as $tag) {
+                    $tagsById[$tag['Tag']['id']] = $tag['Tag'];
+                }
+            }
+
+            // Attach to attributes
+            foreach ($flat as &$attribute) {
+                $attribute['AttributeTag'] = [];
+                if (!empty($tagsByAttr[$attribute['id']])) {
+                    foreach ($tagsByAttr[$attribute['id']] as $at) {
+                        $tag = $tagsById[$at['tag_id']] ?? null;
+                        if ($tag) {
+                            $at['Tag'] = $tag;
+                            $attribute['AttributeTag'][] = $at;
+                        }
+                    }
+                }
+            }
+            unset($attribute);
+        }
+
+        // Move is_galaxy tags into an ['Galaxy'] array.
+        $flat = $this->attributeGalaxiesFromTags($flat, $user);
+
+        // Attach SharingGroup names for distribution==4
+        $sgIdsNeeded = [];
+        foreach ($flat as $attribute) {
+            if (
+                (int)$attribute['distribution'] === 4 &&
+                !empty($attribute['sharing_group_id'])
+            ) {
+                $sgIdsNeeded[$attribute['sharing_group_id']] = true;
+            }
+        }
+        if (!empty($sgIdsNeeded)) {
+            $sgs = $this->SharingGroup->find('all', [
+                'conditions' => [
+                    'SharingGroup.id' => array_keys($sgIdsNeeded),
+                ],
+                'fields' => ['SharingGroup.id', 'SharingGroup.name'],
+                'recursive' => -1,
+            ]);
+            $sgNames = [];
+            foreach ($sgs as $sg) {
+                $sgNames[$sg['SharingGroup']['id']] =
+                    $sg['SharingGroup']['name'];
+            }
+            foreach ($flat as &$attribute) {
+                if (
+                    (int)$attribute['distribution'] === 4 &&
+                    isset($sgNames[$attribute['sharing_group_id']])
+                ) {
+                    $attribute['SharingGroup'] = [
+                        'name' => $sgNames[
+                            $attribute['sharing_group_id']
+                        ],
+                    ];
+                }
+            }
+            unset($attribute);
+        }
+
+        $enriched = $this->__enrichAttributes(
+            $flat, $user, $eventId, $eventIds
+        );
+        $attributesOut = $enriched['attributes'];
+
+        // Proposals (shadow attributes): when requested, attach pending
+        // proposed edits/deletions inline on their target attribute and
+        // surface standalone "new attribute" proposals as their own rows.
+        // Done after enrichment so proposals don't pick up attribute-id
+        // based correlations / sightings.
+        if (!empty($options['proposal'])) {
+            $attributesOut = $this->__attachProposals(
+                $attributesOut, $eventIds, $page, $options
+            );
+        }
+
+        return [
+            'Attribute' => $attributesOut,
+            'total' => (int)$total,
+            'page' => $page,
+            'limit' => $limit,
+            'sightings_csv' =>
+                $enriched['sightings_csv'],
+        ];
+    }
+
+    /**
+     * Ids of the attributes of $eventIds that carry a pending proposal, i.e.
+     * a proposed edit or deletion (ShadowAttribute.old_id = attribute id).
+     *
+     * Standalone "new attribute" proposals (old_id = 0) target no attribute
+     * and are deliberately left out.
+     *
+     * @param array $eventIds
+     * @return array Attribute ids, empty when the events hold no proposal
+     */
+    public function proposedAttributeIds(array $eventIds)
+    {
+        return $this->ShadowAttribute->find('column', [
+            'fields' => ['ShadowAttribute.old_id'],
+            'conditions' => [
+                'ShadowAttribute.event_id' => $eventIds,
+                'ShadowAttribute.deleted' => 0,
+                'ShadowAttribute.old_id !=' => 0,
+            ],
+            'unique' => true,
+        ]);
+    }
+
+    /**
+     * Ids of the objects of $eventIds holding at least one attribute with a
+     * pending proposal — what the objects index shows while its Proposals
+     * filter is on.
+     *
+     * $attrDeleted is the deleted scope of the attributes the index is about
+     * to render. Passing it keeps the selection honest: a proposal on a
+     * soft-deleted attribute must not pull in an object whose card will then
+     * show no proposal at all, because that attribute is filtered out of it.
+     *
+     * @param array $eventIds
+     * @param array $attrDeleted condition on Attribute.deleted
+     * @return array Object ids, empty when there is none
+     */
+    public function objectIdsWithProposals(
+        array $eventIds,
+        array $attrDeleted = ['Attribute.deleted' => 0]
+    ) {
+        $proposedIds = $this->proposedAttributeIds($eventIds);
+        if (empty($proposedIds)) {
+            return [];
+        }
+        return $this->Attribute->find('column', [
+            'fields' => ['Attribute.object_id'],
+            'conditions' => [
+                'Attribute.event_id' => $eventIds,
+                'Attribute.id' => $proposedIds,
+                'Attribute.object_id !=' => 0,
+                $attrDeleted,
+            ],
+            'unique' => true,
+        ]);
+    }
+
+    /**
+     * The events of $eventIds whose soft-deleted rows $user may see: the ones
+     * its organisation owns, or all of them for a sync user, as fetchEvent().
+     *
+     * @param array $user
+     * @param array $eventIds
+     * @return array Event ids
+     */
+    public function eventIdsShowingDeleted(array $user, array $eventIds)
+    {
+        if ($user['Role']['perm_sync']) {
+            return $eventIds;
+        }
+        return $this->find('column', [
+            'fields' => ['Event.id'],
+            'conditions' => [
+                'Event.id' => $eventIds,
+                'Event.org_id' => $user['org_id'],
+            ],
+        ]);
+    }
+
+    /**
+     * Ids of the objects of $eventIds holding at least one soft-deleted
+     * attribute. The objects index needs them on top of the soft-deleted
+     * objects themselves: a deleted attribute of a live object would
+     * otherwise have nowhere left to show while the Deleted filter is on.
+     *
+     * @param array $eventIds
+     * @return array Object ids, empty when there is none
+     */
+    public function objectIdsWithDeletedAttributes(array $eventIds)
+    {
+        return $this->Attribute->find('column', [
+            'fields' => ['Attribute.object_id'],
+            'conditions' => [
+                'Attribute.event_id' => $eventIds,
+                'Attribute.object_id !=' => 0,
+                'Attribute.deleted' => 1,
+            ],
+            'unique' => true,
+        ]);
+    }
+
+    /**
+     * Ids of the attributes selected by $conditions that a given warninglist
+     * flags.
+     *
+     * Warninglist matching cannot be expressed in SQL (lists are cidr / regex
+     * / substring / hostname matchers evaluated in PHP), so the candidate set
+     * is resolved first and the caller narrows its query down to the ids
+     * returned here.
+     *
+     * @param array $conditions Attribute conditions of the caller's query
+     * @param int $warninglistId
+     * @return array Attribute ids; [-1] when nothing matches, so that the
+     *               caller's query comes back empty rather than unfiltered
+     */
+    private function __attributeIdsMatchingWarninglist(
+        array $conditions,
+        $warninglistId
+    ) {
+        $candidates = $this->Attribute->find('all', [
+            'conditions' => $conditions,
+            'fields' => [
+                'Attribute.id',
+                'Attribute.type',
+                'Attribute.value',
+                'Attribute.to_ids',
+            ],
+            'recursive' => -1,
+        ]);
+        if (empty($candidates)) {
+            return [-1];
+        }
+
+        $flat = [];
+        foreach ($candidates as $candidate) {
+            $flat[] = $candidate['Attribute'];
+        }
+
+        if (!isset($this->Warninglist)) {
+            $this->Warninglist = ClassRegistry::init('Warninglist');
+        }
+        $this->Warninglist->attachWarninglistToAttributes($flat);
+
+        $ids = [];
+        foreach ($flat as $attribute) {
+            if (empty($attribute['warnings'])) {
+                continue;
+            }
+            foreach ($attribute['warnings'] as $warning) {
+                if ((int)$warning['warninglist_id'] === $warninglistId) {
+                    $ids[] = $attribute['id'];
+                    break;
+                }
+            }
+        }
+
+        return empty($ids) ? [-1] : $ids;
+    }
+
+    /**
+     * Ids of the attributes selected by $conditions whose warninglist, feed
+     * and correlation hits match $wanted, a map of 'warning' / 'feed' /
+     * 'correlation' => whether the attribute must have one.
+     *
+     * @param array $user
+     * @param int $eventId primary event, the one correlations are seen from
+     * @param array $conditions Attribute conditions of the caller's query
+     * @param array $wanted
+     * @return array Attribute ids; [-1] when nothing matches
+     */
+    private function __attributeIdsMatchingHits(
+        array $user,
+        $eventId,
+        array $conditions,
+        array $wanted
+    ) {
+        $ids = [];
+        $this->__scanAttributeHits(
+            $user, $eventId, $conditions, array_keys($wanted),
+            function (array $attribute, array $hits) use ($wanted, &$ids) {
+                foreach ($wanted as $key => $mustHave) {
+                    if ($hits[$key] !== $mustHave) {
+                        return;
+                    }
+                }
+                $ids[] = $attribute['id'];
+            }
+        );
+        return empty($ids) ? [-1] : $ids;
+    }
+
+    /**
+     * Ids of the objects holding at least one attribute selected by
+     * $conditions with a warninglist, feed or correlation hit, per kind.
+     *
+     * @param array $user
+     * @param int $eventId primary event, the one correlations are seen from
+     * @param array $conditions Attribute conditions
+     * @param array $keys among 'warning', 'feed', 'correlation'
+     * @return array key => object ids
+     */
+    private function __objectIdsWithHits(
+        array $user,
+        $eventId,
+        array $conditions,
+        array $keys
+    ) {
+        $objectIds = array_fill_keys($keys, []);
+        $this->__scanAttributeHits(
+            $user, $eventId, $conditions, $keys,
+            function (array $attribute, array $hits) use ($keys, &$objectIds) {
+                foreach ($keys as $key) {
+                    if ($hits[$key]) {
+                        $objectIds[$key][$attribute['object_id']] = true;
+                    }
+                }
+            }
+        );
+        return array_map('array_keys', $objectIds);
+    }
+
+    /**
+     * Walk the attributes selected by $conditions and hand each one, with its
+     * warninglist / feed / correlation hits for the asked $keys, to $onRow.
+     *
+     * Like __attributeIdsMatchingWarninglist(), the hits are computed in PHP
+     * (warninglists, the redis feed cache, the correlation ACL), so the
+     * candidates are walked in id-ordered batches to keep memory bounded on a
+     * very large event.
+     *
+     * @param array $user
+     * @param int $eventId primary event, the one correlations are seen from
+     * @param array $conditions Attribute conditions
+     * @param array $keys among 'warning', 'feed', 'correlation'
+     * @param callable $onRow function (array $attribute, array $hits)
+     * @return void
+     */
+    private function __scanAttributeHits(
+        array $user,
+        $eventId,
+        array $conditions,
+        array $keys,
+        callable $onRow
+    ) {
+        $keys = array_flip($keys);
+        if (isset($keys['warning']) && !isset($this->Warninglist)) {
+            $this->Warninglist = ClassRegistry::init('Warninglist');
+        }
+        $sgids = isset($keys['correlation'])
+            ? $this->SharingGroup->authorizedIds($user)
+            : [];
+
+        $lastId = 0;
+        do {
+            $batchConditions = $conditions;
+            $batchConditions['Attribute.id >'] = $lastId;
+            $batch = $this->Attribute->find('all', [
+                'conditions' => $batchConditions,
+                'fields' => [
+                    'Attribute.id',
+                    'Attribute.object_id',
+                    'Attribute.type',
+                    'Attribute.value',
+                    'Attribute.to_ids',
+                    'Attribute.disable_correlation',
+                ],
+                'order' => ['Attribute.id' => 'ASC'],
+                'limit' => 5000,
+                'recursive' => -1,
+            ]);
+            if (empty($batch)) {
+                break;
+            }
+            $flat = array_column($batch, 'Attribute');
+            unset($batch);
+            $lastId = (int)end($flat)['id'];
+
+            if (isset($keys['warning'])) {
+                $this->Warninglist->attachWarninglistToAttributes($flat);
+            }
+            if (isset($keys['feed'])) {
+                $flat = $this->__attachFeedAndServerHits(
+                    $flat, $user, $eventId
+                );
+            }
+            $correlations = isset($keys['correlation'])
+                ? $this->Attribute->Correlation->getAttributeCorrelations(
+                    $user, $eventId, $sgids, array_column($flat, 'id')
+                )
+                : [];
+
+            foreach ($flat as $attribute) {
+                $onRow($attribute, [
+                    'warning' => !empty($attribute['warnings']),
+                    'feed' => !empty($attribute['Feed'])
+                        || !empty($attribute['Server'])
+                        || !empty($attribute['FeedHit']),
+                    'correlation' => !empty($correlations[$attribute['id']]),
+                ]);
+            }
+        } while (count($flat) === 5000);
+    }
+
+    /**
+     * The events of $eventIds created by the organisation named $orgName.
+     *
+     * @param array $eventIds
+     * @param string $orgName
+     * @return array event ids; [-1] when none
+     */
+    private function __eventIdsOfOrg(array $eventIds, $orgName)
+    {
+        return $this->find('column', [
+            'fields' => ['Event.id'],
+            'conditions' => [
+                'Event.id' => $eventIds,
+                'Orgc.name' => $orgName,
+            ],
+            'joins' => [[
+                'table' => 'organisations',
+                'alias' => 'Orgc',
+                'type' => 'INNER',
+                'conditions' => ['Orgc.id = Event.orgc_id'],
+            ]],
+        ]) ?: [-1];
+    }
+
+    /**
+     * Conditions selecting the standalone "new attribute" proposals of an
+     * event view (ShadowAttribute.old_id = 0), narrowed by the same column
+     * filters as the attribute list itself.
+     *
+     * Shared by the pagination total and __attachProposals() so the rows that
+     * get rendered are exactly the rows that were counted.
+     *
+     * @param array $eventIds
+     * @param array $options viewAttributes filters (category/type/searchFor)
+     * @return array
+     */
+    private function __newProposalConditions(array $eventIds, array $options)
+    {
+        $conditions = [
+            'ShadowAttribute.event_id' => $eventIds,
+            'ShadowAttribute.old_id' => 0,
+            'ShadowAttribute.deleted' => 0,
+        ];
+        // A standalone proposal proposes a *new* attribute, so it is not part
+        // of what the deleted-only filter asks for. Selecting nothing here
+        // keeps the total and the rendered rows in step either way.
+        if ((int)($options['deleted'] ?? 0) === 2) {
+            $conditions['ShadowAttribute.id'] = -1;
+        }
+        if (!empty($options['category'])) {
+            $conditions['ShadowAttribute.category'] = $options['category'];
+        }
+        if (!empty($options['type'])) {
+            $conditions['ShadowAttribute.type'] = $options['type'];
+        }
+        if (isset($options['toIDS']) && $options['toIDS'] != 0) {
+            $conditions['ShadowAttribute.to_ids'] =
+                $options['toIDS'] == 2 ? 0 : 1;
+        }
+        // A proposal carries no tag, hit or analyst data of its own, so a
+        // filter asking for one leaves it out.
+        $requiresSomething = !empty($options['tags'])
+            || !empty($options['galaxy']);
+        foreach (['correlation', 'feed', 'warning', 'analystData'] as $key) {
+            if ((int)($options[$key] ?? 0) === 1) {
+                $requiresSomething = true;
+            }
+        }
+        if ($requiresSomething) {
+            $conditions['ShadowAttribute.id'] = -1;
+        }
+        if (!empty($options['searchFor'])) {
+            $needle = '%' . $options['searchFor'] . '%';
+            $conditions[] = ['OR' => [
+                'ShadowAttribute.value1 LIKE' => $needle,
+                'ShadowAttribute.uuid LIKE' => $needle,
+                'ShadowAttribute.comment LIKE' => $needle,
+            ]];
+        }
+        return $conditions;
+    }
+
+    /**
+     * Attach pending proposals to a page of attributes for the event view.
+     *
+     * - Proposed edits / deletions (ShadowAttribute.old_id = attribute id)
+     *   are attached inline on their target attribute as ['ShadowAttribute'].
+     * - Standalone "new attribute" proposals (ShadowAttribute.old_id = 0) are
+     *   normalised into attribute-shaped rows (flagged is_proposal) and
+     *   prepended to the list. They are only surfaced on page 1 so they are
+     *   not duplicated across pagination.
+     *
+     * @param array $attributes Enriched, flat attribute rows for the page
+     * @param int|string $eventId
+     * @param int $page Current page number
+     * @param array $options viewAttributes filters (category/type/searchFor)
+     * @return array
+     */
+    /**
+     * @param array $attributes
+     * @param array $eventIds every event in the (possibly extended) view
+     * @param int   $page
+     * @param array $options
+     * @return array
+     */
+    private function __attachProposals(array $attributes, array $eventIds, $page, array $options)
+    {
+        // Pending proposed edits / deletions for attributes on this page.
+        $attrIds = array_column($attributes, 'id');
+        $editsByAttr = [];
+        if (!empty($attrIds)) {
+            $edits = $this->ShadowAttribute->find('all', [
+                'conditions' => [
+                    'ShadowAttribute.old_id' => $attrIds,
+                    'ShadowAttribute.event_id' => $eventIds,
+                    'ShadowAttribute.deleted' => 0,
+                ],
+                'recursive' => -1,
+            ]);
+            foreach ($edits as $e) {
+                $editsByAttr[$e['ShadowAttribute']['old_id']][] = $e['ShadowAttribute'];
+            }
+        }
+
+        // Standalone proposed-new attributes (old_id = 0), first page only.
+        $newProposals = [];
+        if ((int)$page === 1) {
+            $newProposals = $this->ShadowAttribute->find('all', [
+                'conditions' => $this->__newProposalConditions(
+                    $eventIds, $options
+                ),
+                'recursive' => -1,
+                'order' => ['ShadowAttribute.timestamp DESC'],
+            ]);
+        }
+
+        if (empty($editsByAttr) && empty($newProposals)) {
+            return $attributes;
+        }
+
+        // Resolve proposer org names for everything we are about to render.
+        $orgIds = [];
+        foreach ($editsByAttr as $list) {
+            foreach ($list as $sa) {
+                $orgIds[$sa['org_id']] = true;
+            }
+        }
+        foreach ($newProposals as $p) {
+            $orgIds[$p['ShadowAttribute']['org_id']] = true;
+        }
+        $orgNames = [];
+        if (!empty($orgIds)) {
+            $orgModel = ClassRegistry::init('Organisation');
+            $orgNames = $orgModel->find('list', [
+                'conditions' => ['Organisation.id' => array_keys($orgIds)],
+                'fields' => ['Organisation.id', 'Organisation.name'],
+                'recursive' => -1,
+            ]);
+        }
+
+        $decorate = function ($sa) use ($orgNames) {
+            $sa['org_name'] = $orgNames[$sa['org_id']] ?? $sa['org_id'];
+            return $sa;
+        };
+
+        // Attach inline edit / delete proposals.
+        foreach ($attributes as &$attr) {
+            if (!empty($editsByAttr[$attr['id']])) {
+                $attr['ShadowAttribute'] = array_map($decorate, $editsByAttr[$attr['id']]);
+            }
+        }
+        unset($attr);
+
+        // Prepend standalone proposed-new attribute rows.
+        $rows = [];
+        foreach ($newProposals as $p) {
+            $sa = $decorate($p['ShadowAttribute']);
+            $rows[] = [
+                'id' => $sa['id'],
+                'event_id' => $sa['event_id'],
+                'category' => $sa['category'],
+                'type' => $sa['type'],
+                'value' => $sa['value'],
+                'to_ids' => $sa['to_ids'],
+                'uuid' => $sa['uuid'],
+                'comment' => $sa['comment'],
+                'timestamp' => $sa['timestamp'],
+                'first_seen' => $sa['first_seen'] ?? null,
+                'last_seen' => $sa['last_seen'] ?? null,
+                'deleted' => 0,
+                'disable_correlation' => 0,
+                'AttributeTag' => [],
+                'ShadowAttribute' => [],
+                'RelatedAttribute' => [],
+                'Sighting' => [],
+                'is_proposal' => true,
+                'proposal_id' => $sa['id'],
+                'proposal_type' => 'new',
+                'proposal_org_id' => $sa['org_id'],
+                'proposal_org_name' => $sa['org_name'],
+            ];
+        }
+
+        return array_merge($rows, $attributes);
+    }
+
+    /**
+     * Object conditions for the attribute filters of the objects index.
+     *
+     * category / type / tags / galaxy must all hold for one same attribute.
+     * The yes/no filters ask whether any attribute of the object has the
+     * property, so "No" keeps an object none of whose attributes has it.
+     *
+     * @param array $user
+     * @param int $eventId primary event, the one correlations are seen from
+     * @param array $eventIds
+     * @param array $attrScope conditions on the attributes an object shows
+     * @param array $options fetchPaginatedObjects() options
+     * @return array conditions to add to the object query
+     */
+    private function __objectAttributeFilterConditions(
+        array $user,
+        $eventId,
+        array $eventIds,
+        array $attrScope,
+        array $options
+    ) {
+        $holding = function (array $attrConditions, $negate = false) {
+            return $this->subQueryGenerator(
+                $this->Attribute,
+                [
+                    'fields' => ['Attribute.object_id'],
+                    'conditions' => $attrConditions,
+                ],
+                'Object.id',
+                $negate
+            )[0];
+        };
+        $conditions = [];
+
+        $matching = $attrScope;
+        foreach (['category', 'type'] as $key) {
+            if (!empty($options[$key])) {
+                $matching['Attribute.' . $key] = $options[$key];
+            }
+        }
+        if (!empty($options['tags'])) {
+            $matching[] = $this->Attribute->tagCondition(
+                $options['tags'], null, $eventIds
+            );
+        }
+        if (!empty($options['galaxy'])) {
+            $matching[] = $this->Attribute->tagCondition(
+                null, $options['galaxy'], $eventIds
+            );
+        }
+        if ($matching !== $attrScope) {
+            $conditions[] = $holding($matching);
+        }
+
+        $yesNo = function ($key) use ($options) {
+            $value = (int)($options[$key] ?? 0);
+            return ($value === 1 || $value === 2) ? $value === 1 : null;
+        };
+
+        $toIds = $yesNo('toIDS');
+        if ($toIds !== null) {
+            $conditions[] = $holding(
+                $attrScope + ['Attribute.to_ids' => 1],
+                !$toIds
+            );
+        }
+
+        $analystData = $yesNo('analystData');
+        if ($analystData !== null) {
+            $ownData = $this->Attribute->analystDataCondition(
+                $user, $analystData, 'Object', 'Object.uuid'
+            );
+            $attrScopeWithData = $attrScope;
+            $attrScopeWithData[] = $this->Attribute->analystDataCondition(
+                $user, true
+            );
+            $attributesData = $holding($attrScopeWithData, !$analystData);
+            $conditions[] = '(' . $ownData
+                . ($analystData ? ' OR ' : ' AND ')
+                . $attributesData . ')';
+        }
+
+        $hitWanted = [];
+        foreach (['warning', 'feed', 'correlation'] as $key) {
+            if ($yesNo($key) !== null) {
+                $hitWanted[$key] = $yesNo($key);
+            }
+        }
+        if (!empty($hitWanted)) {
+            $withHits = $this->__objectIdsWithHits(
+                $user, $eventId, $attrScope, array_keys($hitWanted)
+            );
+            foreach ($hitWanted as $key => $mustHave) {
+                if ($mustHave) {
+                    $conditions[] = ['Object.id' => $withHits[$key] ?: [-1]];
+                } elseif (!empty($withHits[$key])) {
+                    $conditions[] = ['NOT' => ['Object.id' => $withHits[$key]]];
+                }
+            }
+        }
+
+        return $conditions;
+    }
+
+    /**
+     * Fetch paginated objects for a given event, with
+     * distribution-based ACL on both the object and its
+     * nested attributes. Includes attribute tags and
+     * proposals inline.
+     *
+     * @param array $user
+     * @param int   $eventId
+     * @param array $options  Keys:
+     *   - page (int, default 1)
+     *   - limit (int, default 60)
+     *   - sort (string, default 'timestamp')
+     *   - direction (string, default 'desc')
+     *   - deleted (int, 0/1/2)
+     *   - name (string|null) object template name filter
+     *   - meta-category (string|null)
+     *   - searchFor (string|null) substring search over the object's own
+     *     uuid / name / comment and its attributes' values and uuids
+     *   - category, type, tags, galaxy: an object stays when one of its
+     *     attributes matches them all
+     *   - toIDS, correlation, feed, warning, analystData (1=at least one of
+     *     its attributes has it, 2=none has; analyst data counts the object's
+     *     own as well)
+     *   - org (string|null) creator org name of the object's event
+     *   - eventIds (int[]|null) extended / extending view: every event whose
+     *     objects belong in the list
+     * @return array ['Object' => [...], 'total' => int]
+     */
+    public function fetchPaginatedObjects(
+        array $user,
+        $eventId,
+        array $options = []
+    ) {
+        $page = max(1, (int)($options['page'] ?? 1));
+        $limit = min(500, max(1, (int)($options['limit'] ?? 60)));
+        $sort = $options['sort'] ?? 'timestamp';
+        $direction = (
+            isset($options['direction']) &&
+            strtolower($options['direction']) === 'asc'
+        ) ? 'ASC' : 'DESC';
+
+        $allowedSortFields = [
+            'id', 'uuid', 'name', 'meta-category',
+            'timestamp', 'distribution', 'comment',
+            'first_seen', 'last_seen',
+        ];
+        if (!in_array($sort, $allowedSortFields, true)) {
+            $sort = 'timestamp';
+        }
+
+        $isSiteAdmin = $user['Role']['perm_site_admin'];
+
+        // In an extended / extending view the list spans every event merged into it.
+        $eventIds = empty($options['eventIds'])
+            ? [(int)$eventId]
+            : array_values(array_unique(array_map(
+                'intval', (array)$options['eventIds']
+            )));
+        // Creator org: only tells objects apart in an extended view.
+        if (!empty($options['org'])) {
+            $eventIds = $this->__eventIdsOfOrg($eventIds, $options['org']);
+        }
+
+        // Object-level conditions
+        $conditions = [
+            'Object.event_id' => $eventIds,
+        ];
+
+        // Deleted filter. 2 is the index's Deleted toggle: it keeps only the
+        // objects holding something soft-deleted — the object itself, or one
+        // of its attributes, which would otherwise have nowhere left to show.
+        //
+        // The objects that survive are rendered whole ($attrDeleted), deleted
+        // rows highlighted: a deleted object stripped of its live attributes,
+        // or a live object down to its single deleted row, reads as data loss.
+        //
+        // Soft-deleted rows come only from the events whose deleted data the
+        // user may see (eventIdsShowingDeleted()).
+        $deleted = (int)($options['deleted'] ?? 0);
+        $deletedEventIds = $deleted === 0
+            ? [] : $this->eventIdsShowingDeleted($user, $eventIds);
+        $attrDeleted = $deleted === 0
+            ? ['Attribute.deleted' => 0]
+            : ['OR' => [
+                'Attribute.deleted' => 0,
+                'Attribute.event_id' => $deletedEventIds ?: [-1],
+            ]];
+        if ($deleted === 1) {
+            $conditions[] = ['OR' => [
+                'Object.deleted' => 0,
+                'Object.event_id' => $deletedEventIds ?: [-1],
+            ]];
+        } elseif ($deleted === 2) {
+            $conditions['Object.event_id'] = $deletedEventIds ?: [-1];
+            $objectIdsWithDeletedAttrs = empty($deletedEventIds)
+                ? [] : $this->objectIdsWithDeletedAttributes($deletedEventIds);
+            $conditions[] = ['OR' => [
+                'Object.deleted' => 1,
+                'Object.id' => empty($objectIdsWithDeletedAttrs)
+                    ? [-1] : $objectIdsWithDeletedAttrs,
+            ]];
+        } else {
+            $conditions['Object.deleted'] = 0;
+        }
+
+        // Proposals filter: keep only the objects holding an attribute with a
+        // pending proposal, rather than flagging them inside the whole list.
+        if (!empty($options['proposal'])) {
+            $objectIdsWithProposals =
+                $this->objectIdsWithProposals($eventIds, $attrDeleted);
+            $conditions['Object.id'] = empty($objectIdsWithProposals)
+                ? [-1] : $objectIdsWithProposals;
+        }
+
+        // Optional filters
+        if (!empty($options['name'])) {
+            $conditions['Object.name'] = $options['name'];
+        }
+        if (!empty($options['meta-category'])) {
+            $conditions['Object.meta-category'] =
+                $options['meta-category'];
+        }
+        if (isset($options['distribution']) && $options['distribution'] !== '') {
+            $conditions['Object.distribution'] = (int)$options['distribution'];
+        }
+
+        $sgids = $this->SharingGroup->authorizedIds($user);
+        // The attributes an object is judged on: the ones it shows.
+        $attrScope = [
+            'Attribute.event_id' => $eventIds,
+            'Attribute.object_id !=' => 0,
+            $attrDeleted,
+        ];
+        if (!$isSiteAdmin) {
+            $attrScope[] = ['OR' => [
+                ['AND' => [
+                    'Attribute.distribution >' => 0,
+                    'Attribute.distribution !=' => 4,
+                ]],
+                ['AND' => [
+                    'Attribute.distribution' => 4,
+                    'Attribute.sharing_group_id' => $sgids,
+                ]],
+                $this->eventOwnerSubquery('Attribute') . ' = ' . (int)$user['org_id'],
+            ]];
+        }
+        foreach ($this->__objectAttributeFilterConditions(
+            $user, $eventId, $eventIds, $attrScope, $options
+        ) as $condition) {
+            $conditions[] = $condition;
+        }
+
+        // Object distribution ACL for non-site-admins
+        if (!$isSiteAdmin) {
+            $objectCondSelect = $this->eventOwnerSubquery('Object');
+            $conditions['AND'][0]['OR'] = [
+                ['AND' => [
+                    'Object.distribution >' => 0,
+                    'Object.distribution !=' => 4,
+                ]],
+                ['AND' => [
+                    'Object.distribution' => 4,
+                    'Object.sharing_group_id' => $sgids,
+                ]],
+                $objectCondSelect . ' = ' . (int)$user['org_id'],
+            ];
+        }
+
+        $objectFields = [
+            'Object.id',
+            'Object.name',
+            'Object.meta-category',
+            'Object.description',
+            'Object.template_uuid',
+            'Object.template_version',
+            'Object.event_id',
+            'Object.uuid',
+            'Object.timestamp',
+            'Object.distribution',
+            'Object.sharing_group_id',
+            'Object.comment',
+            'Object.deleted',
+            'Object.first_seen',
+            'Object.last_seen',
+        ];
+
+        // If searchFor is set, keep the objects that match it themselves or
+        // hold at least one attribute that does - the latter through a
+        // subquery on the object IDs. Matching a UUID on either side is what
+        // lets a deep link onto one object, or onto one of its attributes,
+        // land on it.
+        if (!empty($options['searchFor'])) {
+            $needle = '%' . $options['searchFor'] . '%';
+            $db = $this->getDataSource();
+            $subQuery = $db->buildStatement([
+                'fields' => ['DISTINCT Attribute.object_id'],
+                'table' => 'attributes',
+                'alias' => 'Attribute',
+                'conditions' => $attrScope + [
+                    'OR' => [
+                        'Attribute.value1 LIKE' => $needle,
+                        'Attribute.uuid LIKE' => $needle,
+                    ],
+                ],
+            ], $this->Attribute);
+            $conditions[] = ['OR' => [
+                'Object.uuid LIKE' => $needle,
+                'Object.name LIKE' => $needle,
+                'Object.comment LIKE' => $needle,
+                'Object.id IN (' . $subQuery . ')',
+            ]];
+        }
+
+        // Count total (for pagination metadata)
+        $total = $this->Object->find('count', [
+            'conditions' => $conditions,
+            'recursive' => -1,
+        ]);
+
+        // Fetch page of objects
+        $objects = $this->Object->find('all', [
+            'conditions' => $conditions,
+            'fields' => $objectFields,
+            'recursive' => -1,
+            'order' => ['Object.' . $sort => $direction, 'Object.id' => 'ASC'],
+            'limit' => $limit,
+            'offset' => ($page - 1) * $limit,
+        ]);
+
+        if (empty($objects)) {
+            return [
+                'Object' => [],
+                'total' => (int)$total,
+                'page' => $page,
+                'limit' => $limit,
+            ];
+        }
+
+        // Collect object IDs for bulk loading of attributes
+        $objectIds = [];
+        $flat = [];
+        foreach ($objects as $o) {
+            $obj = $o['Object'];
+            $obj['Attribute'] = [];
+            $objectIds[] = $obj['id'];
+            $flat[$obj['id']] = $obj;
+        }
+
+        $fieldOrder = $this->Object->fieldOrderByTemplate(
+            array_column($flat, 'template_uuid')
+        );
+
+        // Fetch attributes for these objects with ACL, in the deleted scope
+        // settled above.
+        $attrConditions = [
+            'Attribute.event_id' => $eventIds,
+            'Attribute.object_id' => $objectIds,
+            $attrDeleted,
+        ];
+        if (!$isSiteAdmin) {
+            $attributeCondSelect = $this->eventOwnerSubquery('Attribute');
+            $attrConditions['AND'][0]['OR'] = [
+                ['AND' => [
+                    'Attribute.distribution >' => 0,
+                    'Attribute.distribution !=' => 4,
+                ]],
+                ['AND' => [
+                    'Attribute.distribution' => 4,
+                    'Attribute.sharing_group_id' => $sgids,
+                ]],
+                $attributeCondSelect . ' = ' . (int)$user['org_id'],
+            ];
+        }
+
+        $attrFields = [
+            'Attribute.id',
+            'Attribute.type',
+            'Attribute.category',
+            'Attribute.value',
+            'Attribute.to_ids',
+            'Attribute.uuid',
+            'Attribute.event_id',
+            'Attribute.object_id',
+            'Attribute.object_relation',
+            'Attribute.distribution',
+            'Attribute.timestamp',
+            'Attribute.comment',
+            'Attribute.sharing_group_id',
+            'Attribute.deleted',
+            'Attribute.disable_correlation',
+            'Attribute.first_seen',
+            'Attribute.last_seen',
+        ];
+
+        $attributes = $this->Attribute->find('all', [
+            'conditions' => $attrConditions,
+            'fields' => $attrFields,
+            'recursive' => -1,
+            'order' => ['Attribute.object_relation' => 'ASC', 'Attribute.id' => 'ASC'],
+        ]);
+
+        // Collect attribute IDs and group by object
+        $allAttrIds = [];
+        $attrsByObject = [];
+        foreach ($attributes as $a) {
+            $attr = $a['Attribute'];
+            $allAttrIds[] = $attr['id'];
+            $attrsByObject[$attr['object_id']][] = $attr;
+        }
+
+        // Bulk-load attribute tags
+        $tagsByAttr = [];
+        $tagsById = [];
+        if (!empty($allAttrIds)) {
+            $ats = $this->Attribute->AttributeTag->find('all', [
+                'conditions' => [
+                    'AttributeTag.attribute_id' => $allAttrIds,
+                ],
+                'fields' => [
+                    'AttributeTag.id',
+                    'AttributeTag.attribute_id',
+                    'AttributeTag.tag_id',
+                    'AttributeTag.local',
+                    'AttributeTag.relationship_type',
+                ],
+                'recursive' => -1,
+            ]);
+
+            $tagIds = [];
+            foreach ($ats as $at) {
+                $row = $at['AttributeTag'];
+                $tagsByAttr[$row['attribute_id']][] = $row;
+                $tagIds[$row['tag_id']] = true;
+            }
+
+            if (!empty($tagIds)) {
+                $tags = $this->EventTag->Tag->find('all', [
+                    'recursive' => -1,
+                    'conditions' => [
+                        'Tag.id' => array_keys($tagIds),
+                    ],
+                ]);
+                foreach ($tags as $tag) {
+                    $tagsById[$tag['Tag']['id']] =
+                        $tag['Tag'];
+                }
+            }
+        }
+
+        // Bulk-load proposals (shadow attributes) for attributes in these
+        // objects — only when the caller asked for them (proposals toggle).
+        $proposalsByAttr = [];
+        if (!empty($allAttrIds) && !empty($options['proposal'])) {
+            $proposals = $this->ShadowAttribute->find('all', [
+                'conditions' => [
+                    'ShadowAttribute.old_id' => $allAttrIds,
+                    'ShadowAttribute.deleted' => 0,
+                ],
+                'recursive' => -1,
+            ]);
+            $orgIds = [];
+            foreach ($proposals as $p) {
+                $orgIds[$p['ShadowAttribute']['org_id']] = true;
+            }
+            $orgNames = [];
+            if (!empty($orgIds)) {
+                $orgModel = ClassRegistry::init('Organisation');
+                $orgNames = $orgModel->find('list', [
+                    'conditions' => ['Organisation.id' => array_keys($orgIds)],
+                    'fields' => ['Organisation.id', 'Organisation.name'],
+                    'recursive' => -1,
+                ]);
+            }
+            foreach ($proposals as $p) {
+                $sa = $p['ShadowAttribute'];
+                $sa['org_name'] = $orgNames[$sa['org_id']] ?? $sa['org_id'];
+                $proposalsByAttr[$sa['old_id']][] = $sa;
+            }
+        }
+
+        // Assemble attributes into objects with tags
+        // and proposals
+        foreach ($flat as $objId => &$obj) {
+            if (!empty($attrsByObject[$objId])) {
+                foreach ($attrsByObject[$objId] as &$attr) {
+                    // Attach tags
+                    $attr['AttributeTag'] = [];
+                    if (!empty($tagsByAttr[$attr['id']])) {
+                        foreach ($tagsByAttr[$attr['id']] as $at) {
+                            $tag = $tagsById[$at['tag_id']]
+                                ?? null;
+                            if ($tag) {
+                                $at['Tag'] = $tag;
+                                $attr['AttributeTag'][] = $at;
+                            }
+                        }
+                    }
+                    // Attach proposals
+                    $attr['ShadowAttribute'] =
+                        $proposalsByAttr[$attr['id']] ?? [];
+                }
+                unset($attr);
+                // Highest ui-priority first else keeps the alphabetical order
+                $rank = $fieldOrder[$obj['template_uuid']] ?? [];
+                if (!empty($rank)) {
+                    usort(
+                        $attrsByObject[$objId],
+                        function ($a, $b) use ($rank) {
+                            return ($rank[$a['object_relation']] ?? PHP_INT_MAX)
+                                <=> ($rank[$b['object_relation']] ?? PHP_INT_MAX);
+                        }
+                    );
+                }
+                $obj['Attribute'] = $attrsByObject[$objId];
+            }
+        }
+        unset($obj);
+
+        /*
+         * References, in one query for the whole page rather than one per object:
+         * the card header shows how many an object carries and what they point at.
+         */
+        $references = $this->Object->ObjectReference->find('all', [
+            'recursive' => -1,
+            'conditions' => [
+                'ObjectReference.object_id' => $objectIds,
+                'ObjectReference.deleted' => 0,
+            ],
+            'fields' => [
+                'ObjectReference.object_id',
+                'ObjectReference.referenced_id',
+                'ObjectReference.referenced_uuid',
+                'ObjectReference.referenced_type',
+                'ObjectReference.relationship_type',
+                'ObjectReference.comment',
+            ],
+            'order' => ['ObjectReference.id' => 'ASC'],
+        ]);
+        $referencesByObject = [];
+        foreach ($references as $reference) {
+            $row = $reference['ObjectReference'];
+            $referencesByObject[$row['object_id']][] = $row;
+        }
+        foreach ($flat as $objId => &$obj) {
+            $obj['ObjectReference'] = $referencesByObject[$objId] ?? [];
+        }
+        unset($obj);
+
+        // Move each object-attribute's is_galaxy tags into a ['Galaxy'] array
+        $galaxyMap = [];
+        $galaxyFlat = [];
+        foreach ($flat as $objId => $obj) {
+            foreach (($obj['Attribute'] ?? []) as $idx => $attr) {
+                $galaxyMap[] = [$objId, $idx];
+                $galaxyFlat[] = $attr;
+            }
+        }
+        if (!empty($galaxyFlat)) {
+            $galaxyFlat = $this->attributeGalaxiesFromTags($galaxyFlat, $user);
+            foreach ($galaxyMap as $i => $pos) {
+                $flat[$pos[0]]['Attribute'][$pos[1]] = $galaxyFlat[$i];
+            }
+        }
+
+        // Attach SharingGroup names for distribution==4
+        $sgIdsNeeded = [];
+        foreach ($flat as $obj) {
+            if (
+                (int)$obj['distribution'] === 4 &&
+                !empty($obj['sharing_group_id'])
+            ) {
+                $sgIdsNeeded[$obj['sharing_group_id']] = true;
+            }
+            foreach ($obj['Attribute'] as $attr) {
+                if (
+                    (int)$attr['distribution'] === 4 &&
+                    !empty($attr['sharing_group_id'])
+                ) {
+                    $sgIdsNeeded[$attr['sharing_group_id']]
+                        = true;
+                }
+            }
+        }
+        if (!empty($sgIdsNeeded)) {
+            $sgs = $this->SharingGroup->find('all', [
+                'conditions' => [
+                    'SharingGroup.id' =>
+                        array_keys($sgIdsNeeded),
+                ],
+                'fields' => [
+                    'SharingGroup.id',
+                    'SharingGroup.name',
+                ],
+                'recursive' => -1,
+            ]);
+            $sgNames = [];
+            foreach ($sgs as $sg) {
+                $sgNames[$sg['SharingGroup']['id']] =
+                    $sg['SharingGroup']['name'];
+            }
+            foreach ($flat as &$obj) {
+                if (
+                    (int)$obj['distribution'] === 4 &&
+                    isset($sgNames[$obj['sharing_group_id']])
+                ) {
+                    $obj['SharingGroup'] = [
+                        'name' => $sgNames[
+                            $obj['sharing_group_id']
+                        ],
+                    ];
+                }
+                foreach ($obj['Attribute'] as &$attr) {
+                    if (
+                        (int)$attr['distribution'] === 4 &&
+                        isset(
+                            $sgNames[$attr['sharing_group_id']]
+                        )
+                    ) {
+                        $attr['SharingGroup'] = [
+                            'name' => $sgNames[
+                                $attr['sharing_group_id']
+                            ],
+                        ];
+                    }
+                }
+                unset($attr);
+            }
+            unset($obj);
+        }
+
+        // Collect all nested attributes for bulk enrichment
+        $allAttrs = [];
+        foreach ($flat as $obj) {
+            foreach ($obj['Attribute'] as $attr) {
+                $allAttrs[$attr['id']] = $attr;
+            }
+        }
+
+        if (!empty($allAttrs)) {
+            $allAttrsFlat = array_values($allAttrs);
+            $enriched = $this->__enrichAttributes(
+                $allAttrsFlat, $user, $eventId
+            );
+
+            // Re-index by ID and redistribute into objects
+            $byId = [];
+            foreach ($enriched['attributes'] as $attr) {
+                $byId[$attr['id']] = $attr;
+            }
+            foreach ($flat as &$obj) {
+                foreach ($obj['Attribute'] as &$attr) {
+                    if (isset($byId[$attr['id']])) {
+                        $attr = $byId[$attr['id']];
+                    }
+                }
+                unset($attr);
+            }
+            unset($obj);
+        }
+
+        // Analyst data on objects themselves
+        $flatValues = array_values($flat);
+        $flatValues = $this->Object
+            ->attachAnalystDataBulk($flatValues);
+
+        return [
+            'Object' => $flatValues,
+            'total' => (int)$total,
+            'page' => $page,
+            'limit' => $limit,
+        ];
+    }
+
+    /**
+     * Attach feed hits, and server hits for the users allowed to see them.
+     *
+     * @param array $attributes Flat array of attributes
+     * @param array $user
+     * @param int $eventId
+     * @return array
+     */
+    private function __attachFeedAndServerHits(
+        array $attributes,
+        array $user,
+        $eventId
+    ) {
+        if (!isset($this->Feed)) {
+            $this->Feed = ClassRegistry::init('Feed');
+        }
+        $eventShell = ['Event' => ['id' => $eventId]];
+        $attributes = $this->Feed->attachFeedCorrelations(
+            $attributes, $user,
+            $eventShell, false, 'Feed'
+        );
+        if (
+            $user['Role']['perm_site_admin'] ||
+            $user['org_id'] == Configure::read(
+                'MISP.host_org_id'
+            ) ||
+            Configure::read(
+                'MISP.show_server_correlations_for_all_users',
+                false
+            )
+        ) {
+            $attributes = $this->Feed
+                ->attachFeedCorrelations(
+                    $attributes, $user,
+                    $eventShell, false, 'Server'
+                );
+        }
+        return $attributes;
+    }
+
+    /**
+     * Enrich a flat array of attributes with warninglist
+     * hits, feed/server correlations, attribute
+     * correlations, and sighting data.
+     *
+     * @param array $attributes Flat array of attributes
+     * @param array $user
+     * @param int   $eventId
+     * @return array [
+     *   'attributes' => [...enriched...],
+     *   'sightings_csv' => [...]
+     * ]
+     */
+    private function __enrichAttributes(
+        array $attributes,
+        array $user,
+        $eventId,
+        array $eventIds = []
+    ) {
+        if (empty($eventIds)) {
+            $eventIds = [(int)$eventId];
+        }
+        if (empty($attributes)) {
+            return [
+                'attributes' => [],
+                'sightings_csv' => [],
+            ];
+        }
+
+        // Warninglist hits
+        if (!isset($this->Warninglist)) {
+            $this->Warninglist = ClassRegistry::init(
+                'Warninglist'
+            );
+        }
+        $this->Warninglist->attachWarninglistToAttributes(
+            $attributes
+        );
+
+        $attributes = $this->__attachFeedAndServerHits(
+            $attributes, $user, $eventId
+        );
+
+        // Attribute correlations
+        $attributeIds = array_column($attributes, 'id');
+        $sgids = $this->SharingGroup->authorizedIds($user);
+        $correlations = $this->Attribute->Correlation
+            ->getAttributeCorrelations(
+                $user, $eventId, $sgids, $attributeIds
+            );
+        foreach ($attributes as &$attribute) {
+            $attribute['RelatedAttribute'] =
+                $correlations[$attribute['id']] ?? [];
+        }
+        unset($attribute);
+
+        // Sighting data. In an extended view a row can belong to any event of
+        // the set, so the statistics are asked for all of them at once.
+        $orgIdByEvent = $this->find('list', [
+            'conditions' => ['Event.id' => $eventIds],
+            'fields' => ['Event.id', 'Event.org_id'],
+            'recursive' => -1,
+        ]);
+        $sightingEvents = [];
+        foreach ($eventIds as $sightingEventId) {
+            $sightingEvents[] = ['Event' => [
+                'id' => $sightingEventId,
+                'org_id' => $orgIdByEvent[$sightingEventId] ?? null,
+            ]];
+        }
+        $sightingsData = $this->Sighting->eventsStatistic(
+            $sightingEvents,
+            $user
+        );
+        foreach ($attributes as &$attribute) {
+            $attribute['Sighting'] =
+                $sightingsData['data'][$attribute['id']]
+                ?? [];
+        }
+        unset($attribute);
+
+        // Analyst data (notes, opinions, relationships)
+        $attributes = $this->Attribute
+            ->attachAnalystDataBulk($attributes);
+
+        return [
+            'attributes' => $attributes,
+            'sightings_csv' => $sightingsData['csv'] ?? [],
+        ];
     }
 
     /**
@@ -1782,6 +3795,1014 @@ class Event extends AppModel
         return $event;
     }
 
+    /**
+     * An event as the AI module receives it: the REST representation of
+     * /events/view, as the given user sees it.
+     *
+     * @param array $user
+     * @param int $id
+     * @return array|null ['Event' => ...], or null when the event does not
+     *         exist or is not visible to the user
+     */
+    public function fetchEventForAi(array $user, $id)
+    {
+        // Correlations are noise for a language model and can be large.
+        $events = $this->fetchEvent($user, [
+            'eventid' => (int)$id,
+            'includeAllTags' => true,
+            'includeEventCorrelations' => false,
+        ]);
+        if (empty($events[0])) {
+            return null;
+        }
+        App::uses('JSONConverterTool', 'Tools');
+        return JSONConverterTool::convert($events[0], !empty($user['Role']['perm_site_admin']), true);
+    }
+
+    /**
+     * Whether the user may modify the event. Mirror of
+     * ACLComponent::canModifyEvent() for model and worker code, where the
+     * component is not available.
+     *
+     * @param array $user
+     * @param array $event with an Event key holding orgc_id and user_id
+     * @return bool
+     */
+    public function userCanModifyEvent(array $user, array $event)
+    {
+        if (!empty($user['Role']['perm_site_admin'])) {
+            return true;
+        }
+        if ($this->isProtectedFromSyncUser($user, $event)) {
+            return false;
+        }
+        if (!empty($user['Role']['perm_modify_org']) && $event['Event']['orgc_id'] == $user['org_id']) {
+            return true;
+        }
+        if (!empty($user['Role']['perm_modify']) && $event['Event']['user_id'] == $user['id']) {
+            return true;
+        }
+        return false;
+    }
+
+    /**
+     * A sync user that is neither a site admin nor an internal sync user may
+     * change a protected event only through events/edit with a valid
+     * signature: every other write path refuses it.
+     *
+     * @param array $user
+     * @param array $event with an Event key; `protected` is looked up when missing
+     * @return bool
+     */
+    public function isProtectedFromSyncUser(array $user, array $event)
+    {
+        if (
+            empty($user['Role']['perm_sync']) ||
+            !empty($user['Role']['perm_site_admin']) ||
+            !empty($user['Role']['perm_sync_internal'])
+        ) {
+            return false;
+        }
+        // Many callers load the event with a short field list.
+        if (array_key_exists('protected', $event['Event'])) {
+            return (bool)$event['Event']['protected'];
+        }
+        if (empty($event['Event']['id'])) {
+            return true;
+        }
+        return $this->hasAny(['Event.id' => $event['Event']['id'], 'Event.protected' => 1]);
+    }
+
+    /**
+     * @param array $user
+     * @param array $event with an Event key
+     * @throws ForbiddenException
+     */
+    public function assertNotProtectedFromSyncUser(array $user, array $event)
+    {
+        if ($this->isProtectedFromSyncUser($user, $event)) {
+            throw new ForbiddenException(__('This event is protected: a sync user may change it only through events/edit with a valid signature.'));
+        }
+    }
+
+    /**
+     * Split the tag names of a module answer (results.Tag) into the two
+     * ai-computer-assisted provenance names (Module::AI_PROVENANCE_TAGS,
+     * matched case-insensitively, returned in their canonical spelling) and
+     * the rest, in the module's order, blanks and duplicates dropped.
+     *
+     * @param array $tags [{name}, ...] or [name, ...]
+     * @return array {provenance: [names], other: [names]}
+     */
+    public static function splitAiTagNames(array $tags)
+    {
+        App::uses('Module', 'Model');
+        $canonical = [];
+        foreach (Module::AI_PROVENANCE_TAGS as $name) {
+            $canonical[mb_strtolower($name)] = $name;
+        }
+        $split = ['provenance' => [], 'other' => []];
+        $seen = [];
+        foreach ($tags as $tag) {
+            $name = is_array($tag) ? ($tag['name'] ?? null) : $tag;
+            if (!is_string($name) || trim($name) === '') {
+                continue;
+            }
+            $name = trim($name);
+            $key = mb_strtolower($name);
+            if (isset($seen[$key])) {
+                continue;
+            }
+            $seen[$key] = true;
+            if (isset($canonical[$key])) {
+                $split['provenance'][] = $canonical[$key];
+            } else {
+                $split['other'][] = $name;
+            }
+        }
+        return $split;
+    }
+
+    /**
+     * The sentence a summary message ends with when the run also tagged the
+     * event, empty otherwise.
+     *
+     * @param array $result an aiSummarize() result
+     * @return string
+     */
+    public static function aiTagsNote(array $result)
+    {
+        if (empty($result['tags']['attached']) && empty($result['tags']['replaced'])) {
+            return '';
+        }
+        $note = ' ' . __('Event tagged %s.', implode(', ', $result['tags']['attached']));
+        if (!empty($result['tags']['replaced'])) {
+            $note .= ' ' . __('Replaced %s.', implode(', ', $result['tags']['replaced']));
+        }
+        return $note;
+    }
+
+    /**
+     * The lower-cased `namespace:predicate=` prefix of a machine tag, or
+     * null for a tag without a value. Two tags sharing the prefix are values
+     * of the same predicate.
+     *
+     * @param string $name
+     * @return string|null
+     */
+    public static function aiTagPredicatePrefix($name)
+    {
+        $equals = strpos($name, '=');
+        $colon = strpos($name, ':');
+        if ($equals === false || $colon === false || $colon > $equals) {
+            return null;
+        }
+        return mb_strtolower(substr($name, 0, $equals + 1));
+    }
+
+    /**
+     * Attach the tags of a module answer (results.Tag) to the event.
+     *
+     * The two provenance names go through Tag::captureAiProvenanceTags()
+     * (rows guaranteed, no tag-editor permission needed). Both predicates of
+     * the ai-computer-assisted taxonomy are exclusive and a fresh AI write
+     * makes the event's AI content unreviewed again, so a sibling value
+     * already on the event (say review-level="human-reviewed") is replaced,
+     * not kept next to the new one. Any other name follows the normal rules:
+     * captureTag() (creation needs perm_tag_editor, reserved tags refused)
+     * and the taxonomy exclusivity check, as an accepted A3 suggestion does.
+     * Idempotent: a tag already on the event is skipped. Does not unpublish;
+     * the caller's write already did, or decides.
+     *
+     * @param array $user
+     * @param int $eventId
+     * @param array $results the module's results block
+     * @param bool $local attach (and replace) as local tags
+     * @return array {attached: [names], replaced: [names], skipped: [names], failed: {name: reason}}
+     */
+    public function aiAttachResultTags(array $user, $eventId, array $results, $local = false)
+    {
+        $eventId = (int)$eventId;
+        $local = (bool)$local;
+        $outcome = ['attached' => [], 'replaced' => [], 'skipped' => [], 'failed' => []];
+        $split = self::splitAiTagNames(isset($results['Tag']) && is_array($results['Tag']) ? $results['Tag'] : []);
+        if (empty($split['provenance']) && empty($split['other'])) {
+            return $outcome;
+        }
+        $Tag = $this->EventTag->Tag;
+        $ids = [];
+        if (!empty($split['provenance'])) {
+            foreach ($Tag->captureAiProvenanceTags($user) as $name => $id) {
+                if (in_array($name, $split['provenance'], true)) {
+                    $ids[$name] = $id;
+                }
+            }
+        }
+        foreach ($split['other'] as $name) {
+            $ids[$name] = $Tag->captureTag(['name' => $name], $user);
+        }
+        $current = $this->EventTag->find('all', [
+            'conditions' => ['EventTag.event_id' => $eventId],
+            'contain' => ['Tag' => ['fields' => ['Tag.id', 'Tag.name']]],
+            'fields' => ['EventTag.id', 'EventTag.tag_id', 'EventTag.local'],
+            'recursive' => -1,
+        ]);
+        $eventTagNames = [];
+        foreach ($current as $row) {
+            if (!empty($row['Tag']['name'])) {
+                $eventTagNames[] = $row['Tag']['name'];
+            }
+        }
+        $Taxonomy = ClassRegistry::init('Taxonomy');
+        $log = $this->loadLog();
+        foreach ($ids as $name => $tagId) {
+            if (!$tagId) {
+                $outcome['failed'][$name] = __('the tag does not exist or is reserved for another organisation or user');
+                continue;
+            }
+            if (in_array($name, $split['provenance'], true)) {
+                $prefix = self::aiTagPredicatePrefix($name);
+                foreach ($current as $row) {
+                    $rowName = isset($row['Tag']['name']) ? $row['Tag']['name'] : '';
+                    if ((int)$row['EventTag']['tag_id'] === (int)$tagId || (bool)$row['EventTag']['local'] !== $local) {
+                        continue;
+                    }
+                    if ($prefix === null || self::aiTagPredicatePrefix($rowName) !== $prefix) {
+                        continue;
+                    }
+                    if ($this->EventTag->detachTagFromEvent($eventId, $row['EventTag']['tag_id'], $local)) {
+                        $outcome['replaced'][] = $rowName;
+                        $eventTagNames = array_values(array_diff($eventTagNames, [$rowName]));
+                        $log->createLogEntry(
+                            $user,
+                            'tag',
+                            'Event',
+                            $eventId,
+                            sprintf('Removed%s tag (%s) "%s" from event (%s)', $local ? ' local' : '', $row['EventTag']['tag_id'], $rowName, $eventId),
+                            sprintf('Replaced by the AI provenance tag "%s"', $name)
+                        );
+                    }
+                }
+            } elseif (!$Taxonomy->checkIfNewTagIsAllowedByTaxonomy($name, $eventTagNames)) {
+                $outcome['failed'][$name] = __('refused by taxonomy exclusivity against the event\'s tags');
+                continue;
+            }
+            $nothingToChange = false;
+            if (!$this->EventTag->attachTagToEvent($eventId, ['id' => $tagId, 'local' => $local], $nothingToChange)) {
+                $outcome['failed'][$name] = __('the tag could not be attached');
+                continue;
+            }
+            if ($nothingToChange) {
+                $outcome['skipped'][] = $name;
+                continue;
+            }
+            $outcome['attached'][] = $name;
+            $eventTagNames[] = $name;
+            $log->createLogEntry(
+                $user,
+                'tag',
+                'Event',
+                $eventId,
+                sprintf('Attached%s tag (%s) "%s" to event (%s)', $local ? ' local' : '', $tagId, $name, $eventId),
+                sprintf('Event (%s) tagged as Tag (%s)%s by the AI module', $eventId, $tagId, $local ? ' locally' : '')
+            );
+        }
+        return $outcome;
+    }
+
+    /**
+     * A4 — ask the AI module for the indicators it reads out of the event's
+     * reports (use-case infoextraction) and hand back what MISP would save:
+     * the module's new attributes and objects, MISP core format, normalised
+     * like any misp_standard import (handleMispFormatFromModuleResult(): the
+     * module's comment, to_ids and Tag[] kept, category and distribution
+     * filled). The two provenance tag rows are guaranteed here so the tags
+     * on every element survive the save whoever the user is. Only
+     * results.Attribute and results.Object are read; results.Event is the
+     * module's processed copy and is ignored. Nothing is written.
+     *
+     * @param array $user
+     * @param int $eventId
+     * @param array|null $onlyReportUuids send only these reports (the workflow node's
+     *        loop guard); null sends every report the user may read
+     * @return array {Event: {...}, Attribute: [...], Object: [...], rejected: [{type, value, reason}], metadata: [...]}
+     * @throws NotFoundException|ForbiddenException|MethodNotAllowedException|Exception with a user-facing message
+     */
+    public function aiExtractIndicators(array $user, $eventId, array $onlyReportUuids = null)
+    {
+        $event = $this->fetchSimpleEvent($user, $eventId);
+        if (empty($event)) {
+            throw new NotFoundException(__('Invalid event.'));
+        }
+        if (!$this->userCanModifyEvent($user, $event)) {
+            throw new ForbiddenException(__('You do not have permission to modify this event.'));
+        }
+        $data = $this->fetchEventForAi($user, $eventId);
+        if (empty($data)) {
+            throw new NotFoundException(__('Invalid event.'));
+        }
+        $reports = 0;
+        $kept = [];
+        foreach (isset($data['Event']['EventReport']) ? $data['Event']['EventReport'] : [] as $report) {
+            if (!empty($report['deleted'])) {
+                continue;
+            }
+            if ($onlyReportUuids !== null && !in_array($report['uuid'] ?? '', $onlyReportUuids, true)) {
+                continue;
+            }
+            $kept[] = $report;
+            $reports++;
+        }
+        $data['Event']['EventReport'] = $kept;
+        if ($reports === 0) {
+            // The module would answer nothing and still burn an LLM call.
+            throw new MethodNotAllowedException(__('The event has no report to extract indicators from.'));
+        }
+        $this->Module = ClassRegistry::init('Module');
+        $metadata = [];
+        $results = $this->Module->queryAI('infoextraction', $data, null, $metadata);
+        $answer = ['results' => [
+            'Attribute' => isset($results['Attribute']) && is_array($results['Attribute']) ? $results['Attribute'] : [],
+            'Object' => isset($results['Object']) && is_array($results['Object']) ? $results['Object'] : [],
+        ]];
+        $resolved = $this->handleMispFormatFromModuleResult($answer);
+        $resolved['Event'] = $event['Event'];
+        $resolved['Attribute'] = isset($resolved['Attribute']) ? $resolved['Attribute'] : [];
+        $resolved['Object'] = isset($resolved['Object']) ? $resolved['Object'] : [];
+        $resolved['rejected'] = isset($metadata['rejected']) && is_array($metadata['rejected']) ? array_values($metadata['rejected']) : [];
+        $resolved['metadata'] = $metadata;
+        if (!empty($resolved['Attribute']) || !empty($resolved['Object'])) {
+            $this->EventTag->Tag->captureAiProvenanceTags($user);
+        }
+        return $resolved;
+    }
+
+    /**
+     * A4 — save an extraction (what aiExtractIndicators() returned, or the
+     * subset a review kept) onto the event through the module-result path
+     * every import module uses: tags captured per element, an element already
+     * on the event recovered rather than duplicated, one unpublish.
+     *
+     * @param array $user
+     * @param int $eventId
+     * @param array $resolved {Attribute, Object, rejected?}
+     * @return array {message: the saver's report, attributes, objects, rejected}
+     */
+    public function aiApplyExtraction(array $user, $eventId, array $resolved)
+    {
+        $counts = self::aiExtractionCounts($resolved);
+        $message = $this->processModuleResultsData(
+            $user,
+            [
+                'Attribute' => isset($resolved['Attribute']) ? $resolved['Attribute'] : [],
+                'Object' => isset($resolved['Object']) ? $resolved['Object'] : [],
+            ],
+            (int)$eventId,
+            'extracted by ai_connector'
+        );
+        return ['message' => (string)$message] + $counts;
+    }
+
+    /**
+     * A4 — direct apply: query and save in one go (worker, workflow node,
+     * REST). An empty answer writes nothing.
+     *
+     * @param array $user
+     * @param int $eventId
+     * @param array|null $onlyReportUuids see aiExtractIndicators()
+     * @return array {message, attributes, objects, rejected}
+     */
+    public function aiExtractAndApply(array $user, $eventId, array $onlyReportUuids = null)
+    {
+        $resolved = $this->aiExtractIndicators($user, $eventId, $onlyReportUuids);
+        if (empty($resolved['Attribute']) && empty($resolved['Object'])) {
+            return ['message' => '', 'attributes' => 0, 'objects' => 0, 'rejected' => count($resolved['rejected'])];
+        }
+        return $this->aiApplyExtraction($user, $eventId, $resolved);
+    }
+
+    /**
+     * A4 — background job when MISP.background_jobs is on (cake Event
+     * aiSummarize <user> extract <event> <job>), inline otherwise.
+     *
+     * @param array $user
+     * @param int $eventId
+     * @return array {job_id} or the result of aiExtractAndApply()
+     */
+    public function aiExtractIndicatorsRouter(array $user, $eventId)
+    {
+        if (Configure::read('MISP.background_jobs')) {
+            $job = ClassRegistry::init('Job');
+            $jobId = $job->createJob(
+                $user,
+                Job::WORKER_DEFAULT,
+                'ai_extract_indicators',
+                'Event: ' . (int)$eventId,
+                __('Waiting for the AI module.')
+            );
+            $this->getBackgroundJobsTool()->enqueue(
+                BackgroundJobsTool::DEFAULT_QUEUE,
+                BackgroundJobsTool::CMD_EVENT,
+                ['aiSummarize', $user['id'], 'extract', (int)$eventId, $jobId],
+                true,
+                $jobId
+            );
+            return ['job_id' => $jobId];
+        }
+        return $this->aiExtractAndApply($user, $eventId);
+    }
+
+    /**
+     * The report uuids named in extraction comments ("extracted by
+     * ai_connector from EventReport <uuid>[, <uuid>]…", whatever follows).
+     * Pure.
+     *
+     * @param array $comments attribute comments
+     * @return array unique uuids, lower-cased
+     */
+    public static function aiParseExtractedReportUuids(array $comments)
+    {
+        $uuids = [];
+        foreach ($comments as $comment) {
+            if (!is_string($comment) || stripos($comment, 'extracted by ai_connector from EventReport') !== 0) {
+                continue;
+            }
+            if (preg_match_all('/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/i', $comment, $matches)) {
+                foreach ($matches[0] as $uuid) {
+                    $uuids[strtolower($uuid)] = true;
+                }
+            }
+        }
+        return array_keys($uuids);
+    }
+
+    /**
+     * The reports of an event an extraction already ran on: every uuid an
+     * attribute comment of the event cites (the workflow node's loop guard).
+     *
+     * @param int $eventId
+     * @return array uuids
+     */
+    public function aiExtractedReportUuids($eventId)
+    {
+        $comments = $this->Attribute->find('column', [
+            'conditions' => [
+                'Attribute.event_id' => (int)$eventId,
+                'Attribute.deleted' => 0,
+                'Attribute.comment LIKE' => 'extracted by ai_connector from EventReport %',
+            ],
+            'fields' => ['Attribute.comment'],
+        ]);
+        return self::aiParseExtractedReportUuids($comments);
+    }
+
+    /**
+     * Counts of an extraction: attributes (plain and inside objects), objects
+     * and the candidates the module rejected. Pure.
+     *
+     * @param array $resolved {Attribute, Object, rejected}
+     * @return array {attributes, objects, rejected}
+     */
+    public static function aiExtractionCounts(array $resolved)
+    {
+        $attributes = isset($resolved['Attribute']) && is_array($resolved['Attribute']) ? count($resolved['Attribute']) : 0;
+        $objects = isset($resolved['Object']) && is_array($resolved['Object']) ? $resolved['Object'] : [];
+        foreach ($objects as $object) {
+            $attributes += isset($object['Attribute']) && is_array($object['Attribute']) ? count($object['Attribute']) : 0;
+        }
+        return [
+            'attributes' => $attributes,
+            'objects' => count($objects),
+            'rejected' => isset($resolved['rejected']) && is_array($resolved['rejected']) ? count($resolved['rejected']) : 0,
+        ];
+    }
+
+    /**
+     * The sentence a direct apply answers with: what the module added, what
+     * it dropped, and the saver's own report when something went wrong.
+     *
+     * @param array $result of aiExtractAndApply()
+     * @return string
+     */
+    public static function aiExtractionMessage(array $result)
+    {
+        $attributes = (int)($result['attributes'] ?? 0);
+        $objects = (int)($result['objects'] ?? 0);
+        $rejected = (int)($result['rejected'] ?? 0);
+        if ($attributes === 0 && $objects === 0) {
+            $message = __('The AI module found no new indicator in the event\'s reports.');
+        } else {
+            $message = __n('%s indicator added by the AI module', '%s indicators added by the AI module', $attributes, $attributes);
+            if ($objects) {
+                $message .= ' ' . __n('(%s object)', '(%s objects)', $objects, $objects);
+            }
+            $message .= '.';
+        }
+        if ($rejected) {
+            $message .= ' ' . __n('%s candidate rejected by the module.', '%s candidates rejected by the module.', $rejected, $rejected);
+        }
+        $saver = isset($result['message']) ? trim((string)$result['message']) : '';
+        if ($saver !== '' && stripos($saver, 'could not be saved') !== false) {
+            $message .= ' ' . $saver;
+        }
+        return $message;
+    }
+
+    /**
+     * Summarise an event with the AI module: queued as a background job, or
+     * run at once when background jobs are off.
+     *
+     * @param array $user
+     * @param int $eventId
+     * @return array ['job_id' => int] when queued, else what aiSummarize() returns
+     * @throws Exception see aiSummarize()
+     */
+    public function aiSummarizeRouter(array $user, $eventId)
+    {
+        if (Configure::read('MISP.background_jobs')) {
+            $job = ClassRegistry::init('Job');
+            $jobId = $job->createJob(
+                $user,
+                Job::WORKER_DEFAULT,
+                'ai_summarize_event',
+                'Event: ' . (int)$eventId,
+                __('Waiting for the AI module.')
+            );
+            $this->getBackgroundJobsTool()->enqueue(
+                BackgroundJobsTool::DEFAULT_QUEUE,
+                BackgroundJobsTool::CMD_EVENT,
+                ['aiSummarize', $user['id'], 'event', (int)$eventId, $jobId],
+                true,
+                $jobId
+            );
+            return ['job_id' => $jobId];
+        }
+        return $this->aiSummarize($user, $eventId);
+    }
+
+    /**
+     * Summarise an event with the AI module and attach the answer as a new
+     * event report, as the given user: the read and edit checks are applied
+     * here again so that a worker writes with the requesting user's rights,
+     * and the report is added the way the UI adds one (the event is
+     * unpublished).
+     *
+     * @param array $user
+     * @param int $eventId
+     * @return array ['report_id' => int, 'name' => string]
+     * @throws NotFoundException|ForbiddenException|Exception with a user-facing message
+     */
+    public function aiSummarize(array $user, $eventId)
+    {
+        $event = $this->fetchSimpleEvent($user, $eventId);
+        if (empty($event)) {
+            throw new NotFoundException(__('Invalid event.'));
+        }
+        if (!$this->userCanModifyEvent($user, $event)) {
+            throw new ForbiddenException(__('You do not have permission to modify this event.'));
+        }
+        $data = $this->fetchEventForAi($user, $eventId);
+        if (empty($data)) {
+            throw new NotFoundException(__('Invalid event.'));
+        }
+        $this->Module = ClassRegistry::init('Module');
+        $results = $this->Module->queryAI('summarization_on_event', $data);
+        $answer = isset($results['EventReport']) && is_array($results['EventReport']) ? $results['EventReport'] : [];
+        if (empty($answer['content']) || !is_string($answer['content'])) {
+            throw new Exception(__('The AI module returned no report.'));
+        }
+        $name = isset($answer['name']) && is_string($answer['name']) ? trim($answer['name']) : '';
+        if ($name === '') {
+            $name = __('AI summary of event %s', $eventId);
+        }
+        $name = mb_substr($name, 0, 255);
+        $errors = $this->EventReport->addReport($user, [
+            'name' => $name,
+            'content' => $answer['content'],
+            'distribution' => 5,
+        ], $eventId);
+        if (!empty($errors)) {
+            throw new Exception(__('The AI summary could not be saved as a report: %s', json_encode($errors)));
+        }
+        // The module marks what it produced (the two ai-computer-assisted
+        // tags for the event); the report save above already unpublished.
+        $tags = $this->aiAttachResultTags($user, $eventId, $results);
+        return ['report_id' => (int)$this->EventReport->id, 'name' => $name, 'tags' => $tags];
+    }
+
+    /**
+     * Status of one AI tag suggestion (aiRecommendTags): why a row can or
+     * cannot be accepted. Only AI_TAG_OK rows are attachable.
+     */
+    const AI_TAG_OK = 'ok',
+        AI_TAG_PRESENT = 'present',
+        AI_TAG_NEEDS_TAG_EDITOR = 'needs_tag_editor',
+        AI_TAG_UNKNOWN_CLUSTER = 'unknown_cluster',
+        AI_TAG_RESTRICTED = 'restricted',
+        AI_TAG_LOCAL_ONLY = 'local_only',
+        AI_TAG_EXCLUSIVE = 'exclusive';
+
+    /**
+     * User-facing reason for a suggestion status.
+     *
+     * @param string $status one of the AI_TAG_* constants
+     * @return string
+     */
+    public static function aiTagStatusText($status)
+    {
+        switch ($status) {
+            case self::AI_TAG_OK:
+                return '';
+            case self::AI_TAG_PRESENT:
+                return __('already on the event');
+            case self::AI_TAG_NEEDS_TAG_EDITOR:
+                return __('unknown tag, creating it needs the tag editor permission');
+            case self::AI_TAG_UNKNOWN_CLUSTER:
+                return __('no galaxy cluster with this name');
+            case self::AI_TAG_RESTRICTED:
+                return __('tag reserved for another organisation or user');
+            case self::AI_TAG_LOCAL_ONLY:
+                return __('tag can only be attached as a local tag');
+            case self::AI_TAG_EXCLUSIVE:
+                return __('not allowed by taxonomy exclusivity');
+        }
+        return (string)$status;
+    }
+
+    /**
+     * Pure classification of the AI module's tag suggestions against what the
+     * instance holds: one row per distinct name (case-insensitive, first
+     * spelling kept), in the module's order. No lookups happen here; the
+     * caller supplies what it found.
+     *
+     * A galaxy-cluster name (`misp-galaxy:…`) is bound through its cluster:
+     * with a cluster it is attachable even without a tag row (the attach
+     * creates the tag from the cluster), without a cluster and without a tag
+     * row it is refused rather than created as a bare galaxy-looking tag.
+     *
+     * @param array $names the suggested names, in order
+     * @param array $tags existing tags keyed by lower-cased name:
+     *        [id, name, colour, is_galaxy, local_only, usable]
+     * @param array $clusters visible galaxy clusters keyed by lower-cased
+     *        tag_name: [id, local_only]
+     * @param array $eventTagNames names of the tags already on the event
+     * @param bool $canCreate whether unknown tags may be created (perm_tag_editor)
+     * @param bool $local whether the attach will be local
+     * @param callable|null $exclusive fn(string $name, array $eventTagNames): bool,
+     *        the taxonomy exclusivity check; null skips it
+     * @return array rows: name, colour (null when unknown), exists, is_galaxy,
+     *         cluster_id, tag_id, status, selectable, reason
+     */
+    public static function classifyAiTagSuggestions(array $names, array $tags, array $clusters, array $eventTagNames, $canCreate, $local, callable $exclusive = null)
+    {
+        App::uses('Tag', 'Model');
+        $present = [];
+        foreach ($eventTagNames as $eventTagName) {
+            $present[mb_strtolower($eventTagName)] = true;
+        }
+        $rows = [];
+        $seen = [];
+        foreach ($names as $name) {
+            if (!is_string($name)) {
+                continue;
+            }
+            $name = trim($name);
+            if ($name === '') {
+                continue;
+            }
+            $key = mb_strtolower($name);
+            if (isset($seen[$key])) {
+                continue;
+            }
+            $seen[$key] = true;
+            $tag = $tags[$key] ?? null;
+            $cluster = $clusters[$key] ?? null;
+            $row = [
+                'name' => $tag ? $tag['name'] : $name,
+                'colour' => $tag ? $tag['colour'] : null,
+                'exists' => (bool)$tag,
+                'is_galaxy' => $tag ? !empty($tag['is_galaxy']) : (bool)preg_match(Tag::RE_GALAXY, $name),
+                'cluster_id' => $cluster ? (int)$cluster['id'] : null,
+                'tag_id' => $tag ? (int)$tag['id'] : null,
+                'status' => self::AI_TAG_OK,
+            ];
+            if (isset($present[$key])) {
+                $row['status'] = self::AI_TAG_PRESENT;
+            } elseif ($tag) {
+                if (empty($tag['usable'])) {
+                    $row['status'] = self::AI_TAG_RESTRICTED;
+                } elseif (!empty($tag['local_only']) && !$local) {
+                    $row['status'] = self::AI_TAG_LOCAL_ONLY;
+                }
+            } elseif ($cluster) {
+                if (!empty($cluster['local_only']) && !$local) {
+                    $row['status'] = self::AI_TAG_LOCAL_ONLY;
+                }
+            } elseif ($row['is_galaxy']) {
+                $row['status'] = self::AI_TAG_UNKNOWN_CLUSTER;
+            } elseif (!$canCreate) {
+                $row['status'] = self::AI_TAG_NEEDS_TAG_EDITOR;
+            }
+            if ($row['status'] === self::AI_TAG_OK && $exclusive !== null && !$exclusive($row['name'], $eventTagNames)) {
+                $row['status'] = self::AI_TAG_EXCLUSIVE;
+            }
+            $row['selectable'] = $row['status'] === self::AI_TAG_OK;
+            $row['reason'] = self::aiTagStatusText($row['status']);
+            $rows[] = $row;
+        }
+        return $rows;
+    }
+
+    /**
+     * The counts of an aiAttachTags() run as one sentence.
+     *
+     * @param array $result what aiAttachTags() returned
+     * @return string
+     */
+    public static function aiTagResultMessage(array $result)
+    {
+        $attached = (int)($result['attached'] ?? 0);
+        $created = (int)($result['created'] ?? 0);
+        $skipped = (int)($result['skipped'] ?? 0);
+        $failed = (int)($result['failed'] ?? 0);
+        $parts = [];
+        $first = __n('%s tag attached', '%s tags attached', $attached, $attached);
+        if ($created) {
+            $first .= ' (' . __n('%s created', '%s created', $created, $created) . ')';
+        }
+        $parts[] = $first;
+        if ($skipped) {
+            $parts[] = __n('%s skipped (already present)', '%s skipped (already present)', $skipped, $skipped);
+        }
+        if ($failed) {
+            $parts[] = __n('%s failed', '%s failed', $failed, $failed);
+        }
+        $message = implode(', ', $parts) . '.';
+        if (!empty($result['local']) && $attached) {
+            $message .= ' ' . __('Attached as local tags: you cannot modify this event.');
+        }
+        if (!empty($result['provenance']['attached'])) {
+            $message .= ' ' . __('The event is marked ai-computer-assisted.');
+        }
+        if (!empty($result['provenance']['replaced'])) {
+            $message .= ' ' . __('Replaced %s.', implode(', ', $result['provenance']['replaced']));
+        }
+        return $message;
+    }
+
+    /**
+     * Classify tag names for an event as the given user: looks up the tag
+     * rows, the galaxy clusters the user can see, the tags already on the
+     * event and the taxonomy exclusivity, then hands over to
+     * classifyAiTagSuggestions(). Colours of unknown tags are the ones a
+     * quickAdd() would give them.
+     *
+     * @param array $user
+     * @param array $event with an Event key holding the id
+     * @param array $names
+     * @param bool $local whether the attach will be local
+     * @return array see classifyAiTagSuggestions()
+     */
+    public function aiClassifyTagNames(array $user, array $event, array $names, $local)
+    {
+        $eventId = (int)$event['Event']['id'];
+        $Tag = $this->EventTag->Tag; // loads the Tag class for the regex below
+        $keys = [];
+        $galaxyKeys = [];
+        foreach ($names as $name) {
+            if (!is_string($name) || trim($name) === '') {
+                continue;
+            }
+            $key = mb_strtolower(trim($name));
+            $keys[$key] = true;
+            if (preg_match(Tag::RE_GALAXY, $name)) {
+                $galaxyKeys[$key] = true;
+            }
+        }
+        $tags = [];
+        if (!empty($keys)) {
+            $found = $Tag->find('all', [
+                'conditions' => ['LOWER(Tag.name)' => array_keys($keys)],
+                'recursive' => -1,
+                'fields' => ['Tag.id', 'Tag.name', 'Tag.colour', 'Tag.is_galaxy', 'Tag.local_only', 'Tag.org_id', 'Tag.user_id'],
+            ]);
+            foreach ($found as $tag) {
+                $tag = $tag['Tag'];
+                $tag['usable'] = !empty($user['Role']['perm_site_admin']) || (
+                    in_array((int)$tag['org_id'], [0, (int)$user['org_id']], true) &&
+                    in_array((int)$tag['user_id'], [0, (int)$user['id']], true)
+                );
+                $tags[mb_strtolower($tag['name'])] = $tag;
+            }
+        }
+        $clusters = [];
+        if (!empty($galaxyKeys)) {
+            $GalaxyCluster = ClassRegistry::init('GalaxyCluster');
+            $found = $GalaxyCluster->fetchGalaxyClusters($user, [
+                'conditions' => ['LOWER(GalaxyCluster.tag_name)' => array_keys($galaxyKeys)],
+                'fields' => ['GalaxyCluster.id', 'GalaxyCluster.tag_name', 'Galaxy.local_only'],
+                'contain' => ['Galaxy'],
+            ]);
+            foreach ($found as $cluster) {
+                $clusters[mb_strtolower($cluster['GalaxyCluster']['tag_name'])] = [
+                    'id' => (int)$cluster['GalaxyCluster']['id'],
+                    'local_only' => !empty($cluster['Galaxy']['local_only']),
+                ];
+            }
+        }
+        $eventTagNames = $this->EventTag->find('column', [
+            'conditions' => ['EventTag.event_id' => $eventId],
+            'contain' => 'Tag',
+            'fields' => ['Tag.name'],
+            'recursive' => -1,
+        ]);
+        $Taxonomy = ClassRegistry::init('Taxonomy');
+        $exclusive = function ($name, array $tagNames) use ($Taxonomy) {
+            return $Taxonomy->checkIfNewTagIsAllowedByTaxonomy($name, $tagNames);
+        };
+        $rows = self::classifyAiTagSuggestions(
+            $names,
+            $tags,
+            $clusters,
+            $eventTagNames,
+            !empty($user['Role']['perm_tag_editor']),
+            (bool)$local,
+            $exclusive
+        );
+        foreach ($rows as $k => $row) {
+            if ($row['colour'] === null) {
+                $rows[$k]['colour'] = $Tag->tagColor($row['name']);
+            }
+        }
+        return $rows;
+    }
+
+    /**
+     * Ask the AI module for tags for an event and classify its answer
+     * (A3, synchronous: the suggestions are previewed, nothing is saved).
+     *
+     * @param array $user
+     * @param int $eventId
+     * @param bool $local whether an accept would attach local tags
+     * @return array {Tag: rows of classifyAiTagSuggestions(), provenance: the
+     *         ai-computer-assisted names the module sent along}
+     * @throws NotFoundException|Exception with a user-facing message
+     */
+    public function aiRecommendTags(array $user, $eventId, $local)
+    {
+        $event = $this->fetchSimpleEvent($user, $eventId);
+        if (empty($event)) {
+            throw new NotFoundException(__('Invalid event.'));
+        }
+        $data = $this->fetchEventForAi($user, $eventId);
+        if (empty($data)) {
+            throw new NotFoundException(__('Invalid event.'));
+        }
+        $this->Module = ClassRegistry::init('Module');
+        $results = $this->Module->queryAI('tag_suggest', $data);
+        // The two ai-computer-assisted names the module appends to a
+        // non-empty answer are provenance, not suggestions: they are not
+        // offered as rows; aiAttachTags() puts them on when a suggestion
+        // is accepted.
+        $split = self::splitAiTagNames(isset($results['Tag']) && is_array($results['Tag']) ? $results['Tag'] : []);
+        return [
+            'Tag' => $this->aiClassifyTagNames($user, $event, $split['other'], $local),
+            'provenance' => $split['provenance'],
+        ];
+    }
+
+    /**
+     * Attach accepted AI tag suggestions to an event as the given user. The
+     * names are classified again here, so what the client sends is bound by
+     * the same rules as what it was shown: tags already on the event are
+     * skipped, unknown tags are created (perm_tag_editor), galaxy-cluster
+     * names are attached through their cluster, and a global attach
+     * unpublishes the event once. The caller decides the local flag and the
+     * tagging permission.
+     *
+     * @param array $user
+     * @param array $event with an Event key holding the id
+     * @param array $names accepted tag names
+     * @param bool $local attach as local tags
+     * @return array attached, created, skipped, failed, errors (name => reason), local
+     * @throws Exception
+     */
+    public function aiAttachTags(array $user, array $event, array $names, $local)
+    {
+        $eventId = (int)$event['Event']['id'];
+        $local = (bool)$local;
+        $provenance = ['attached' => [], 'replaced' => [], 'skipped' => [], 'failed' => []];
+        $result = ['attached' => 0, 'created' => 0, 'skipped' => 0, 'failed' => 0, 'errors' => [], 'local' => $local, 'provenance' => $provenance];
+        // The provenance names are never suggestions (a client cannot pick
+        // them); they go on below, once a suggestion is attached.
+        $names = self::splitAiTagNames($names)['other'];
+        $rows = $this->aiClassifyTagNames($user, $event, $names, $local);
+        if (empty($rows)) {
+            return $result;
+        }
+        $Tag = $this->EventTag->Tag;
+        $Taxonomy = ClassRegistry::init('Taxonomy');
+        $Galaxy = null;
+        $log = $this->loadLog();
+        $eventTagNames = $this->EventTag->find('column', [
+            'conditions' => ['EventTag.event_id' => $eventId],
+            'contain' => 'Tag',
+            'fields' => ['Tag.name'],
+            'recursive' => -1,
+        ]);
+        $unpublish = false;
+        foreach ($rows as $row) {
+            $name = $row['name'];
+            if ($row['status'] === self::AI_TAG_PRESENT) {
+                $result['skipped']++;
+                continue;
+            }
+            if ($row['status'] !== self::AI_TAG_OK) {
+                $result['failed']++;
+                $result['errors'][$name] = $row['reason'];
+                continue;
+            }
+            // Tags accepted together are bound by exclusivity too.
+            if (!$Taxonomy->checkIfNewTagIsAllowedByTaxonomy($name, $eventTagNames)) {
+                $result['failed']++;
+                $result['errors'][$name] = self::aiTagStatusText(self::AI_TAG_EXCLUSIVE);
+                continue;
+            }
+            if ($row['cluster_id'] !== null) {
+                if ($Galaxy === null) {
+                    $Galaxy = ClassRegistry::init('Galaxy');
+                }
+                try {
+                    $outcome = $Galaxy->attachCluster($user, 'event', $event, $row['cluster_id'], $local);
+                } catch (Exception $e) {
+                    $result['failed']++;
+                    $result['errors'][$name] = $e->getMessage();
+                    continue;
+                }
+                if ($outcome === 'Cluster attached.') {
+                    $result['attached']++;
+                    if (!$row['exists']) {
+                        $result['created']++;
+                    }
+                    $eventTagNames[] = $name;
+                } elseif ($outcome === 'Cluster already attached.') {
+                    $result['skipped']++;
+                } else {
+                    $result['failed']++;
+                    $result['errors'][$name] = $outcome;
+                }
+                continue;
+            }
+            $tagId = $row['tag_id'];
+            $created = false;
+            if ($tagId === null) {
+                $tagId = $Tag->quickAdd($name);
+                if (!$tagId) {
+                    $result['failed']++;
+                    $result['errors'][$name] = __('the tag could not be created: %s', json_encode($Tag->validationErrors));
+                    continue;
+                }
+                $created = true;
+            }
+            $nothingToChange = false;
+            if (!$this->EventTag->attachTagToEvent($eventId, ['id' => $tagId, 'local' => $local], $nothingToChange)) {
+                $result['failed']++;
+                $result['errors'][$name] = __('the tag could not be attached');
+                continue;
+            }
+            if ($nothingToChange) {
+                $result['skipped']++;
+                continue;
+            }
+            $result['attached']++;
+            if ($created) {
+                $result['created']++;
+            }
+            $eventTagNames[] = $name;
+            if (!$local) {
+                $unpublish = true;
+            }
+            $log->createLogEntry(
+                $user,
+                'tag',
+                'Event',
+                $eventId,
+                sprintf('Attached%s tag (%s) "%s" to event (%s)', $local ? ' local' : '', $tagId, $name, $eventId),
+                sprintf('Event (%s) tagged as Tag (%s)%s', $eventId, $tagId, $local ? ' locally' : '')
+            );
+        }
+        if ($result['attached'] > 0) {
+            // What the analyst accepted was AI-suggested: mark the event
+            // (Module::AI_PROVENANCE_TAGS, same locality as the suggestions).
+            App::uses('Module', 'Model');
+            $result['provenance'] = $this->aiAttachResultTags($user, $eventId, ['Tag' => Module::AI_PROVENANCE_TAGS], $local);
+        }
+        if ($unpublish) {
+            $this->unpublishEvent($event);
+        }
+        return $result;
+    }
+
     //Once the data about the user is gathered from the appropriate sources, fetchEvent is called from the controller or background process.
     // Possible options:
     // eventid: single event ID
@@ -1791,6 +4812,28 @@ class Event extends AppModel
     // to: date string (YYYY-MM-DD)
     // includeAllTags: true will include the tags that are marked as non-exportable
     // includeAttachments: true will attach the attachments to the attributes in the data field
+    /**
+     * The order an event's children are fetched in: none on MySQL, by id on
+     * anything else.
+     *
+     * The containment below deliberately asks for no order, and on MySQL
+     * that has always meant insertion order anyway: InnoDB answers a
+     * `WHERE event_id IN (...)` off the event_id index, which holds the rows
+     * of one event in primary-key order, and an updated row stays where it
+     * was. PostgreSQL returns a heap in physical order, which is insertion
+     * order until a row is updated and then moves that row to the end - so
+     * attributes[0] stops meaning "the first one" the moment any of them is
+     * edited. Asking PostgreSQL for the id order gives what MySQL gives for
+     * free; asking MySQL for it would add a sort it does not need.
+     *
+     * @param string $alias
+     * @return string|false
+     */
+    private function childOrder($alias)
+    {
+        return $this->isMysql() ? false : $alias . '.id ASC';
+    }
+
     public function fetchEvent($user, $options = array(), $useCache = false)
     {
         if (!isset($user['org_id'])) {
@@ -1869,15 +4912,9 @@ class Event extends AppModel
                 $delegatedEventIDs = $this->__cachedelegatedEventIDs($user, $useCache);
                 $conditions['AND']['OR']['Event.id'] = $delegatedEventIDs;
             }
-            $attributeCondSelect = '(SELECT events.org_id FROM events WHERE events.id = Attribute.event_id)';
-            $objectCondSelect = '(SELECT events.org_id FROM events WHERE events.id = Object.event_id)';
-            $eventReportCondSelect = '(SELECT events.org_id FROM events WHERE events.id = EventReport.event_id)';
-            if (!$this->isMysql()) {
-                $schemaName = $this->getDataSource()->config['schema'];
-                $attributeCondSelect = sprintf('(SELECT "%s"."events"."org_id" FROM "%s"."events" WHERE "%s"."events"."id" = "Attribute"."event_id")', $schemaName, $schemaName, $schemaName);
-                $objectCondSelect = sprintf('(SELECT "%s"."events"."org_id" FROM "%s"."events" WHERE "%s"."events"."id" = "Object"."event_id")', $schemaName, $schemaName, $schemaName);
-                $eventReportCondSelect = sprintf('(SELECT "%s"."events"."org_id" FROM "%s"."events" WHERE "%s"."events"."id" = "EventReport"."event_id")', $schemaName, $schemaName, $schemaName);
-            }
+            $attributeCondSelect = $this->eventOwnerSubquery('Attribute');
+            $objectCondSelect = $this->eventOwnerSubquery('Object');
+            $eventReportCondSelect = $this->eventOwnerSubquery('EventReport');
             $conditionsAttributes['AND'][0]['OR'] = array(
                 array('AND' => array(
                     'Attribute.distribution >' => 0,
@@ -1887,10 +4924,10 @@ class Event extends AppModel
                     'Attribute.distribution' => 4,
                     'Attribute.sharing_group_id' => $sgids,
                 )),
-                $attributeCondSelect => $user['org_id']
+                $attributeCondSelect . ' = ' . (int)$user['org_id']
             );
 
-            $conditionsObjects['AND'][0]['OR'] = array(
+            $objectAclCondition = array('OR' => array(
                 array('AND' => array(
                     'Object.distribution >' => 0,
                     'Object.distribution !=' => 4,
@@ -1899,8 +4936,9 @@ class Event extends AppModel
                     'Object.distribution' => 4,
                     'Object.sharing_group_id' => $sgids,
                 )),
-                $objectCondSelect => $user['org_id']
-            );
+                $objectCondSelect . ' = ' . (int)$user['org_id']
+            ));
+            $conditionsObjects['AND'][0] = $objectAclCondition;
 
             $conditionsEventReport['AND'][0]['OR'] = array(
                 array('AND' => array(
@@ -1911,10 +4949,10 @@ class Event extends AppModel
                     'EventReport.distribution' => 4,
                     'EventReport.sharing_group_id' => $sgids,
                 )),
-                $eventReportCondSelect => $user['org_id']
+                $eventReportCondSelect . ' = ' . (int)$user['org_id']
             );
         }
-        if ($options['distribution']) {
+        if (isset($options['distribution'])) {
             $conditions['AND'][] = array('Event.distribution' => $options['distribution']);
             $conditionsAttributes['AND'][] = array('Attribute.distribution' => $options['distribution']);
             $conditionsObjects['AND'][] = array('Object.distribution' => $options['distribution']);
@@ -1985,7 +5023,7 @@ class Event extends AppModel
                     ${'conditions' . $softDeletable . 's'}['AND'][] = array(
                         'OR' => array(
                             'AND' => array(
-                                sprintf('(SELECT events.org_id FROM events WHERE events.id = %s.event_id)', $softDeletable) => $user['org_id'],
+                                $this->eventOwnerSubquery($softDeletable) . ' = ' . (int)$user['org_id'],
                                 "$softDeletable.deleted" => $options['deleted'],
                             ),
                             $deletion_subconditions
@@ -2013,7 +5051,7 @@ class Event extends AppModel
             if ($isSiteAdmin) {
                 $proposal_conditions = array('OR' => array('ShadowAttribute.deleted' => 1));
             } else {
-                $proposal_conditions['OR'][] = array('(SELECT events.org_id FROM events WHERE events.id = ShadowAttribute.event_id)' => $user['org_id']);
+                $proposal_conditions['OR'][] = $this->eventOwnerSubquery('ShadowAttribute') . ' = ' . (int)$user['org_id'];
             }
         }
         if ($options['idList'] && !$options['tags']) {
@@ -2051,24 +5089,24 @@ class Event extends AppModel
                 'Attribute' => array(
                     'fields' => $fieldsAtt,
                     'conditions' => $conditionsAttributes,
-                    'order' => false
+                    'order' => $this->childOrder('Attribute'),
                 ),
                 'Object' => array(
                     'conditions' => $conditionsObjects,
-                    'order' => false,
+                    'order' => $this->childOrder('Object'),
                 ),
                 'ShadowAttribute' => array(
                     'fields' => $fieldsShadowAtt,
                     'conditions' => $proposal_conditions,
                     'Org' => array('fields' => $fieldsOrg),
-                    'order' => false
+                    'order' => $this->childOrder('ShadowAttribute'),
                 ),
                 'EventTag' => array(
-                    'order' => false
+                    'order' => $this->childOrder('EventTag'),
                 ),
                 'EventReport' => array(
                     'conditions' => $conditionsEventReport,
-                    'order' => false,
+                    'order' => $this->childOrder('EventReport'),
                     'EventReportTag',
                 ),
                 'CryptographicKey'
@@ -2080,6 +5118,30 @@ class Event extends AppModel
             );
         }
         if ($flatten) {
+            if (!$isSiteAdmin) {
+                // flattened object attributes still have to pass the object ACL that the
+                // dropped Object contain would have enforced - that condition only. The
+                // rest of the contain (soft-delete state, the distribution filters) says
+                // which objects are listed, not which attributes may be seen.
+                $objectAcl = $this->subQueryGenerator(
+                    $this->Object,
+                    array(
+                        'fields' => array('Object.id'),
+                        'recursive' => -1,
+                        'conditions' => array(
+                            'Object.id = Attribute.object_id',
+                            $objectAclCondition,
+                        ),
+                    ),
+                    'Attribute.object_id'
+                );
+                $params['contain']['Attribute']['conditions']['AND'][] = array(
+                    'OR' => array(
+                        'Attribute.object_id' => 0,
+                        $objectAcl[0],
+                    ),
+                );
+            }
             unset($params['contain']['Object']);
         }
         if ($options['noEventReports']) {
@@ -2108,6 +5170,12 @@ class Event extends AppModel
                 'Event',
                 ['id', 'info', 'analysis', 'threat_level_id', 'distribution', 'timestamp', 'publish_timestamp']
             );
+        } else {
+            // No order asked for. MySQL answers an id lookup in id order off
+            // the primary key; PostgreSQL answers in heap order, which an
+            // UPDATE reshuffles - the same gap childOrder() closes for the
+            // event's children.
+            $params['order'] = $this->childOrder('Event');
         }
         $results = $this->find('all', $params);
         if (empty($results)) {
@@ -2891,7 +5959,11 @@ class Event extends AppModel
                 $params['uuid'] = $this->convert_filters($params['uuid']);
                 if (!empty($params['uuid']['OR'])) {
                     $subQueryOptions = array(
-                        'conditions' => array('Attribute.uuid' => $params['uuid']['OR']),
+                        'conditions' => $this->visibleElementConditions(
+                            $options['user'],
+                            'Attribute',
+                            array('Attribute.uuid' => $params['uuid']['OR'])
+                        ),
                         'fields' => array('event_id')
                     );
                     $attributeSubquery = $this->subQueryGenerator($this->Attribute, $subQueryOptions, 'Event.id');
@@ -2904,7 +5976,11 @@ class Event extends AppModel
                 }
                 if (!empty($params['uuid']['NOT'])) {
                     $subQueryOptions = array(
-                        'conditions' => array('Attribute.uuid' => $params['uuid']['NOT']),
+                        'conditions' => $this->visibleElementConditions(
+                            $options['user'],
+                            'Attribute',
+                            array('Attribute.uuid' => $params['uuid']['NOT'])
+                        ),
                         'fields' => array('event_id')
                     );
                     $attributeSubquery = $this->subQueryGenerator($this->Attribute, $subQueryOptions, 'Event.id');
@@ -3217,12 +6293,12 @@ class Event extends AppModel
                 $sub_filter = ['OR' => $values];
                 $subconditions_value2 = $this->generic_add_filter([], $sub_filter, ['Attribute.value2']);
                 $subquery_options = [
-                  'conditions' => [
+                  'conditions' => $this->visibleElementConditions($options['user'], 'Attribute', [
                     'OR' => [
                       ...$subconditions_value1['AND'],
                       ...$subconditions_value2['AND'],
                     ],
-                  ],
+                  ]),
                   'fields' => [
                     $field,
                   ],
@@ -3234,7 +6310,8 @@ class Event extends AppModel
                   $operand === 'NOT'
                 );
                 // Check if value1/value2 indices exist, this will not be the case when high performance indexing is enabled. Gracefully fall back to whatever the query planner suggests
-                if ($this->checkNamedIndexExists('attributes', 'value1') && $this->checkNamedIndexExists('attributes', 'value2')) {
+                // The support probe comes first: an engine with no index hints has no use for the answer, and asking for it costs a MySQL-only SHOW INDEX
+                if ($this->checkDbSupport('indexHints') && $this->checkNamedIndexExists('attributes', 'value1') && $this->checkNamedIndexExists('attributes', 'value2')) {
                     $subQuery[0] = explode('WHERE', $subQuery[0]);
                     $subQuery[0][0] .= ' USE INDEX (value1, value2) ';
                     $subQuery[0] = implode('WHERE', $subQuery[0]);
@@ -3248,12 +6325,12 @@ class Event extends AppModel
                     $sub_filter = ['OR' => $v];
                     $subconditions_value2 = $this->generic_add_filter([], $sub_filter, ['Attribute.value2']);
                     $subquery_options = [
-                      'conditions' => [
+                      'conditions' => $this->visibleElementConditions($options['user'], 'Attribute', [
                         'OR' => [
                           ...$subconditions_value1['AND'],
                           ...$subconditions_value2['AND'],
                         ],
-                      ],
+                      ]),
                       'fields' => [
                         $field,
                       ],
@@ -3264,7 +6341,8 @@ class Event extends AppModel
                       $lookup_field
                     );
                     // Check if value1/value2 indices exist, this will not be the case when high performance indexing is enabled. Gracefully fall back to whatever the query planner suggests
-                    if ($this->checkNamedIndexExists('attributes', 'value1') && $this->checkNamedIndexExists('attributes', 'value2')) {
+                    // The support probe comes first: an engine with no index hints has no use for the answer, and asking for it costs a MySQL-only SHOW INDEX
+                    if ($this->checkDbSupport('indexHints') && $this->checkNamedIndexExists('attributes', 'value1') && $this->checkNamedIndexExists('attributes', 'value2')) {
                         $subQuery[0] = explode('WHERE', $subQuery[0]);
                         $subQuery[0][0] .= ' USE INDEX (value1, value2) ';
                         $subQuery[0] = implode('WHERE', $subQuery[0]);
@@ -3275,6 +6353,133 @@ class Event extends AppModel
         }
 
         return $conditions;
+    }
+
+    /**
+     * Narrows a subquery on attributes or objects to the elements the user can
+     * see, by the rules of MispAttribute::buildConditions(). The outer query
+     * has already checked that the event holding them is visible.
+     *
+     * @param array $user
+     * @param string $alias Attribute or Object
+     * @param array $conditions on the element
+     * @return array
+     */
+    public function visibleElementConditions(array $user, $alias, array $conditions)
+    {
+        if ($user['Role']['perm_site_admin']) {
+            return $conditions;
+        }
+        $sgIds = $this->SharingGroup->authorizedIds($user);
+        $rules = [$this->elementDistributionRules($alias, $sgIds)];
+        if ($alias === 'Attribute') {
+            $rules[] = ['OR' => [
+                'Attribute.object_id' => 0,
+                $this->subQueryGenerator($this->Object, [
+                    'fields' => ['Object.id'],
+                    'conditions' => $this->elementDistributionRules('Object', $sgIds),
+                ], 'Attribute.object_id'),
+            ]];
+        }
+        // fetchEvent() hands soft-deleted elements to sync users that ask
+        if (!$user['Role']['perm_sync']) {
+            $rules[] = [$alias . '.deleted' => 0];
+        }
+        $ownEvents = $this->subQueryGenerator($this, [
+            'alias' => 'OwnEvent',
+            'fields' => ['OwnEvent.id'],
+            'conditions' => ['OwnEvent.org_id' => $user['org_id']],
+        ], $alias . '.event_id');
+        return [$conditions, ['OR' => [$ownEvents, ['AND' => $rules]]]];
+    }
+
+    /**
+     * Events holding an attribute that the user can see and that carries one
+     * of the tags.
+     *
+     * @param array $user
+     * @param array $tagIds
+     * @return array
+     */
+    public function visibleAttributeTagSubquery(array $user, array $tagIds)
+    {
+        return $this->subQueryGenerator($this->Attribute->AttributeTag, [
+            'fields' => ['AttributeTag.event_id'],
+            'conditions' => $this->visibleAttributeTagConditions($user, $tagIds),
+        ], 'Event.id');
+    }
+
+    /**
+     * Ids of the events holding an attribute that the user can see and that
+     * carries one of the tags.
+     *
+     * @param array $user
+     * @param array $tagIds
+     * @return array
+     */
+    public function visibleAttributeTagEventIds(array $user, array $tagIds)
+    {
+        return $this->Attribute->AttributeTag->find('column', [
+            'fields' => ['AttributeTag.event_id'],
+            'conditions' => $this->visibleAttributeTagConditions($user, $tagIds),
+            'unique' => true,
+        ]);
+    }
+
+    /**
+     * @param array $user
+     * @param array $tagIds
+     * @return array conditions on AttributeTag
+     */
+    private function visibleAttributeTagConditions(array $user, array $tagIds)
+    {
+        $conditions = ['AttributeTag.tag_id' => $tagIds];
+        if (!$user['Role']['perm_site_admin']) {
+            // Driven by the tag rows, one primary key probe each: driven by the
+            // attributes, MariaDB walked every attribute of every visible event
+            $conditions[] = $this->subQueryGenerator($this->Attribute, [
+                'fields' => ['Attribute.id'],
+                'conditions' => $this->visibleElementConditions(
+                    $user, 'Attribute', ['Attribute.id = AttributeTag.attribute_id']
+                ),
+            ], 'AttributeTag.attribute_id');
+        }
+        return $conditions;
+    }
+
+    /**
+     * @param string $alias
+     * @param array $sgIds
+     * @return array
+     */
+    private function elementDistributionRules($alias, array $sgIds)
+    {
+        return ['OR' => [
+            $alias . '.distribution' => [1, 2, 3, 5],
+            'AND' => [
+                $alias . '.distribution' => 4,
+                $alias . '.sharing_group_id' => $sgIds,
+            ],
+        ]];
+    }
+
+    /**
+     * A correlated subquery reading the owning event's org_id, spelled for this
+     * connection.
+     *
+     * Four call sites used to carry this twice - once bare for MySQL and once
+     * quoted and schema-qualified for PostgreSQL. name() spells the quoting on
+     * either engine, so the only thing left to decide is whether the connection
+     * names a schema at all, which is a configuration question rather than an
+     * engine one. The qualification is needed because the driver does not reach
+     * inside a hand-written condition string to add it.
+     *
+     * @param string $alias The model alias whose event_id is being joined on.
+     * @return string
+     */
+    private function eventOwnerSubquery($alias)
+    {
+        return $this->correlatedLookup('events', 'org_id', $alias, 'event_id');
     }
 
     public function set_filter_object_name(&$params, $conditions, $options) {
@@ -3720,6 +6925,29 @@ class Event extends AppModel
     }
 
     /**
+     * Is the creator organisation that _add() will store the user's own? With $fromXml, __captureObjects()
+     * takes it from `Orgc`, else from `orgc`, and only otherwise keeps `orgc_id`.
+     * @param array $event
+     * @param array $user
+     * @param bool $fromXml
+     * @return bool
+     */
+    private function __isOwnCreatorOrg(array $event, array $user, $fromXml)
+    {
+        if ($fromXml && (isset($event['Orgc']) || isset($event['orgc']))) {
+            $org = $event['Orgc'] ?? $event['orgc'];
+            if (!is_array($org)) {
+                return $org === $user['Organisation']['name'];
+            }
+            if (empty($org['uuid'])) {
+                return ($org['name'] ?? null) === $user['Organisation']['name'];
+            }
+            return strtolower((string)$org['uuid']) === strtolower($user['Organisation']['uuid']);
+        }
+        return !isset($event['orgc_id']) || $event['orgc_id'] == $user['org_id'];
+    }
+
+    /**
      * When we receive an event via REST, we might end up with organisations, sharing groups, tags that we do not know
      * or which we need to update. All of that is controlled in this method.
      * @param array $event
@@ -3938,7 +7166,15 @@ class Event extends AppModel
 
         if ($isXml) {
             App::uses('Xml', 'Utility');
-            $dataArray = Xml::toArray(Xml::build($data));
+            // The uploaded file's *content* is a document, never a locator.
+            // Xml::build() would otherwise treat a body of `/etc/passwd` or
+            // `http://10.0.0.1/` as something to read or fetch and then import,
+            // and its readFile guard does not cover the https branch (operator
+            // precedence). Refuse anything that is not a document first.
+            if (strpos($data, '<') === false) {
+                throw new Exception("File does not contain an XML document");
+            }
+            $dataArray = Xml::toArray(Xml::build($data, ['readFile' => false]));
         } else {
             $dataArray = $this->jsonDecode($data);
             if (isset($dataArray['response'][0])) {
@@ -4061,6 +7297,7 @@ class Event extends AppModel
      * @param int|null $jobId
      * @param int $created_id
      * @param array $validationErrors
+     * @param string|bool $fingerprint Of the key that verified a protected event's signature, or true when the caller trusts the input
      * @return bool|int|string True when new event was created, int when event with the same uuid already exists, string when validation errors
      * @throws Exception
      */
@@ -4094,14 +7331,9 @@ class Event extends AppModel
             if (empty($fingerprint)) {
                 throw new MethodNotAllowedException(__('Cannot add a protected event via the API, without the input being signed properly.'));
             }
-            $found = false;
             // Does any of the event\'s keys match the fingerprint?
-            foreach ($data['Event']['CryptographicKey'] as $key) {
-                if ($key['fingerprint'] === $fingerprint) {
-                    $found = true;
-                }
-            }
-            if (!$found) {
+            $listed = array_column($data['Event']['CryptographicKey'], 'fingerprint');
+            if ($fingerprint !== true && !in_array($fingerprint, $listed, true)) {
                 throw new MethodNotAllowedException(__('Cannot add the protected event, whilst the input was signed, the signing key was not found in the event\'s approved list of fingerprints..'));
             }
         }
@@ -4119,14 +7351,9 @@ class Event extends AppModel
         // Moved out of if (!$fromXML), since we might get a restful event without the orgc/timestamp set
         if (!isset($data['Event']['orgc_id']) && !isset($data['Event']['orgc'])) {
             $data['Event']['orgc_id'] = $data['Event']['org_id'];
-        } else {
-            $orgc_id = $data['Event']['orgc_id'] ?? null;
-            $orgc_uuid = $data['Event']['Orgc']['uuid'] ?? null;
-            if (!$user['Role']['perm_sync'] && !$user['Role']['perm_site_admin']) {
-                if ($orgc_uuid != $user['Organisation']['uuid'] && $orgc_id != $user['org_id']) {
-                    throw new MethodNotAllowedException('Event cannot be created as you are not a member of the creator organisation.');
-                }
-            }
+        }
+        if (!$user['Role']['perm_sync'] && !$user['Role']['perm_site_admin'] && !$this->__isOwnCreatorOrg($data['Event'], $user, $fromXml)) {
+            throw new MethodNotAllowedException('Event cannot be created as you are not a member of the creator organisation.');
         }
         if (!Configure::check('MISP.enableOrgBlocklisting') || Configure::read('MISP.enableOrgBlocklisting') !== false) {
             if (!isset($data['Event']['Orgc']['uuid'])) {
@@ -4243,6 +7470,7 @@ class Event extends AppModel
             if (!empty($data['Event']['EventTag'])) {
                 $toSave = [];
                 foreach ($data['Event']['EventTag'] as $et) {
+                    unset($et['id'], $et[$this->EventTag->alias]);
                     $et['event_id'] = $this->id;
                     $toSave[] = $et;
                 }
@@ -4487,7 +7715,6 @@ class Event extends AppModel
         } else {
             throw new InvalidArgumentException("No event UUID or ID provided.");
         }
-        $existingEvent = $this->find('first', ['conditions' => $conditions, 'recursive' => -1]);
         if ($passAlong) {
             $this->Server = ClassRegistry::init('Server');
             $server = $this->Server->find('first', array(
@@ -4507,6 +7734,20 @@ class Event extends AppModel
         } else {
             $server['Server']['internal'] = false;
         }
+        // Only internal sync compares local tags (see areLocalTagsDifferent below),
+        // so only then do we load the existing event's tags. For every other
+        // connection this stays a cheap recursive=-1 lookup rather than eagerly
+        // hydrating the full Tag model for the event on each pulled event (#10881).
+        $existingEventFindOptions = ['conditions' => $conditions, 'recursive' => -1];
+        if (!empty($server['Server']['internal'])) {
+            $existingEventFindOptions['contain'] = [
+                'EventTag' => [
+                    'fields' => ['EventTag.event_id', 'EventTag.tag_id', 'EventTag.local', 'EventTag.relationship_type'],
+                    'Tag' => ['fields' => ['Tag.id', 'Tag.name']],
+                ],
+            ];
+        }
+        $existingEvent = $this->find('first', $existingEventFindOptions);
         // If the event exists...
         if (!empty($existingEvent)) {
             $data['Event']['id'] = $existingEvent['Event']['id'];
@@ -4514,7 +7755,19 @@ class Event extends AppModel
             // Conditions affecting all:
             // user.org == event.org
             // edit timestamp newer than existing event timestamp
-            if ($force || !isset($data['Event']['timestamp']) || $data['Event']['timestamp'] > $existingEvent['Event']['timestamp']) {
+            if (
+                $force ||
+                !isset($data['Event']['timestamp']) ||
+                $data['Event']['timestamp'] > $existingEvent['Event']['timestamp'] ||
+                (
+                    $data['Event']['timestamp'] == $existingEvent['Event']['timestamp'] &&
+                    !empty($server['Server']['internal']) &&
+                    $this->areLocalTagsDifferent(
+                        $existingEvent['EventTag'] ?? [],
+                        $data['Event']['Tag'] ?? []
+                    )
+                )
+            ) {
                 if (!isset($data['Event']['timestamp'])) {
                     $data['Event']['timestamp'] = time();
                 }
@@ -4532,6 +7785,20 @@ class Event extends AppModel
                         if ($data['Event']['sharing_group_id'] === false) {
                             return array('error' => 'Event could not be saved: User not authorised to create the associated sharing group.');
                         }
+                    }
+                } elseif (!isset($data['Event']['distribution']) && !empty($data['Event']['sharing_group_id'])) {
+                    // A sharing group submitted with no distribution at all still reaches
+                    // the save: the recoverFields loop below restores distribution from the
+                    // stored event, so an event already at distribution 4 keeps that value
+                    // and this id is persisted. Authorise it rather than leaving the gate
+                    // keyed on a field the caller can simply omit.
+                    // Deliberately narrow. A payload that *states* a non-4 distribution is
+                    // left alone: beforeValidate() zeroes the id for it, so there is no hole
+                    // to close, and rejecting it instead would turn a silent normalisation
+                    // into a failed pull for any peer that sends a stale id alongside a
+                    // non-sharing-group distribution.
+                    if (!$this->SharingGroup->checkIfAuthorised($user, $data['Event']['sharing_group_id'])) {
+                        return array('error' => 'Event could not be saved: Invalid sharing group or you don\'t have access to that sharing group.');
                     }
                 }
                 // If the above is true, we have two more options:
@@ -4731,6 +7998,66 @@ class Event extends AppModel
         return $this->validationErrors;
     }
 
+    public function areLocalTagsDifferent(array $localEventsTags, array $eventTags): bool
+    {
+        $normalizeFn = function (array $tags): array {
+            $result = [];
+
+            foreach ($tags as $tag) {
+                $name = $tag['Tag']['name'] ?? ($tag['name'] ?? null);
+
+                if ($name === null) {
+                    continue;
+                }
+
+                $local = (bool) ($tag['local'] ?? false);
+                $relationship = $tag['relationship_type'] ?? '';
+
+                // build a comparable signature
+                $result[] = $name . '|' . (int)$local . '|' . $relationship;
+            }
+
+            $result = array_values(array_unique($result));
+            sort($result);
+
+            return $result;
+        };
+
+        $localTagsFromExistingEvent = $normalizeFn($localEventsTags ?? []);
+        $localTagsFromEvent = $normalizeFn($eventTags ?? []);
+
+        return $localTagsFromExistingEvent !== $localTagsFromEvent;
+    }
+
+    public function getTagsFingerprint($tags=[]) {
+        $normalizeFn = function (array $tags): array {
+            $result = [];
+
+            foreach ($tags as $tag) {
+                $name = $tag['Tag']['name'] ?? ($tag['name'] ?? null);
+
+                if ($name === null) {
+                    continue;
+                }
+
+                $local = (bool) ($tag['local'] ?? false);
+                $relationship = $tag['relationship_type'] ?? '';
+
+                // build a comparable signature
+                $result[] = $name . '|' . (int)$local . '|' . $relationship;
+            }
+
+            $result = array_values(array_unique($result));
+            sort($result);
+
+            return $result;
+        };
+
+        $normalized = $normalizeFn($tags);
+        $tagsFingerprint = sha1(implode($normalized));
+        return $tagsFingerprint;
+    }
+
     // format has to be:
     // array('Event' => array(), 'Attribute' => array('ShadowAttribute' => array()), 'EventTag' => array(), 'ShadowAttribute' => array());
     public function savePreparedEvent($event)
@@ -4840,6 +8167,38 @@ class Event extends AppModel
         $this->Attribute->AttributeTag->create();
         $this->Attribute->AttributeTag->save($attribute_tag);
         return true;
+    }
+
+    /**
+     * The local event that data pulled from $server is for, if that server may hold it: we would push
+     * it there, it is shared with this community (which includes synchronising servers), or the
+     * server's organisation created it (a pull downgrades distribution, so the push check misses those).
+     *
+     * @param string $eventUuid
+     * @param array $server With RemoteOrg
+     * @param array $user
+     * @return array|false
+     */
+    public function syncedWithServer($eventUuid, array $server, array $user)
+    {
+        $event = $this->find('first', [
+            'recursive' => -1,
+            'conditions' => ['Event.uuid' => $eventUuid],
+            'fields' => ['Event.id', 'Event.uuid', 'Event.org_id', 'Event.orgc_id', 'Event.distribution', 'Event.sharing_group_id'],
+        ]);
+        if (empty($event)) {
+            return false;
+        }
+        if ($event['Event']['orgc_id'] == $server['Server']['remote_org_id'] || $event['Event']['distribution'] == 1) {
+            return $event;
+        }
+        if ($event['Event']['distribution'] == 4) {
+            $event['SharingGroup'] = $this->SharingGroup->fetchSG($event['Event']['sharing_group_id'], $user);
+            if (empty($event['SharingGroup'])) {
+                return false;
+            }
+        }
+        return $this->checkDistributionForPush($event, $server) ? $event : false;
     }
 
     // pass an event or an attribute together with the server id.
@@ -5102,14 +8461,6 @@ class Event extends AppModel
     public function publishRouter($id, $passAlong = null, $user)
     {
         if (Configure::read('MISP.background_jobs')) {
-            //Tentatively set the publish flag to 1
-            $event = $this->find('first', array(
-                'conditions' => array('Event.id' => $id),
-                'recursive' => -1
-            ));
-            $event['Event']['published'] = 1;
-            $event['Event']['publish_timestamp'] = time();
-            $this->save($event);
             /** @var Job $job */
             $job = ClassRegistry::init('Job');
             $jobId = $job->createJob($user, Job::WORKER_PRIO, 'publish_event', "Event ID: $id", 'Publishing.');
@@ -5225,6 +8576,14 @@ class Event extends AppModel
                 return $errorMessage;
             }
         }
+        //Tentatively set the publish flag to 1
+        $event_to_publish = $this->find('first', array(
+            'conditions' => array('Event.id' => $id),
+            'recursive' => -1
+        ));
+        $event_to_publish['Event']['published'] = 1;
+        $event_to_publish['Event']['publish_timestamp'] = time();
+        $this->save($event_to_publish);
         if ($jobId) {
             $this->Behaviors->unload('SysLogLogable.SysLogLogable');
         } else {
@@ -6052,6 +9411,24 @@ class Event extends AppModel
                 }
             }
         }
+        // The pagination tool jumps to the page holding the focused element by matching
+        // top-level uuids only. An attribute inside an object is not a top-level entry, so
+        // translate the focus to its containing object's uuid to land on the right page.
+        // The client-side scroll still targets the original attribute uuid.
+        if (!empty($passedArgs['focus'])) {
+            $focus = $passedArgs['focus'];
+            foreach ($objects as $object) {
+                if ($object['objectType'] !== 'object' || empty($object['Attribute'])) {
+                    continue;
+                }
+                foreach ($object['Attribute'] as $objectAttribute) {
+                    if (!empty($objectAttribute['uuid']) && $objectAttribute['uuid'] === $focus) {
+                        $passedArgs['focus'] = $object['uuid'];
+                        break 2;
+                    }
+                }
+            }
+        }
         App::uses('CustomPaginationTool', 'Tools');
         $customPagination = new CustomPaginationTool();
         if ($all) {
@@ -6207,6 +9584,11 @@ class Event extends AppModel
                 if (isset($r['tags']) && !is_array($r['tags'])) {
                     $r['tags'] = array($r['tags']);
                 }
+                // Tags the module asks to strip from the attributes already in the
+                // event that carry the same type/value as this result row.
+                if (isset($r['remove_tags']) && !is_array($r['remove_tags'])) {
+                    $r['remove_tags'] = array($r['remove_tags']);
+                }
                 foreach ($r['values'] as &$value) {
                     if (!is_array($r['values']) || !isset($r['values'][0])) {
                         $r['values'] = array($r['values']);
@@ -6252,7 +9634,8 @@ class Event extends AppModel
                             'comment' => isset($r['comment']) ? $r['comment'] : false,
                             'to_ids' => isset($r['to_ids']) ? $r['to_ids'] : false,
                             'value' => $value,
-                            'tags' => isset($r['tags']) ? $r['tags'] : false
+                            'tags' => isset($r['tags']) ? $r['tags'] : false,
+                            'remove_tags' => isset($r['remove_tags']) ? $r['remove_tags'] : false
                     );
                     if (isset($r['categories'])) {
                         $temp['categories'] = $r['categories'];
@@ -6305,6 +9688,8 @@ class Event extends AppModel
                 }
                 $objects[] = $tmp_object;
             }
+            // Read in template order
+            $this->Object->sortAttributesByTemplate($objects);
             $event['Object'] = $objects;
         }
         if (!empty($result['results']['EventReport'])) {
@@ -6349,6 +9734,28 @@ class Event extends AppModel
         $attribute['value'] = $this->Attribute->runRegexp($attribute['type'], $attribute['value']);
         $attribute['distribution'] = (isset($attribute['distribution']) ? (int)$attribute['distribution'] : $defaultDistribution);
         $attribute['sharing_group_id'] = (isset($attribute['sharing_group_id']) ? (int)$attribute['sharing_group_id'] : 0);
+
+        // Fix: Intercept and map attribute_tag from CSV/Module ingestion streams
+        if (!empty($attribute['attribute_tag'])) {
+            $rawTags = array();
+            if (is_string($attribute['attribute_tag'])) {
+                $rawTags = explode(',', $attribute['attribute_tag']);
+            } elseif (is_array($attribute['attribute_tag'])) {
+                $rawTags = $attribute['attribute_tag'];
+            }
+
+            $seenTags = array(); //sanitize duplicate tags in the same attribute
+            foreach ($rawTags as $tag) {
+                if (is_string($tag)) {
+                    $tag = trim($tag);
+                    if (!empty($tag) && !isset($seenTags[$tag])) {
+                        $seenTags[$tag] = true;
+                        $attribute['Tag'][] = array('name' => $tag);
+                    }
+                }
+            }
+        }
+
         return $attribute;
     }
 
@@ -6365,12 +9772,9 @@ class Event extends AppModel
             throw new InvalidArgumentException('Invalid module.');
         }
         $this->Module = ClassRegistry::init('Module');
-        $module = $this->Module->getEnabledModule($module, 'Export');
+        $module = $this->Module->getEnabledModule($module, 'Export', $user);
         if (!is_array($module)) {
             throw new NotFoundException('Invalid module.');
-        }
-        if (!$this->Module->canUse($user, 'Enrichment', ['name' => $module])) {
-            throw new MethodNotAllowedException('That export module is restricted.');
         }
         // Export module can specify additional options for event fetch
         if (isset($module['meta']['fetch_options'])) {
@@ -6558,7 +9962,11 @@ class Event extends AppModel
             }
             $existingEvent = $this->find('first', ['conditions' => ['Event.uuid' => $data['Event']['uuid']], 'recursive' => -1]);
             if (!empty($existingEvent)) {
-                if ($user['Role']['perm_modify_org'] && $existingEvent['Event']['orgc_id'] == $user['org_id']) {
+                if (
+                    $user['Role']['perm_modify_org'] &&
+                    $existingEvent['Event']['orgc_id'] == $user['org_id'] &&
+                    !$this->isProtectedFromSyncUser($user, $existingEvent)
+                ) {
                     $eventid = $existingEvent['Event']['id'];
                     $result = $this->_edit($data, $user, $eventid, null, null, true);
                     if ($result === true) {
@@ -6617,46 +10025,39 @@ class Event extends AppModel
         $scriptDir = APP . 'files' . DS . 'scripts';
         if ($stixVersion === '2' || $stixVersion === '2.0' || $stixVersion === '2.1') {
             $scriptFile = $scriptDir . DS . 'stix2' . DS . 'stix2misp.py';
-            $outputPath = $file . '.out';
-            $shellCommand = [
-                ProcessTool::pythonBin(),
-                $scriptFile,
-                '-i', $file,
-                '--distribution', $distribution,
-                '--org-uuid', $orgUuid
-            ];
-            if ($distribution == 4) {
-                array_push($shellCommand, '--sharing-group-id', $sharingGroupId);
-            }
-            if ($forceContextualData) {
-                $shellCommand[] = '--force-contextual-data';
-            }
-            if ($galaxiesAsTags) {
-                $shellCommand[] = '--galaxies-as-tags';
-            } else {
-                array_push($shellCommand, '--cluster-distribution', $clusterDistribution);
-                if ($clusterDistribution == 4) {
-                    array_push($shellCommand, '--cluster-sharing-group-id', $clusterSharingGroupId);
-                }
-            }
-            if ($debug) {
-                $shellCommand[] = '--debug';
-            }
             $stixVersion = "STIX 2.1";
         } else if ($stixVersion === '1' || $stixVersion === '1.1' || $stixVersion === '1.2') {
             $scriptFile = $scriptDir . DS . 'stix2misp.py';
-            $outputPath = $file . '.json';
-            $shellCommand = [
-                ProcessTool::pythonBin(),
-                $scriptFile,
-                $file,
-                Configure::read('MISP.default_event_distribution'),
-                Configure::read('MISP.default_attribute_distribution'),
-                $this->__getTagNamesFromSynonyms($scriptDir)
-            ];
             $stixVersion = "STIX 1.1";
         } else {
             throw new InvalidArgumentException('Invalid STIX version');
+        }
+        // Both importers are misp-stix wrappers taking the same arguments and
+        // writing the converted event next to their input
+        $outputPath = $file . '.out';
+        $shellCommand = [
+            ProcessTool::pythonBin(),
+            $scriptFile,
+            '-i', $file,
+            '--distribution', $distribution,
+            '--org-uuid', $orgUuid
+        ];
+        if ($distribution == 4) {
+            array_push($shellCommand, '--sharing-group-id', $sharingGroupId);
+        }
+        if ($forceContextualData) {
+            $shellCommand[] = '--force-contextual-data';
+        }
+        if ($galaxiesAsTags) {
+            $shellCommand[] = '--galaxies-as-tags';
+        } else {
+            array_push($shellCommand, '--cluster-distribution', $clusterDistribution);
+            if ($clusterDistribution == 4) {
+                array_push($shellCommand, '--cluster-sharing-group-id', $clusterSharingGroupId);
+            }
+        }
+        if ($debug) {
+            $shellCommand[] = '--debug';
         }
 
         try {
@@ -6695,55 +10096,8 @@ class Event extends AppModel
         }
     }
 
-    /**
-     * @param string $scriptDir
-     * @return string
-     * @throws Exception
-     */
-    private function __getTagNamesFromSynonyms($scriptDir)
-    {
-        $synonymsToTagNames = $scriptDir . DS . 'tmp' . DS . 'synonymsToTagNames.json';
-        if (!file_exists($synonymsToTagNames) || (time() - filemtime($synonymsToTagNames)) > 600) {
-            if (!isset($this->GalaxyCluster)) {
-                $this->GalaxyCluster = ClassRegistry::init('GalaxyCluster');
-            }
-            $clusters = $this->GalaxyCluster->find('all', array(
-                'recursive' => -1,
-                'fields' => array(
-                    'GalaxyCluster.value',
-                    'MAX(GalaxyCluster.version)',
-                    'GalaxyCluster.tag_name',
-                    'GalaxyCluster.id'
-                ),
-                'group' => array('GalaxyCluster.tag_name')
-            ));
-            $synonyms = $this->GalaxyCluster->GalaxyElement->find('all', array(
-                'recursive' => -1,
-                'fields' => array('galaxy_cluster_id', 'value'),
-                'conditions' => array('key' => 'synonyms')
-            ));
-            $idToSynonyms = array();
-            foreach ($synonyms as $synonym) {
-                $idToSynonyms[$synonym['GalaxyElement']['galaxy_cluster_id']][] = $synonym['GalaxyElement']['value'];
-            }
-            $mapping = array();
-            foreach ($clusters as $cluster) {
-                $mapping[$cluster['GalaxyCluster']['value']][] = $cluster['GalaxyCluster']['tag_name'];
-                if (!empty($idToSynonyms[$cluster['GalaxyCluster']['id']])) {
-                    foreach ($idToSynonyms[$cluster['GalaxyCluster']['id']] as $synonym) {
-                        $mapping[$synonym][] = $cluster['GalaxyCluster']['tag_name'];
-                    }
-                }
-            }
-            FileAccessTool::writeToFile($synonymsToTagNames, JsonTool::encode($mapping));
-        }
-        return $synonymsToTagNames;
-    }
-
     public function enrichmentRouter($options)
     {
-        $result = $this->enrichment($options);
-        return __('#' . $result . ' attributes have been created during the enrichment process.');
         if (Configure::read('MISP.background_jobs')) {
 
             /** @var Job $job */
@@ -6772,12 +10126,17 @@ class Event extends AppModel
 
             return true;
         } else {
-            $result = $this->enrichment($options);
-            return __('#' . $result . ' attributes have been created during the enrichment process.');
+            $tagsRemoved = 0;
+            $result = $this->enrichment($options, $tagsRemoved);
+            $message = __('#' . $result . ' attributes have been created during the enrichment process.');
+            if ($tagsRemoved) {
+                $message .= ' ' . __n('%s tag removed.', '%s tags removed.', $tagsRemoved, $tagsRemoved);
+            }
+            return $message;
         }
     }
 
-    public function enrichment(array $params)
+    public function enrichment(array $params, &$tagsRemoved = 0)
     {
         $option_fields = array('user', 'event_id', 'modules');
         foreach ($option_fields as $option_field) {
@@ -6825,6 +10184,7 @@ class Event extends AppModel
         }
 
         $attributes_added = 0;
+        $tagsRemoved = 0;
         $initial_objects = array();
         $event_id = $event[0]['Event']['id'];
         foreach ($event[0]['Attribute'] as $attribute) {
@@ -6867,6 +10227,18 @@ class Event extends AppModel
                         } else {
                             $attributes = $this->handleModuleResult($result, $event_id);
                             foreach ($attributes as $a) {
+                                $a['type'] = empty($a['default_type']) ? $a['types'][0] : $a['default_type'];
+                                // The row may ask for tags to come off the attribute the
+                                // event already holds for this value. When it does hold
+                                // one, the row changes that attribute's tags instead of
+                                // creating anything.
+                                if (!empty($a['remove_tags'])) {
+                                    $removal = $this->applyModuleTagChanges($params['user'], $event_id, $a['type'], $a['value'], $a['remove_tags'], empty($a['tags']) ? array() : $a['tags']);
+                                    $tagsRemoved += $removal['removed'];
+                                    if ($removal['matched']) {
+                                        continue;
+                                    }
+                                }
                                 $this->Attribute->create();
                                 $a['distribution'] = $attribute['distribution'];
                                 $a['sharing_group_id'] = $attribute['sharing_group_id'];
@@ -6876,7 +10248,6 @@ class Event extends AppModel
                                 } else {
                                     $a['comment'] = $comment;
                                 }
-                                $a['type'] = empty($a['default_type']) ? $a['types'][0] : $a['default_type'];
                                 $result = $this->Attribute->save($a);
                                 if ($result) {
                                     $attributes_added++;
@@ -7003,6 +10374,8 @@ class Event extends AppModel
         }
         $saved = 0;
         $failed = 0;
+        $removedTags = 0;
+        $removedGlobalTag = false;
         $attributeSources = array('attributes', 'ontheflyattributes');
         $ontheflyattributes = array();
         $i = 0;
@@ -7044,7 +10417,24 @@ class Event extends AppModel
                     $types = array($attribute['type']);
                 }
                 foreach ($types as $type) {
+                    // A result row can carry tags to strip from the attribute it points
+                    // at (`remove_tags` in a module result). When that attribute is
+                    // already in the event the row only changes its tags - creating it
+                    // again would just fail as a duplicate.
+                    if ($objectType === 'Attribute' && !empty($attribute['remove_tags'])) {
+                        $removal = $this->applyModuleTagChanges($user, $event['Event']['id'], $type, $attribute['value'], $attribute['remove_tags'], isset($attribute['tags']) ? $attribute['tags'] : array());
+                        $removedTags += $removal['removed'];
+                        $removedGlobalTag = $removedGlobalTag || $removal['global'];
+                        if ($removal['matched']) {
+                            continue;
+                        }
+                    }
                     $model->create();
+                    // Freetext import only ever creates new attributes. A client-supplied id
+                    // (this data can be raw JSON via saveFreeText) would redirect save() onto
+                    // an arbitrary existing attribute - create() does not strip it and there is
+                    // no fieldList here, so the injected id targets the UPDATE WHERE clause.
+                    unset($attribute['id']);
                     $attribute['type'] = $type;
                     if (empty($attribute['comment'])) {
                         $attribute['comment'] = $default_comment;
@@ -7067,6 +10457,7 @@ class Event extends AppModel
                             }
                         }
                     }
+                    unset($attribute[$model->alias]);
                     $saved_attribute = $model->save($attribute, ['parentEvent' => $event]);
                     if ($saved_attribute) {
                         $results[] = $saved_attribute;
@@ -7097,7 +10488,7 @@ class Event extends AppModel
         }
         $emailResult = '';
         $messageScope = $objectType === 'ShadowAttribute' ? 'proposals' : 'attributes';
-        if ($saved > 0) {
+        if ($saved > 0 || $removedGlobalTag) {
             if ($objectType !== 'ShadowAttribute') {
                 $this->unpublishEvent($id);
             } else {
@@ -7117,6 +10508,9 @@ class Event extends AppModel
         } else {
             $message = $saved . ' ' . $messageScopeSaved . ' created' . $emailResult . '.';
         }
+        if ($removedTags > 0) {
+            $message .= ' ' . __n('%s tag removed.', '%s tags removed.', $removedTags, $removedTags);
+        }
         if ($jobId) {
             $eventLock->deleteBackgroundJobLock($event['Event']['id'], $jobId);
             $this->Job->saveStatus($jobId, true, __('Processing complete. %s', $message));
@@ -7125,6 +10519,131 @@ class Event extends AppModel
             return $results;
         }
         return $message;
+    }
+
+    /**
+     * Apply the tag changes a module result asks for to the attributes of an event
+     * that carry a type/value.
+     *
+     * This is how an enrichment module retracts a verdict: a result row carrying
+     * `remove_tags` names tags that should no longer sit on the attribute the row
+     * points at. Only tags that are actually attached are taken off, and the tag has
+     * to exist already - a removal never creates one. The row's own `tags` are
+     * attached to the same attribute, so that one row can swap one verdict for
+     * another on an attribute the event already holds.
+     *
+     * @param array $user
+     * @param int $eventId
+     * @param string $type Attribute type of the row
+     * @param string $value Attribute value of the row
+     * @param array|string $removeTags Tag names to detach, as a list or a comma separated string
+     * @param array|string $addTags Tag names to attach, in the same two spellings
+     * @return array ['matched' => bool, 'removed' => int, 'global' => bool] - whether the
+     *      event holds a matching attribute, how many tags came off, and whether any
+     *      global (that is, synchronised) tag was touched.
+     */
+    public function applyModuleTagChanges(array $user, $eventId, $type, $value, $removeTags, $addTags = array())
+    {
+        $result = array('matched' => false, 'removed' => 0, 'global' => false);
+        if (empty($user['Role']['perm_site_admin']) && empty($user['Role']['perm_tagger'])) {
+            return $result;
+        }
+        $removeTagNames = $this->__moduleResultTagNames($removeTags);
+        $addTagNames = $this->__moduleResultTagNames($addTags);
+        $removeTagIds = array();
+        foreach ($removeTagNames as $tagName) {
+            $tagId = $this->Attribute->AttributeTag->Tag->lookupTagIdFromName($tagName);
+            if ($tagId != -1) {
+                $removeTagIds[$tagName] = $tagId;
+            }
+        }
+        $attributes = $this->Attribute->find('all', array(
+            'recursive' => -1,
+            'fields' => array('Attribute.id'),
+            'conditions' => array(
+                'Attribute.event_id' => $eventId,
+                'Attribute.deleted' => 0,
+                'Attribute.type' => $type,
+                'Attribute.value' => $value,
+            ),
+        ));
+        if (empty($attributes)) {
+            return $result;
+        }
+        // The row describes an attribute the event already holds, whether or not any
+        // of the named tags turn out to be attached to it.
+        $result['matched'] = true;
+        $log = $this->loadLog();
+        foreach ($attributes as $attribute) {
+            $attributeId = $attribute['Attribute']['id'];
+            foreach ($removeTagIds as $tagName => $tagId) {
+                $attributeTag = $this->Attribute->AttributeTag->find('first', array(
+                    'recursive' => -1,
+                    'fields' => array('AttributeTag.id', 'AttributeTag.local'),
+                    'conditions' => array(
+                        'AttributeTag.attribute_id' => $attributeId,
+                        'AttributeTag.tag_id' => $tagId,
+                    ),
+                ));
+                if (empty($attributeTag)) {
+                    continue;
+                }
+                if (!$this->Attribute->AttributeTag->detachTagFromAttribute($attributeId, $eventId, $tagId, null)) {
+                    continue;
+                }
+                $result['removed']++;
+                if (empty($attributeTag['AttributeTag']['local'])) {
+                    $result['global'] = true;
+                    $this->Attribute->touch($attributeId);
+                }
+                $log->createLogEntry(
+                    $user,
+                    'tag',
+                    'Attribute',
+                    $attributeId,
+                    'Removed tag (' . $tagId . ') "' . $tagName . '" from attribute (' . $attributeId . ')',
+                    'Attribute (' . $attributeId . ') untagged of Tag (' . $tagId . ')'
+                );
+            }
+            foreach ($addTagNames as $tagName) {
+                $tagId = $this->Attribute->AttributeTag->Tag->captureTag(array('name' => $tagName), $user);
+                if ($tagId === false) {
+                    continue; // the user is not allowed to use that tag
+                }
+                $nothingToChange = false;
+                $this->Attribute->AttributeTag->attachTagToAttribute($attributeId, $eventId, $tagId, false, false, $nothingToChange);
+                if (!$nothingToChange) {
+                    $result['global'] = true;
+                    $this->Attribute->touch($attributeId);
+                }
+            }
+        }
+        return $result;
+    }
+
+    /**
+     * The tag names of a module result key, which a module may spell as a list and the
+     * resolution screen posts back as one comma separated string.
+     *
+     * @param array|string|false $tagNames
+     * @return array
+     */
+    private function __moduleResultTagNames($tagNames)
+    {
+        if (empty($tagNames)) {
+            return array();
+        }
+        if (!is_array($tagNames)) {
+            $tagNames = explode(',', (string)$tagNames);
+        }
+        $names = array();
+        foreach ($tagNames as $tagName) {
+            $tagName = trim($tagName);
+            if ($tagName !== '') {
+                $names[] = $tagName;
+            }
+        }
+        return $names;
     }
 
     /**
@@ -7180,6 +10699,10 @@ class Event extends AppModel
             $processedAttributes = 0;
             foreach ($resolved_data['Attribute'] as $attribute) {
                 $this->Attribute->create();
+                // Module-result import (raw JSON from handleModuleResults/importModule) only
+                // creates attributes; strip any client id so it cannot redirect save() onto an
+                // arbitrary attribute row (no fieldList here, create() does not strip it).
+                unset($attribute['id']);
                 if (empty($attribute['comment'])) {
                     $attribute['comment'] = $default_comment;
                 }
@@ -7193,6 +10716,7 @@ class Event extends AppModel
                     $attribute = $this->Attribute->onDemandEncrypt($attribute);
                 }
                 $attribute['event_id'] = $id;
+                unset($attribute[$this->Attribute->alias]);
                 if ($this->Attribute->save($attribute)) {
                     $saved_attributes++;
                     if (!empty($attribute['Tag'])) {
@@ -7305,6 +10829,11 @@ class Event extends AppModel
                             $object_id = $current_object_id;
                         } else {
                             $this->Object->create();
+                            // New object only; strip any client id (the id is read above for
+                            // initialObject matching, never to target this save) so it cannot
+                            // redirect save() onto an arbitrary object row in another event.
+                            unset($object['id']);
+                            unset($object[$this->Object->alias]);
                             if ($this->Object->save($object)) {
                                 $object_id = $this->Object->id;
                                 foreach ($object['Attribute'] as $object_attribute) {
@@ -7325,6 +10854,10 @@ class Event extends AppModel
                         }
                     } else {
                         $this->Object->create();
+                        // New object only; strip any client id so it cannot redirect save()
+                        // onto an arbitrary object row (no fieldList here).
+                        unset($object['id']);
+                        unset($object[$this->Object->alias]);
                         if ($this->Object->save($object)) {
                             $object_id = $this->Object->id;
                             $saved_objects++;
@@ -7401,7 +10934,13 @@ class Event extends AppModel
             $total_reports = count($resolved_data['EventReport']);
             foreach ($resolved_data['EventReport'] as $i => $report) {
                 $this->EventReport->create();
+                // Module-result import only creates reports; strip any client id so a
+                // supplied existing report id cannot redirect save() onto another event's
+                // report row and reparent/overwrite it (no fieldList here, create() does
+                // not strip it) - matching the attribute and object loops above.
+                unset($report['id']);
                 $report['event_id'] = $id;
+                unset($report[$this->EventReport->alias]);
                 if ($this->EventReport->save($report)) {
                     $saved_reports++;
                 } else {
@@ -7591,6 +11130,11 @@ class Event extends AppModel
             $attribute = $this->Attribute->onDemandEncrypt($attribute);
         }
         $this->Attribute->create();
+        // Object-attribute capture only creates new attributes; strip any client id so it
+        // cannot redirect save() onto an arbitrary attribute (object_id/event_id are forced
+        // above, but the primary key is not, and there is no fieldList here).
+        unset($attribute['id']);
+        unset($attribute[$this->Attribute->alias]);
         $attribute_save = $this->Attribute->save($attribute, ['parentEvent' => $event]);
         if ($attribute_save) {
             if (!empty($attribute['Tag'])) {
@@ -8038,7 +11582,6 @@ class Event extends AppModel
         $tmpfile = new TmpFileTool();
         $tmpfile->write($exportTool->header($exportToolParams));
         $i = 0;
-        $this->Allowedlist = ClassRegistry::init('Allowedlist');
         $separator = $exportTool->separator($exportToolParams);
         unset($filters['page']);
         unset($filters['limit']);
@@ -8050,7 +11593,6 @@ class Event extends AppModel
                 unset($filters['tags']['NOT']);
             }
             $result = $this->fetchEvent($user, $filters, true);
-            $result = $this->Allowedlist->removeAllowedlistedFromArray($result, false);
             foreach ($result as $event) {
                 if ($jobId && $i % 10 == 0) {
                     $this->Job->saveField('progress', intval((100 * $i) / $eventCount));
@@ -8362,13 +11904,6 @@ class Event extends AppModel
         return $tags;
     }
 
-    public function recoverEvent($id)
-    {
-        $this->Log = ClassRegistry::init('Log');
-        $result = $this->Log->recoverDeletedEvent($id);
-        return $result;
-    }
-
     /**
      * @param array $event Event with assigned `EventTag`
      * @return string
@@ -8516,7 +12051,7 @@ class Event extends AppModel
                 'scope' => 'Attribute',
                 'requiresPublished' => 1,
                 'params' => array('returnFormat' => 'suricata'),
-                'description' => __('Click this to download all network related attributes that you have access to under the Suricata rule format. Only published events and attributes marked as IDS Signature are exported. Administration is able to maintain an allowedlist containing host, domain name and IP numbers to exclude from the NIDS export.'),
+                'description' => __('Click this to download all network related attributes that you have access to under the Suricata rule format. Only published events and attributes marked as IDS Signature are exported.'),
             ),
             'snort' => array(
                 'extension' => '.rules',
@@ -8524,7 +12059,7 @@ class Event extends AppModel
                 'scope' => 'Attribute',
                 'requiresPublished' => 1,
                 'params' => array('returnFormat' => 'snort'),
-                'description' => __('Click this to download all network related attributes that you have access to under the Snort rule format. Only published events and attributes marked as IDS Signature are exported. Administration is able to maintain an allowedlist containing host, domain name and IP numbers to exclude from the NIDS export.'),
+                'description' => __('Click this to download all network related attributes that you have access to under the Snort rule format. Only published events and attributes marked as IDS Signature are exported.'),
             ),
             'bro' => array(
                 'extension' => '.intel',
@@ -8532,7 +12067,7 @@ class Event extends AppModel
                 'scope' => 'Attribute',
                 'requiresPublished' => 1,
                 'params' => array('returnFormat' => 'bro'),
-                'description' => __('Click this to download all network related attributes that you have access to under the Bro rule format. Only published events and attributes marked as IDS Signature are exported. Administration is able to maintain an allowedlist containing host, domain name and IP numbers to exclude from the NIDS export.'),
+                'description' => __('Click this to download all network related attributes that you have access to under the Bro rule format. Only published events and attributes marked as IDS Signature are exported.'),
             ),
             'stix' => array(
                 'extension' => '.xml',
@@ -8650,7 +12185,7 @@ class Event extends AppModel
                     if (empty($analystData['object_type'])) {
                         $analystData['object_type'] = $parentObjectType;
                     }
-                    if (empty($analystData['object_uuid'])) {
+                    if (empty($analystData['object_uuid']) && $analystData['object_type'] === $parentObjectType) {
                         $analystData['object_uuid'] = $parentObjectUUID;
                     }
                     $this->{$type}->captureAnalystData($user, $analystData);
@@ -8659,7 +12194,7 @@ class Event extends AppModel
         }
     }
 
-    public function runWorkflow($event_id, $workflow_ids)
+    public function runWorkflow($event_id, $workflow_ids, $env_vars)
     {
         $this->Workflow = ClassRegistry::init('Workflow');
         $payload = [
@@ -8674,7 +12209,8 @@ class Event extends AppModel
             if (!$this->Workflow->isAdHocWorkflow($workflow_id)) {
                 throw new MethodNotAllowedException("Can only run a Ad-Hoc Workflow");
             }
-            $result = $this->Workflow->executeWorkflow($workflow_id, $payload);
+            $errors = [];
+            $result = $this->Workflow->executeWorkflow($workflow_id, $payload, $errors, $env_vars);
             if (!empty($result['success'])) {
                 $all_results['success_count'] += 1;
             } else {

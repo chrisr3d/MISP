@@ -27,6 +27,8 @@ class GalaxiesController extends AppController
             'quickFilters' => ['name', 'namespace', 'description', 'kill_chain_order', 'uuid'],
             'quickFilterParameter' => 'value',
             'conditions' => ['AND' => $aclConditions],
+            // For Overmind, card index
+            'contain' => ['Org', 'Orgc'],
             'order' => ['Galaxy.id' => 'DESC']
         ];
         $this->CRUD->index($params);
@@ -95,6 +97,34 @@ class GalaxiesController extends AppController
             $distributionLevels = $this->MispAttribute->distributionLevels;
             $this->set('distributionLevels', $distributionLevels);
             $this->set('shortDist', $this->MispAttribute->shortDist);
+            $clusterCount = $this->Galaxy->GalaxyCluster->find('count', [
+                'recursive' => -1,
+                'conditions' => [
+                    'AND' => [
+                        $this->Galaxy->GalaxyCluster->buildConditions($this->Auth->user()),
+                        'GalaxyCluster.galaxy_id' => $id,
+                        'GalaxyCluster.deleted' => false,
+                    ],
+                ],
+            ]);
+            $this->set('clusterCount', $clusterCount);
+            $this->set('clusterPreview', $this->Galaxy->GalaxyCluster->find('all', [
+                'recursive' => -1,
+                'fields' => [
+                    'GalaxyCluster.id', 'GalaxyCluster.value', 'GalaxyCluster.default',
+                    'GalaxyCluster.distribution',
+                    'LEFT(GalaxyCluster.description, 120) AS short_description',
+                ],
+                'conditions' => [
+                    'AND' => [
+                        $this->Galaxy->GalaxyCluster->buildConditions($this->Auth->user()),
+                        'GalaxyCluster.galaxy_id' => $id,
+                        'GalaxyCluster.deleted' => false,
+                    ],
+                ],
+                'order' => ['GalaxyCluster.value'],
+                'callbacks' => false,
+            ]));
         }
     }
 
@@ -126,6 +156,10 @@ class GalaxiesController extends AppController
 
         $this->__setDistribution();
         $this->set('action', 'add');
+
+        if ($this->theme === 'Overmind' && $this->request->is('ajax')) {
+            $this->layout = false;
+        }
     }
 
     public function edit($id)
@@ -163,11 +197,13 @@ class GalaxiesController extends AppController
             $this->request->data = $this->Galaxy->data;
         }
 
-        
         $this->set('id', $galaxy['Galaxy']['id']);
         $this->set('galaxy', $galaxy);
         $this->set('action', 'edit');
         $this->__setDistribution();
+        if ($this->theme === 'Overmind' && $this->request->is('ajax')) {
+            $this->layout = false;
+        }
         $this->render('add');
     }
 
@@ -207,6 +243,97 @@ class GalaxiesController extends AppController
         return $this->toggle($id, false);
     }
 
+    public function toggleEnable($id)
+    {
+        return $this->toggle($id);
+    }
+
+    public function deleteSelection($id = null)
+    {
+        return $this->CRUD->deleteSelection($id, [
+            'modelName' => 'Galaxy',
+            'restName' => 'Galaxies',
+            'itemName' => 'galaxy',
+            'view' => 'ajax/galaxyDeleteConfirmationForm',
+            'checkModifyCallback' => function () {
+                return $this->_isSiteAdmin();
+            },
+            'multiSuccessMessageCallback' => function ($count) {
+                return __n('%s galaxy deleted.', '%s galaxies deleted.', $count, $count);
+            }
+        ]);
+    }
+
+    public function massEnable($idList = null)
+    {
+        return $this->_massToggleState($idList, 1);
+    }
+
+    public function massDisable($idList = null)
+    {
+        return $this->_massToggleState($idList, 0);
+    }
+
+    private function _massToggleState($idList = null, $state = null)
+    {
+        if (!$this->_isSiteAdmin()) {
+            throw new MethodNotAllowedException(__('Insufficient privileges'));
+        }
+        $ids = $this->_massActionIdList($idList, 'Galaxy');
+
+        if (empty($ids)) {
+            $message = __('Invalid IDs provided.');
+            if ($this->_isRest()) {
+                return $this->RestResponse->saveFailResponse('Galaxies', 'massToggle', false, $message, $this->response->type());
+            }
+            return new CakeResponse([
+                'body' => json_encode(['saved' => false, 'errors' => $message]),
+                'status' => 200,
+                'type' => 'json'
+            ]);
+        }
+
+        if ($this->request->is('post') || $this->request->is('put')) {
+            $successCount = 0;
+            foreach ($ids as $id) {
+                $galaxy = $this->Galaxy->find('first', [
+                    'conditions' => ['Galaxy.id' => $id],
+                    'recursive' => -1,
+                ]);
+                if (empty($galaxy)) {
+                    continue;
+                }
+                $galaxy['Galaxy']['enabled'] = $state;
+                if ($this->Galaxy->save($galaxy)) {
+                    $successCount++;
+                }
+            }
+            $message = __('%s galaxies successfully %s.', $successCount, $state ? __('enabled') : __('disabled'));
+            if ($this->_isRest()) {
+                return $this->RestResponse->saveSuccessResponse('Galaxies', 'massToggle', false, $this->response->type(), $message);
+            }
+            if ($this->request->is('ajax')) {
+                return new CakeResponse([
+                    'body' => json_encode(['saved' => true, 'success' => $message]),
+                    'status' => 200,
+                    'type' => 'json'
+                ]);
+            }
+            $this->Flash->success($message);
+            return $this->redirect($this->referer(['action' => 'index']));
+        }
+
+        $this->layout = false;
+        $this->set('actionText', $state ? __('enable') : __('disable'));
+        $this->set('idArray', $ids);
+        $this->set('state', $state);
+        // The confirmation form carries the list back in Galaxy.id - a
+        // JSON list in the POST URL is black-holed, see _massActionIdList().
+        $this->request->data['Galaxy']['id'] = json_encode($ids);
+        $this->set('url', '/galaxies/' . ($state ? 'massEnable' : 'massDisable'));
+        $this->render('ajax/galaxyToggleConfirmationForm');
+    }
+
     public function toggle($id, $enabled=null)
     {
         $galaxy = $this->Galaxy->fetchIfAuthorized($this->Auth->user(), $id, 'edit', true);
@@ -218,58 +345,111 @@ class GalaxiesController extends AppController
             }
             $result = $this->Galaxy->save($galaxy);
             if ($result) {
-                $message = __('Galaxy %s', $enabled ? __('enabled') : __('disabled'));
+                $message = __('Galaxy %s', $galaxy['Galaxy']['enabled'] ? __('enabled') : __('disabled'));
                 if ($this->_isRest()) {
                     return $this->RestResponse->saveSuccessResponse('Galaxy', 'toggle', false, $this->response->type(), $message);
                 } else {
                     $this->Flash->success($message);
-                    $this->redirect(array('controller' => 'galaxies', 'action' => 'index'));
+                    $this->redirect($this->referer(array('controller' => 'galaxies', 'action' => 'index')));
                 }
             } else {
                 $message = __('Could not enable Galaxy.');
                 if ($this->_isRest()) {
                     return $this->RestResponse->saveFailResponse('Galaxy', 'toggle', false, $message);
                 } else {
-                    $this->Flash->success($message);
+                    $this->Flash->error($message);
                     $this->redirect($this->referer());
                 }
             }
+        } else {
+            // GET → render the enable/disable confirmation modal (Overmind).
+            $currentlyEnabled = !empty($galaxy['Galaxy']['enabled']);
+            $willEnable = is_null($enabled) ? !$currentlyEnabled : $enabled;
+            $this->set('actionText', $willEnable ? __('enable') : __('disable'));
+            $this->set('idArray', [$id]);
+            $this->set('url', '/galaxies/' . $this->request->params['action'] . '/' . $id);
+            $this->layout = false;
+            $this->render('ajax/galaxyToggleConfirmationForm');
         }
     }
 
     public function import()
     {
         if ($this->request->is('post') || $this->request->is('put')) {
+            $clusters = null;
             if ($this->_isRest()) {
                 $clusters = $this->request->data;
             } else {
                 $data = $this->request->data['Galaxy'];
-                $text = FileAccessTool::getTempUploadedFile($data['submittedjson'], $data['json']);
+                $text = null;
                 try {
-                    $clusters = JsonTool::decodeArray($text);
+                    $text = FileAccessTool::getTempUploadedFile($data['submittedjson'], $data['json']);
                 } catch (Exception $e) {
-                    throw new BadRequestException(__('Error while decoding JSON'));
+                    $this->Flash->error($e->getMessage());
+                }
+                if ($text !== null) {
+                    if (trim($text) === '') {
+                        $this->Flash->error(__('Nothing to import - paste a galaxy cluster JSON, or pick a file to upload.'));
+                    } else {
+                        try {
+                            $clusters = JsonTool::decodeArray($text);
+                        } catch (Exception $e) {
+                            $this->Flash->error(__('Could not import galaxy clusters. The submitted document is not valid JSON.'));
+                        }
+                    }
                 }
             }
-            $saveResult = $this->Galaxy->importGalaxyAndClusters($this->Auth->user(), $clusters);
-            if ($saveResult['success']) {
-                $message = __('Galaxy clusters imported. %s imported, %s ignored, %s failed. %s', $saveResult['imported'], $saveResult['ignored'], $saveResult['failed'], !empty($saveResult['errors']) ? implode(', ', $saveResult['errors']) : '');
-                if ($this->_isRest()) {
-                    return $this->RestResponse->saveSuccessResponse('Galaxy', 'import', false, $this->response->type(), $message);
+            if ($clusters !== null) {
+                $saveResult = $this->Galaxy->importGalaxyAndClusters($this->Auth->user(), $clusters);
+                $counts = __('%s imported, %s ignored, %s failed.', $saveResult['imported'], $saveResult['ignored'], $saveResult['failed']);
+                $errors = $this->__summariseImportErrors($saveResult['errors']);
+                if ($saveResult['success']) {
+                    $message = trim(__('Galaxy clusters imported. ') . $counts . ($errors === '' ? '' : ' ' . $errors));
+                    if ($this->_isRest()) {
+                        return $this->RestResponse->saveSuccessResponse('Galaxy', 'import', false, $this->response->type(), $message);
+                    } else {
+                        $this->Flash->success($message);
+                        $this->redirect(array('controller' => 'galaxies', 'action' => 'index'));
+                    }
                 } else {
-                    $this->Flash->success($message);
-                    $this->redirect(array('controller' => 'galaxies', 'action' => 'index'));
-                }
-            } else {
-                $message = __('Could not import galaxy clusters. %s imported, %s ignored, %s failed. %s', $saveResult['imported'], $saveResult['ignored'], $saveResult['failed'], !empty($saveResult['errors']) ? implode(', ', $saveResult['errors']) : '');
-                if ($this->_isRest()) {
-                    return $this->RestResponse->saveFailResponse('Galaxy', 'import', false, $message);
-                } else {
-                    $this->Flash->error($message);
+                    $message = trim(__('Could not import galaxy clusters. ') . $counts . ($errors === '' ? '' : ' ' . $errors));
+                    if ($this->_isRest()) {
+                        return $this->RestResponse->saveFailResponse('Galaxy', 'import', false, $message);
+                    } else {
+                        $this->Flash->error($message);
+                        $this->redirect(array('controller' => 'galaxies', 'action' => 'index'));
+                    }
                 }
             }
         }
         $this->set('action', 'import');
+        if ($this->theme === 'Overmind' && $this->request->is('ajax')) {
+            $this->layout = false;
+        }
+    }
+
+    /**
+     * One line per distinct complaint, with a count when it repeated
+     *
+     * @param array $errors
+     * @return strings
+     */
+    private function __summariseImportErrors(array $errors)
+    {
+        $flat = [];
+        foreach ($errors as $error) {
+            $flat[] = is_array($error) ? implode(' ', Hash::flatten($error)) : (string)$error;
+        }
+        $summary = [];
+        foreach (array_count_values($flat) as $error => $count) {
+            $summary[] = $count > 1 ? sprintf('%s (x%s)', $error, $count) : $error;
+        }
+        if (count($summary) > 5) {
+            $rest = count($summary) - 5;
+            $summary = array_slice($summary, 0, 5);
+            $summary[] = __('and %s more', $rest);
+        }
+        return implode(', ', $summary);
     }
 
     // Ingests clusters coming from a sync request
@@ -334,6 +514,9 @@ class GalaxiesController extends AppController
             $distributionLevels[4] = __('All sharing groups');
             $this->set('distributionLevels', $distributionLevels);
             $this->set('action', 'export');
+            if ($this->theme === 'Overmind' && $this->request->is('ajax')) {
+                $this->layout = false;
+            }
         }
     }
 
@@ -563,8 +746,13 @@ class GalaxiesController extends AppController
 
         if ($this->request->is('post')) {
             $user = $this->Auth->user();
+            $isBulkEvent = $target_id === 'selected' && $target_type === 'event';
             if ($target_id === 'selected') {
-                $target_id_list = $this->_jsonDecode($this->request->data['Galaxy']['attribute_ids']);
+                if ($target_type === 'event') {
+                    $target_id_list = $this->_jsonDecode($this->request->data['Galaxy']['event_ids'] ?? '[]');
+                } else {
+                    $target_id_list = $this->_jsonDecode($this->request->data['Galaxy']['attribute_ids']);
+                }
             } else {
                 $target_id_list = array($target_id);
             }
@@ -591,6 +779,9 @@ class GalaxiesController extends AppController
             $result = "";
             if (!is_array($cluster_ids)) { // in case we only want to attach 1
                 $cluster_ids = array($cluster_ids);
+            }
+            if ($isBulkEvent) {
+                return $this->__attachClustersToSelectedEvents($user, $target_id_list, $cluster_ids, $local);
             }
             foreach ($cluster_ids as $cluster_id) {
                 foreach ($target_id_list as $target_id) {
@@ -628,6 +819,122 @@ class GalaxiesController extends AppController
         $this->layout = false;
         $this->autoRender = false;
         $this->render('/Galaxies/ajax/attach_multiple_clusters');
+    }
+
+    /**
+     * Bulk path for the event index multi-select: skip-and-count semantics and
+     * a per-event global→local downgrade instead of the abort-on-first-error
+     * behaviour of the attribute branch.
+     *
+     * @param array $user
+     * @param array $eventIdList
+     * @param array $clusterIds
+     * @param bool $local true = local everywhere; false = global preference,
+     *                    downgraded per event when the event is not modifiable
+     * @return CakeResponse
+     */
+    private function __attachClustersToSelectedEvents(array $user, array $eventIdList, array $clusterIds, $local)
+    {
+        $eventIdList = array_values(array_unique($eventIdList));
+        if (empty($eventIdList)) {
+            return new CakeResponse(array('body' => json_encode(array('saved' => false, 'errors' => __('Nothing to add.'))), 'status' => 200, 'type' => 'json'));
+        }
+        if (!$local) {
+            // A cluster from a local_only galaxy under a global preference would
+            // yield surprising mixed outcomes across the selection — reject the
+            // batch up front (mirrors the mass-tag rule).
+            foreach ($clusterIds as $clusterId) {
+                $cluster = $this->Galaxy->GalaxyCluster->fetchGalaxyClusters($user, array(
+                    'first' => true,
+                    'conditions' => array('GalaxyCluster.id' => $clusterId),
+                    'contain' => array('Galaxy'),
+                    'fields' => array('id', 'value', 'Galaxy.local_only'),
+                ));
+                if (!empty($cluster['GalaxyCluster']['Galaxy']['local_only'])) {
+                    $message = __('Cluster "%s" can only be attached in a local scope — use the local action instead.', $cluster['GalaxyCluster']['value']);
+                    return new CakeResponse(array('body' => json_encode(array('saved' => false, 'errors' => $message)), 'status' => 200, 'type' => 'json'));
+                }
+            }
+        }
+        $attached = 0;
+        $downgraded = 0;
+        $skipped = 0;
+        $failed = 0;
+        $eventsTagged = 0;
+        $eventsDowngraded = 0;
+        foreach ($eventIdList as $eventId) {
+            $target = false;
+            if (is_numeric($eventId)) {
+                $target = $this->Galaxy->fetchTarget($user, 'event', $eventId);
+            }
+            if (empty($target)) {
+                $failed += count($clusterIds);
+                continue;
+            }
+            // The global/local choice is a preference: a global attach is
+            // downgraded to local when the user cannot modify the event itself.
+            // Decided per event, server-side only — the named `local` param can
+            // force local but never grant global.
+            $effectiveLocal = $local || !$this->ACL->canModifyEvent($user, $target);
+            if (!$this->ACL->canModifyTag($user, $target, $effectiveLocal)) {
+                $failed += count($clusterIds);
+                continue;
+            }
+            $savedAny = false;
+            foreach ($clusterIds as $clusterId) {
+                try {
+                    $result = $this->Galaxy->attachCluster($user, 'event', $target, $clusterId, $effectiveLocal);
+                } catch (NotFoundException $e) {
+                    // unknown or invisible cluster
+                    $failed++;
+                    continue;
+                } catch (MethodNotAllowedException $e) {
+                    // local_only safety net — normally rejected up front
+                    $failed++;
+                    continue;
+                }
+                if ($result === 'Cluster attached.') {
+                    $savedAny = true;
+                    if ($effectiveLocal && !$local) {
+                        $downgraded++;
+                    } else {
+                        $attached++;
+                    }
+                } elseif ($result === 'Cluster already attached.') {
+                    $skipped++;
+                } else {
+                    $failed++;
+                }
+            }
+            if ($savedAny) {
+                $eventsTagged++;
+                if ($effectiveLocal && !$local) {
+                    $eventsDowngraded++;
+                }
+            }
+        }
+        $message = __n('Cluster(s) attached to %s event', 'Cluster(s) attached to %s events', $eventsTagged, $eventsTagged);
+        $details = [];
+        if ($eventsDowngraded) {
+            $details[] = __('%s as local — no modify permission', $eventsDowngraded);
+        }
+        if ($skipped) {
+            $details[] = __n('%s duplicate skipped', '%s duplicates skipped', $skipped, $skipped);
+        }
+        if ($failed) {
+            $details[] = __n('%s failed', '%s failed', $failed, $failed);
+        }
+        if (!empty($details)) {
+            $message .= ' (' . implode(', ', $details) . ')';
+        }
+        $message .= '.';
+        $counts = array('attached' => $attached, 'downgraded' => $downgraded, 'skipped' => $skipped, 'failed' => $failed);
+        if ($attached + $downgraded > 0) {
+            $body = array_merge(array('saved' => true, 'success' => $message, 'check_publish' => true), $counts);
+        } else {
+            $body = array_merge(array('saved' => false, 'errors' => $message), $counts);
+        }
+        return new CakeResponse(array('body' => json_encode($body), 'status' => 200, 'type' => 'json'));
     }
 
     public function viewGraph($id)

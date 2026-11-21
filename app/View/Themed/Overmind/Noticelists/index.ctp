@@ -1,108 +1,153 @@
 <?php
+// Title of the index displayed in the header section, leaving it empty will fallback to controller name
+$headerTitle = __('');
+
+// Description displayed under the title in the header section, leave empty if not needed
+$headerDescription = __('');
+
+// Actions displayed as buttons in the header section, leave empty if not needed
+$headerActions = [];
+if ($this->Acl->canAccess('noticelists', 'update')) {
+    $headerActions[] = [
+        'type' => 'action',
+        'label' => __('Update Noticelists'),
+        'icon' => 'sync',
+        'url' => $baseurl . '/noticelists/update'
+    ];
+}
+
+$this->set('headerTitle', $headerTitle);
+$this->set('headerDescription', $headerDescription);
+$this->set('headerActions', $headerActions);
+
+
 $fields = [
     [
-        'element' => 'selector',
+        'element' => 'checkbox',
         'data_path' => 'Noticelist.id',
+        'enable_path' => 'Noticelist.enabled',
         'card_section' => 'selector',
-        'actions' => [
-            [
-                'type' => 'link',
-                'label' => __('View'),
-                'icon' => 'eye',
-                'url' => $baseurl . '/noticelists/view/%id%'
-            ],
-            [
-                'type' => 'toggle',
-                'label_on' => __('Disable'),
-                'label_off' => __('Enable'),
-                'icon_on' => 'times-circle text-danger',
-                'icon_off' => 'check-circle text-success',
-                'url' => '/noticelists/toggleEnable/%id%',
-                'state_path' => 'Noticelist.enabled',
-                'requirement' => $isSiteAdmin
-            ]
-        ]
     ],
     [
         'name' => __('ID'),
         'sort' => 'Noticelist.id',
         'data_path' => 'Noticelist.id',
         'element' => 'id',
-        'card_section' => 'meta'
+        'url' => $baseurl . '/noticelists/view/%id%',
+        'card_section' => 'top',
+        'display_in' => ['table', 'card']
     ],
     [
         'name' => __('Name'),
         'sort' => 'Noticelist.name',
         'data_path' => 'Noticelist.name',
-        'card_section' => 'title'
+        'card_section' => 'title',
+        'display_in' => ['table', 'card']
     ],
     [
         'name' => __('Expanded Name'),
         'sort' => 'Noticelist.expanded_name',
         'data_path' => 'Noticelist.expanded_name',
-        'card_section' => 'title'
+        'card_section' => 'title',
+        'display_in' => ['table', 'card']
     ],
     [
         'name' => __('Ref'),
         'data_path' => 'Noticelist.ref',
         'element' => 'links',
-        'card_section' => 'links'
+        'card_section' => 'links',
+        'display_in' => ['table', 'card']
     ],
     [
         'name' => __('Geographical area'),
         'data_path' => 'Noticelist.geographical_area',
-        'element' => 'flag',
-        'card_section' => 'extra'
+        'element' => 'country',
+        'card_section' => 'top',
+        'display_in' => ['table', 'card']
     ],
     [
         'name' => __('Version'),
         'data_path' => 'Noticelist.version',
         'element' => 'version',
-        'card_section' => 'meta'
+        'card_section' => 'top',
+        'display_in' => ['table', 'card']
     ],
     [
         'name' => __('Enabled'),
         'data_path' => 'Noticelist.enabled',
         'element' => 'enabled',
-        'card_section' => 'meta',
+        'card_section' => 'top',
         'requirement' => $isSiteAdmin,
+        'display_in' => ['table', 'card']
     ],
     [
         'name' => __('Default'),
         'data_path' => 'Noticelist.enabled',
-        'element' => 'boolean',
-        'card_section' => 'meta',
+        'element' => 'default',
+        'card_section' => 'top',
         'colors' => true,
         'requirement' => !$isSiteAdmin,
+        'display_in' => ['table', 'card']
     ],
+    [
+        'name' => __('Actions'),
+        'element' => 'row_actions',
+        'data_path' => 'Noticelist.id',
+        'enable_path' => 'Noticelist.enabled',
+        'card_section' => 'extra',
+        'actions' => [
+            [
+                'type' => 'navigate',
+                'label' => __('View'),
+                'icon' => 'eye',
+                'url' => $baseurl . '/noticelists/view/%id%'
+            ],
+            [
+                'type' => 'modal',
+                'label' => __('Disable'),
+                'icon' => 'fas fa-stop text-danger',
+                'url' => $baseurl . '/noticelists/massDisable/%id%',
+                'size' => 'md',
+                'requirement' => function ($row) use ($isSiteAdmin) {
+                    return $isSiteAdmin && !empty($row['Noticelist']['enabled']);
+                },
+            ],
+            [
+                'type' => 'modal',
+                'label' => __('Enable'),
+                'icon' => 'fas fa-play text-success',
+                'url' => $baseurl . '/noticelists/massEnable/%id%',
+                'size' => 'md',
+                'requirement' => function ($row) use ($isSiteAdmin) {
+                    return $isSiteAdmin && empty($row['Noticelist']['enabled']);
+                },
+            ]
+        ]
+    ]
 ];
 
-if ($this->Acl->canAccess('noticelists', 'update')) {
-    $this->set('headerActions', [
-        [
-            'url' => $baseurl . '/noticelists/update',
-            'label' => __('Update Noticelists'),
-            'icon' => 'sync'
-        ]
-    ]);
-}
 
 echo $this->element('genericElementsBS5/IndexTable/scaffold', [
     'scaffold_data' => [
         'data' => [
             'data' => $data,
-            'top_bar' => [
+            'cards_per_row' => ['' => 1, 'lg' => 2, 'xxxxl' => 3],
+            'filter_bar' => [
                 'pull' => 'right',
                 'children' => [
                     [
                         'type' => 'search',
                         'button' => __('Filter'),
-                        'placeholder' => __('Enter value to search'),
+                        'placeholder' => __('Not available for the moment'),
                         'searchKey' => 'quickFilter',
                     ]
-                ]
+                ],
+                'enable' => 1
             ],
             'fields' => $fields,
+            'primary_id_path' => 'Noticelist.id',
+            'row_dblclick_url' => $baseurl . '/noticelists/view/%id%',
         ]
-    ]
+    ],
+    'item_url' => '/noticelists'
 ]);

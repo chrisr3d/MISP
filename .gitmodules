@@ -1,7 +1,7 @@
 [submodule "app/Lib/cakephp"]
 	path = app/Lib/cakephp
-	url = https://github.com/MISP/cakephp.git
-	branch = 2.x
+	url = https://github.com/MISP/sachertortephp.git
+	branch = main
 [submodule "PyMISP"]
 	path = PyMISP
 	url = https://github.com/MISP/PyMISP.git
@@ -62,3 +62,10 @@
 	path = app/files/misp-workflow-blueprints
 	url = https://github.com/MISP/misp-workflow-blueprints
 	branch = main
+[submodule "app/files/misp-event-templates"]
+	path = app/files/misp-event-templates
+	url = https://github.com/MISP/misp-event-templates
+	branch = main
+[submodule "app/files/misp-iconify"]
+	path = app/files/misp-iconify
+	url = https://github.com/MISP/misp-iconify.git

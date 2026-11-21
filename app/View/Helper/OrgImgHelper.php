@@ -54,6 +54,32 @@ class OrgImgHelper extends AppHelper
         return $this->getOrgImg($options, true, !$withLink);
     }
 
+
+    /**
+     * @param array $organisation
+     * @param int $size
+     * @param bool $withLink
+     * @return string
+     */
+    public function getOrgLogoV2(array $organisation, $size, $withLink = true)
+    {
+        if (isset($organisation['Organisation'])) {
+            $options = $organisation['Organisation'];
+        } else {
+            $options = $organisation;
+        }
+
+        $options['size'] = $size;
+
+        //If there is no logo for the organisation, return nothing
+        $orgImgName = $this->findOrgImage($options);
+        if (!$orgImgName) {
+            return '';
+        }
+
+        return $this->getOrgImg($options, true, !$withLink);
+    }
+
     /**
      * @param array $organisation
      * @return string|null
@@ -128,9 +154,17 @@ class OrgImgHelper extends AppHelper
         $image = null;
         foreach (['id', 'name', 'uuid'] as $field) {
             if (isset($options[$field])) {
+                // The field value becomes a filename under IMG_PATH, and the org
+                // name is attacker-controllable (event import sets Org.name), so
+                // reject anything that is not a plain filename component and could
+                // traverse out of the org-image directory.
+                $value = (string)$options[$field];
+                if ($value === '' || $value !== basename($value) || strpos($value, '..') !== false) {
+                    continue;
+                }
                 foreach (['png', 'svg'] as $extensions) {
-                    if (file_exists(self::IMG_PATH . $options[$field] . '.' . $extensions)) {
-                        $image = $options[$field] . '.' . $extensions;
+                    if (file_exists(self::IMG_PATH . $value . '.' . $extensions)) {
+                        $image = $value . '.' . $extensions;
                         break 2;
                     }
                 }

@@ -1,6 +1,6 @@
 <?php
     $selectAllCheckbox = false;
-    echo '<thead>';
+    echo '<thead class="checkbox-index">';
     foreach ($fields as $k => $header) {
         if (!isset($header['requirement']) || $header['requirement']) {
             $header_data = '';
@@ -26,12 +26,12 @@
                     $header_data = $paginator->sort($header['sort']);
                 }
             } else {
-                if (!empty($header['element']) && $header['element'] === 'selector') {
+                if (!empty($header['element']) && in_array($header['element'], ['selector', 'checkbox'])) {
                     $selectAllCheckbox = true;
                     $header_data = sprintf(
-                        '<input id="select_all" class="%s" type="checkbox" %s>',
+                        '<input id="select_all" class="%s ms-1" type="checkbox" %s>',
                         empty($header['select_all_class']) ? 'select_all' : $header['select_all_class'],
-                        empty($header['select_all_function']) ? 'onclick="toggleAllAttributeCheckboxes();"' : 'onclick="' . $header['select_all_function'] . '"'
+                        empty($header['select_all_function']) ? 'onclick="toggleAllAttributeCheckboxes(this);"' : 'onclick="' . $header['select_all_function'] . '"'
                     );
                 } else {
                     $header_data = $header['name'];
@@ -46,6 +46,10 @@
                 $header_data = "<div><span>$header_data</span></div>";
             }
 
+            if (!empty($header['actions'])) {
+                $header_data = "<div class='me-2'><span>$header_data</span></div>";
+            }
+
             echo sprintf(
                 '<th%s%s>%s</th>',
                 !empty($classes) ? ' class="' . implode(' ', $classes) .'"' : '',
@@ -54,24 +58,5 @@
             );
         }
     }
-    if ($actions) {
-        echo sprintf(
-            '<th class="actions">%s</th>',
-            __('Actions')
-        );
-    }
     echo '</thead>';
 ?>
-<?php if ($selectAllCheckbox): ?>
-<script>
-    $(function() {
-        $('.select_attribute').add('#select_all').on('change', function() {
-            if ($('.select_attribute:checked').length > 0) {
-                $('.mass-select').show();
-            } else {
-                $('.mass-select').hide();
-            }
-        });
-    });
-</script>
-<?php endif; ?>

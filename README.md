@@ -11,6 +11,7 @@ The objective of MISP is to foster the sharing of structured information within 
   &nbsp;&nbsp;&#x25CF;&nbsp;&nbsp;<a href="#installation">Installation</a>
   &nbsp;&nbsp;&#x25CF;&nbsp;&nbsp;<a href="#documentation">Documentation</a>
   &nbsp;&nbsp;&#x25CF;&nbsp;&nbsp;<a href="#contributing">Contributing</a><br>
+  &nbsp;&nbsp;&#x25CF;&nbsp;&nbsp;<a href="#privacy">Privacy</a>
   &nbsp;&nbsp;&#x25CF;&nbsp;&nbsp;<a href="#license">License</a>
 
 <table>
@@ -42,6 +43,11 @@ The objective of MISP is to foster the sharing of structured information within 
   </tr><tr>
      <td>License</td>
   <td><img src="https://img.shields.io/github/license/MISP/MISP.svg" height="25" /></td>
+    </tr><tr>
+    <td>Software Heritage ID</td>
+  <td> <a href="https://archive.softwareheritage.org/browse/origin/?origin_url=https://github.com/MISP/MISP">
+  <img src="https://archive.softwareheritage.org/badge/origin/https://github.com/MISP/MISP/" alt="Archived | https://github.com/MISP/MISP"/>
+</a> </td>
 </tr>
 </table>
 
@@ -120,6 +126,17 @@ Documentation
 
 It is also recommended to read the [FAQ](https://github.com/MISP/MISP/wiki/Frequently-Asked-Questions)
 
+Privacy
+-------
+
+MISP is software that organisations operate in their own environments. Privacy
+and data-protection responsibilities therefore depend on the relevant instance,
+operator, processing activity, and applicable jurisdiction or sector. The GDPR
+guidance is relevant only where the GDPR applies; other legal or regulatory
+frameworks may apply instead of, or in addition to, it. See the
+[MISP privacy statement](PRIVACY.md) for details and a reference to the
+project's GDPR guidance.
+
 Contributing
 ------------
 
@@ -147,16 +164,16 @@ License
 
 This software is licensed under [GNU Affero General Public License version 3](http://www.gnu.org/licenses/agpl-3.0.html)
 
-* Copyright (C) 2012-2024 Christophe Vandeplas
+* Copyright (C) 2012-2026 Christophe Vandeplas
 * Copyright (C) 2012 Belgian Defence
 * Copyright (C) 2012 NATO / NCIRC
-* Copyright (C) 2013-2024 Andras Iklody
-* Copyright (C) 2015-2024 CIRCL - Computer Incident Response Center Luxembourg
+* Copyright (C) 2013-2026 Andras Iklody
+* Copyright (C) 2015-2026 CIRCL - Computer Incident Response Center Luxembourg
 * Copyright (C) 2016 Andreas Ziegler
-* Copyright (C) 2018-2024 Sami Mokaddem
-* Copyright (C) 2018-2024 Christian Studer
-* Copyright (C) 2015-2024 Alexandre Dulaunoy
+* Copyright (C) 2018-2026 Sami Mokaddem
+* Copyright (C) 2018-2026 Christian Studer
+* Copyright (C) 2015-2026 Alexandre Dulaunoy
 * Copyright (C) 2018-2022 Steve Clement
-* Copyright (C) 2020-2024 Jakub Onderka
+* Copyright (C) 2020-2026 Jakub Onderka
 
 For more information, [the list of authors and contributors](AUTHORS) is available.

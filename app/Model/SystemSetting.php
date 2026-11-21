@@ -14,6 +14,9 @@ class SystemSetting extends AppModel
     // Blocked setting that cannot be saved or fetched from DB. The same as cli_only settings.
     const BLOCKED_SETTINGS = [
         'Security.encryption_key',
+        'Security.salt',
+        'Security.password_policy_length',
+        'Security.password_policy_complexity',
         'Security.disable_local_feed_access',
         'GnuPG.binary',
         'MISP.python_bin',
@@ -191,7 +194,7 @@ class SystemSetting extends AppModel
         if ($setting === 'Security.encryption_key' || $setting === 'Security.salt') {
             return true;
         }
-        if (str_starts_with($setting, 'Plugin.') && (str_contains($setting, 'apikey') || str_contains($setting, 'secret'))) {
+        if (str_starts_with($setting, 'Plugin.') && (str_contains($setting, 'apikey') || str_contains($setting, 'api_key') || str_contains($setting, 'secret'))) {
             return true;
         }
         return str_contains($setting, 'password');

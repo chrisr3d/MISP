@@ -5,7 +5,7 @@
 // 2️⃣ Redefine current variables
 $theme-colors: (
   "primary": #1892B1,
-  "secondary": #6c757d,
+  "secondary": #95A3B3,
   "success": #198754,
   "info": #0dcaf0,
   "warning": #ffc107,
@@ -16,7 +16,19 @@ $theme-colors: (
 
 // 3️⃣ Add custom variables
 $custom-colors: (
-  "mycolor": #ff5733
+  "event": #1892B1,
+  "object": #524948,
+  "attribute": #97CC04,
+  "tag": #DB6A47,
+  "galaxy": #8B5CF6,
+  "report": #4DA167,
+  "sighting": #890096,
+  "correlation": #E67F0D,
+  "category": #EF476F,
+  "type": #06D6A0,
+  "analystData": #8F2D56,
+  "enrichment": #48435C,
+
 );
 
 $theme-colors: map-merge($theme-colors, $custom-colors);

@@ -45,6 +45,9 @@ class CerebratesController extends AppController
         $dropdownData = [
             'org_id' => $orgs
         ];
+        if ($this->theme === "Overmind" && $this->request->is('ajax')) {
+            $this->layout = false;
+        }
         $this->set(compact('dropdownData'));
         $this->set('menuData', array('menuList' => 'sync', 'menuItem' => 'add_cerebrate'));
     }
@@ -68,6 +71,9 @@ class CerebratesController extends AppController
         $dropdownData = [
             'org_id' => $orgs
         ];
+        if ($this->theme === "Overmind" && $this->request->is('ajax')) {
+            $this->layout = false;
+        }
         $this->set(compact('dropdownData'));
         $this->render('add');
     }
@@ -78,6 +84,22 @@ class CerebratesController extends AppController
         if ($this->IndexFilter->isRest()) {
             return $this->restResponsePayload;
         }
+    }
+
+    public function deleteSelection($id = null)
+    {
+        return $this->CRUD->deleteSelection($id, [
+            'modelName' => 'Cerebrate',
+            'restName' => 'Cerebrates',
+            'itemName' => 'Cerebrate',
+            'view' => 'ajax/cerebrateDeleteConfirmationForm',
+            'checkModifyCallback' => function($itemId) {
+                return $this->userRole['perm_site_admin'];
+            },
+            'multiSuccessMessageCallback' => function($count) {
+                return __n('%s cerebrate deleted.', '%s cerebrates deleted.', $count, $count);
+            }
+        ]);
     }
 
     public function view($id)
@@ -115,7 +137,7 @@ class CerebratesController extends AppController
             $result = $this->Cerebrate->saveRemoteOrgs($result);
             $message = __('Added %s new organisations, updated %s existing organisations, %s failures.', $result['add'], $result['edit'], $result['fails']);
             if ($this->_isRest()) {
-                return $this->RestResponse->saveSuccessResponse('Cerebrates', 'pull_orgs', $cerebrate_id, false, $message);
+                return $this->RestResponse->saveSuccessResponse('Cerebrates', 'pull_orgs', $id, false, $message);
             } else {
                 $this->Flash->success($message);
                 $this->redirect($this->referer());
@@ -126,7 +148,11 @@ class CerebratesController extends AppController
             $this->set('question', __('Are you sure you want to download and add / update the remote organisations from the Cerebrate node?'));
             $this->set('actionName', __('Pull all'));
             $this->layout = false;
-            $this->render('/genericTemplates/confirm');
+            if($this->theme === "Overmind"){
+                $this->render('ajax/cerebratePullConfirmationForm');
+            } else {
+                $this->render('/genericTemplates/confirm');
+            }
         }
     }
 
@@ -155,7 +181,7 @@ class CerebratesController extends AppController
             $result = $this->Cerebrate->saveRemoteSgs($result, $this->Auth->user());
             $message = __('Added %s new sharing groups, updated %s existing sharing groups, %s failures.', $result['add'], $result['edit'], $result['fails']);
             if ($this->_isRest()) {
-                return $this->RestResponse->saveSuccessResponse('Cerebrates', 'pull_sgs', $cerebrate_id, false, $message);
+                return $this->RestResponse->saveSuccessResponse('Cerebrates', 'pull_sgs', $id, false, $message);
             } else {
                 $this->Flash->success($message);
                 $this->redirect($this->referer());
@@ -166,7 +192,11 @@ class CerebratesController extends AppController
             $this->set('question', __('Are you sure you want to download and add / update the remote sharing group from the Cerebrate node?'));
             $this->set('actionName', __('Pull all'));
             $this->layout = false;
-            $this->render('/genericTemplates/confirm');
+            if($this->theme === "Overmind"){
+                $this->render('ajax/cerebratePullConfirmationForm');
+            } else {
+                $this->render('/genericTemplates/confirm');
+            }
         }
     }
 
@@ -233,12 +263,16 @@ class CerebratesController extends AppController
                 $this->redirect($this->referer());
             }
         } else {
-            $this->set('id', $data[$modelName]['id']);
+            $this->set('id', $cerebrate_id);
             $this->set('title', __('Download organisation information'));
             $this->set('question', __('Are you sure you want to download and add / update the remote organisation?'));
             $this->set('actionName', __('Download'));
             $this->layout = false;
-            $this->render('/genericTemplates/confirm');
+            if($this->theme === "Overmind"){
+                $this->render('ajax/cerebratePullConfirmationForm');
+            } else {
+                $this->render('/genericTemplates/confirm');
+            }
         }
     }
 
@@ -310,7 +344,11 @@ class CerebratesController extends AppController
             $this->set('question', __('Are you sure you want to download and add / update the remote sharing group?'));
             $this->set('actionName', __('Download'));
             $this->layout = false;
-            $this->render('/genericTemplates/confirm');
+            if($this->theme === "Overmind"){
+                $this->render('ajax/cerebratePullConfirmationForm');
+            } else {
+                $this->render('/genericTemplates/confirm');
+            }
         }
     }
 }

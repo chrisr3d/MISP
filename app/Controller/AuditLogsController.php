@@ -20,6 +20,7 @@ class AuditLogsController extends AppController
         'Allowedlist',
         'AnalystDataBlocklist',
         'AuthKey',
+        'Bookmark',
         'Cerebrate',
         'CorrelationExclusion',
         'CryptographicKey',
@@ -102,6 +103,7 @@ class AuditLogsController extends AppController
             AuditLog::ACTION_REMOVE_GALAXY_LOCAL => __('Remove galaxy cluster'),
             AuditLog::ACTION_PUBLISH => __('Publish'),
             AuditLog::ACTION_PUBLISH_SIGHTINGS => __('Publish sightings'),
+            AuditLog::ACTION_INSTANTIATE => __('Instantiate'),
         ];
     }
 
@@ -117,6 +119,7 @@ class AuditLogsController extends AppController
         if (!Configure::read('MISP.log_new_audit')) {
             $this->Flash->warning(__("Audit log is not enabled. See 'MISP.log_new_audit' in the Server Settings. (Administration -> Server Settings -> MISP tab)"));
         }
+        $exception = null;
         $params = $this->IndexFilter->harvestParameters([
             'ip',
             'user',
@@ -130,9 +133,26 @@ class AuditLogsController extends AppController
             'org',
             'created',
             'request_type',
-        ]);
+        ], $exception, ['fromQuery' => true]);
 
         $this->paginate['conditions'] = $this->__searchConditions($params);
+
+        // Free-text search box: one term, run against the whole index rather
+        // than against the rows of the current page. `change` is left out —
+        // it is brotli-compressed in the table, so LIKE cannot reach it.
+        $quickFilter = $this->IndexFilter->quickFilterTerm();
+        $quickFilterConditions = $this->IndexFilter->quickFilterConditions($quickFilter, 'AuditLog', [
+            'like' => ['model_title', 'model', 'action', 'request_id'],
+            'numeric' => ['model_id', 'event_id'],
+            'ip' => 'ip',
+            'user' => 'user_id',
+            'org' => 'org_id',
+        ]);
+        if (!empty($quickFilterConditions)) {
+            $this->paginate['conditions']['AND'][] = $quickFilterConditions;
+        }
+        $this->set('quickFilter', $quickFilter);
+
         $user = $this->Auth->user();
         $acl = $this->__applyAuditAcl($user);
         if ($acl) {
@@ -149,6 +169,31 @@ class AuditLogsController extends AppController
             $list[$k]['AuditLog']['action_human'] =  $this->actions[$item['AuditLog']['action']];
         }
 
+        // Free-text fields use partial matching (LIKE) for the search
+        if (!empty($params) || $quickFilter !== '') {
+            $this->set('headerCount', (int)$this->AuditLog->find('count', [
+                'conditions' => $this->paginate['conditions'],
+                'recursive' => -1,
+                'contain' => [],
+            ]));
+            $this->set('headerCountApprox', false);
+        } else {
+            $this->set('headerCount', (int)$this->AuditLog->tableRows());
+            $this->set('headerCountApprox', true);
+        }
+
+        // If no limit is set, we retrieve the total and set the headerCountApprox flag to true, so the header shows an estimated count
+        App::uses('CustomPaginationTool', 'Tools');
+        $curPage = (int)($this->request->params['named']['page'] ?? 1);
+        $pagingOptions = ['page' => $curPage, 'limit' => (int)($this->paginate['limit'] ?? 60)];
+        $paging = (new CustomPaginationTool())->createPaginationRules($list, $pagingOptions, 'AuditLog');
+        if (count($list) >= $pagingOptions['limit']) {
+            $paging['nextPage'] = true;
+            $paging['prevPage'] = $curPage > 1;
+            $paging['current'] = count($list);
+        }
+        $this->request->params['paging']['AuditLog'] = $paging;
+
         $this->set('list', $list);
         $this->set('actions', [
             AuditLog::ACTION_ADD => __('Add'),
@@ -162,6 +207,7 @@ class AuditLogsController extends AppController
             AuditLog::ACTION_REMOVE_GALAXY . '||' . AuditLog::ACTION_REMOVE_GALAXY_LOCAL => __('Remove galaxy cluster'),
             AuditLog::ACTION_PUBLISH => __('Publish'),
             AuditLog::ACTION_PUBLISH_SIGHTINGS => $this->actions[AuditLog::ACTION_PUBLISH_SIGHTINGS],
+            AuditLog::ACTION_INSTANTIATE => $this->actions[AuditLog::ACTION_INSTANTIATE],
         ]);
         $models = $this->models;
         sort($models);
@@ -189,6 +235,9 @@ class AuditLogsController extends AppController
         }
         $this->paginate['conditions'][] = $this->__searchConditions($params);
 
+        // eventIndex needs real pagination metadata for this bounded per-event result set.
+        // AuditLog uses LightPaginator globally to avoid expensive counts on large listings.
+        $this->AuditLog->Behaviors->unload('LightPaginator');
         $list = $this->paginate();
 
         if (!$this->_isSiteAdmin()) {
@@ -218,11 +267,76 @@ class AuditLogsController extends AppController
 
         $this->set('data', $list);
         $this->set('event', $event);
+        $this->set('eventId', $eventId);
         $this->set('mayModify', $this->__canModifyEvent($event));
+        if ($this->request->is('ajax')) {
+            $this->layout = 'ajax';
+            $this->set('ajax', true);
+        }
         $this->set('menuData', [
             'menuList' => 'event',
             'menuItem' => 'eventLog'
         ]);
+    }
+
+    public function eventIndexV2($eventId = null)
+    {
+        $params = $this->IndexFilter->harvestParameters([
+            'created', 'org', 'eventId', 'action', 'model'
+        ]);
+        if (!empty($params['eventId'])) {
+            $eventId = $params['eventId'];
+        } else if (empty($eventId)) {
+            $eventId = -1;
+        }
+        $event = $this->AuditLog->Event->fetchSimpleEvent(
+            $this->Auth->user(), $eventId
+        );
+        if (empty($event)) {
+            throw new NotFoundException('Invalid event.');
+        }
+        $this->paginate['conditions'] = $this->__createEventIndexConditions($event);
+        $this->paginate['conditions'][] = $this->__searchConditions($params);
+
+        $limit = (int)($this->paginate['limit'] ?? 60);
+
+        // Run a real COUNT before paginating.
+        $totalCount = $this->AuditLog->find('count', [
+            'conditions' => $this->paginate['conditions'],
+            'recursive'  => -1,
+            'contain'    => [],
+        ]);
+        $pageCount = $limit > 0 ? (int)ceil($totalCount / $limit) : 1;
+
+        $list = $this->paginate();
+
+        if (!$this->_isSiteAdmin()) {
+            $orgUserIds = $this->User->find('column', [
+                'conditions' => ['User.org_id' => $this->Auth->user('org_id')],
+                'fields' => ['User.id'],
+            ]);
+            foreach ($list as $k => $item) {
+                if ($item['AuditLog']['user_id'] == 0) {
+                    continue;
+                }
+                if (!in_array($item['User']['id'], $orgUserIds)) {
+                    unset($list[$k]['User']);
+                    unset($list[$k]['AuditLog']['user_id']);
+                }
+            }
+        }
+
+        $curPage = isset($this->request->params['paging']['AuditLog']['page'])
+            ? (int)$this->request->params['paging']['AuditLog']['page']
+            : 1;
+
+        return $this->RestResponse->viewData([
+            'data'      => $list,
+            'page'      => $curPage,
+            'pageCount' => $pageCount,
+            'count'     => $totalCount,
+            'limit'     => $limit,
+        ], 'json');
     }
 
     public function fullChange($id)
@@ -248,8 +362,12 @@ class AuditLogsController extends AppController
     {
         $user = $this->_closeSession();
         if (!$user['Role']['perm_sharing_group'] && !empty(Configure::read('Security.hide_organisation_index_from_users'))) {
-            if ($org !== 'all' && $org !== $user['Organisation']['name']) {
-                throw new MethodNotAllowedException('Invalid organisation.');
+            if ($org !== 'all') {
+                $this->loadModel('Organisation');
+                $requested = $this->Organisation->fetchOrg($org);
+                if (empty($requested) || (int)$requested['id'] !== (int)$user['org_id']) {
+                    throw new MethodNotAllowedException('Invalid organisation.');
+                }
             }
         }
 
@@ -570,13 +688,22 @@ class AuditLogsController extends AppController
             switch ($auditLog['model']) {
                 case 'Event':
                     if (isset($events[$modelId])) {
-                        $url = '/events/view/' . $modelId;
+                        if ($this->theme === 'Overmind'){
+                            $url = '/events/view2/' . $modelId;
+                        } else {
+                            $url = '/events/view/' . $modelId;
+                        }
+
                         $eventInfo = $events[$modelId];
                     }
                     break;
                 case 'ObjectReference':
                     if (isset($objectReferences[$modelId]) && isset($objects[$objectReferences[$modelId]])) {
-                        $url = '/events/view/' . $objects[$objectReferences[$modelId]]['event_id'] . '/focus:' . $objects[$objectReferences[$modelId]]['uuid'];
+                        if ($this->theme === 'Overmind'){
+                            $url = '/events/view2/' . $objects[$objectReferences[$modelId]]['event_id'] . '/focus:' . $objects[$objectReferences[$modelId]]['uuid'];
+                        } else {
+                            $url = '/events/view/' . $objects[$objectReferences[$modelId]]['event_id'] . '/focus:' . $objects[$objectReferences[$modelId]]['uuid'];
+                        }
                         if ($objects[$objectReferences[$modelId]]['deleted']) {
                             $url .= '/deleted:2';
                         }
@@ -587,7 +714,11 @@ class AuditLogsController extends AppController
                     break;
                 case 'Object':
                     if (isset($objects[$modelId])) {
-                        $url = '/events/view/' . $objects[$modelId]['event_id'] . '/focus:' . $objects[$modelId]['uuid'];
+                        if ($this->theme === 'Overmind'){
+                            $url = '/events/view2/' . $objects[$modelId]['event_id'] . '/focus:' . $objects[$modelId]['uuid'];
+                        } else {
+                            $url = '/events/view/' . $objects[$modelId]['event_id'] . '/focus:' . $objects[$modelId]['uuid'];
+                        }
                         if ($objects[$modelId]['deleted']) {
                             $url .= '/deleted:2';
                         }
@@ -598,7 +729,11 @@ class AuditLogsController extends AppController
                     break;
                 case 'Attribute':
                     if (isset($attributes[$modelId])) {
-                        $url = '/events/view/' . $attributes[$modelId]['event_id'] . '/focus:' . $attributes[$modelId]['uuid'];
+                        if ($this->theme === 'Overmind'){
+                            $url = '/events/view2/' . $attributes[$modelId]['event_id'] . '/focus:' . $attributes[$modelId]['uuid'];
+                        } else {
+                            $url = '/events/view/' . $attributes[$modelId]['event_id'] . '/focus:' . $attributes[$modelId]['uuid'];
+                        }
                         if ($attributes[$modelId]['deleted']) {
                             $url .= '/deleted:2';
                         }
@@ -609,7 +744,11 @@ class AuditLogsController extends AppController
                     break;
                 case 'ShadowAttribute':
                     if (isset($shadowAttributes[$modelId])) {
-                        $url = '/events/view/' . $shadowAttributes[$modelId]['event_id'] . '/focus:' . $shadowAttributes[$modelId]['uuid'];
+                        if ($this->theme === 'Overmind'){
+                            $url = '/events/view2/' . $shadowAttributes[$modelId]['event_id'] . '/focus:' . $shadowAttributes[$modelId]['uuid'];
+                        } else {
+                            $url = '/events/view/' . $shadowAttributes[$modelId]['event_id'] . '/focus:' . $shadowAttributes[$modelId]['uuid'];
+                        }
                         if (isset($events[$shadowAttributes[$modelId]['event_id']])) {
                             $eventInfo = $events[$shadowAttributes[$modelId]['event_id']];
                         }

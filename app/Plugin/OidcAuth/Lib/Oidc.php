@@ -1,4 +1,6 @@
 <?php
+App::uses('EncryptedValue', 'Tools');
+
 class Oidc
 {
     private $oidcClient;
@@ -21,7 +23,21 @@ class Oidc
 
         $this->log(null, 'Authenticate');
 
-        if (!$oidc->authenticate()) {
+        try {
+            $authenticated = $oidc->authenticate();
+        } catch (CertMichelin\ErrorResponse | JakubOnderka\ErrorResponse $e) {
+            // A reload of the redirect URI replays a single-use authorization code,
+            // which the IdP rejects with `invalid_grant`. Treat this as a failed
+            // login (the user is sent back to the login page to start a fresh flow)
+            // instead of letting the exception bubble up as an internal server error.
+            if ($e->getError() === 'invalid_grant') {
+                $this->log(null, "Authorization code exchange failed (`invalid_grant`), most likely a replayed or expired code. Cancelling login.", LOG_WARNING);
+                return false;
+            }
+            throw $e;
+        }
+
+        if (!$authenticated) {
             throw new Exception("OIDC authentication was not successful.");
         }
 
@@ -42,9 +58,29 @@ class Oidc
 
         if (!$user) { // User by sub not found, try to find by email
             $user = $this->_findUser($settings, ['User.email' => $mispUsername]);
-            if ($user && $user['sub'] !== null && $user['sub'] !== $sub) {
-                $this->log($mispUsername, "User sub doesn't match ({$user['sub']} != $sub), could not login.", LOG_ERR);
-                return false;
+            if ($user) {
+                if ($user['sub'] !== null && $user['sub'] !== $sub) {
+                    $this->log($mispUsername, "User sub doesn't match ({$user['sub']} != $sub), could not login.", LOG_ERR);
+                    return false;
+                }
+                if ($user['sub'] === null) {
+                    $allowLink = (bool)$this->getConfig('allow_email_linking', false, false);
+                    $requireVerified = (bool)$this->getConfig('require_email_verified', true, false);
+                    $rawEmailVerified = $claims->email_verified ?? null;
+                    $isVerified = ($rawEmailVerified === true || $rawEmailVerified === 'true');
+                    if (!$allowLink || ($requireVerified && !$isVerified)) {
+                        $this->log(
+                            $mispUsername,
+                            "Refusing to link OIDC identity to existing user with NULL sub " .
+                            "(allow_email_linking=" . var_export($allowLink, true) .
+                            ", require_email_verified=" . var_export($requireVerified, true) .
+                            ", email_verified=" . var_export($rawEmailVerified, true) . "). " .
+                            "Set OidcAuth.allow_email_linking=true to permit migration; the IdP must also issue email_verified=true unless OidcAuth.require_email_verified is set to false.",
+                            LOG_ERR
+                        );
+                        return false;
+                    }
+                }
             }
         }
 
@@ -112,10 +148,14 @@ class Oidc
                 $user['role_id'] = $roleId;
             }
 
-            if ($user['disabled'] && $this->getConfig('unblock', false)) {
+            if (!empty($user['disabled']) && $this->getConfig('unblock', false)) {
                 $this->User->updateField($user, 'disabled', false);
                 $this->log($mispUsername, "Unblocking user.");
                 $user['disabled'] = false;
+            } else if (!empty($user['disabled'])) {
+                $this->log($mispUsername, 'User is disabled in MISP, cancelling login.', LOG_WARNING);
+                $this->logAuthFail($user, 'Login attempt by disabled user.');
+                return false;
             }
 
             $refreshToken = $offlineAccessEnabled ? $oidc->getRefreshToken() : null;
@@ -192,7 +232,8 @@ class Oidc
         }
 
         $userInfo = $this->findUserInfo($user);
-        if (!isset($userInfo['refresh_token'])) {
+        $refreshToken = $this->readRefreshToken($userInfo);
+        if ($refreshToken === null) {
             $this->log($user['email'], "User don't have refresh token, considering user is not valid");
             return false;
         }
@@ -204,7 +245,7 @@ class Oidc
         $oidc = $this->prepareClient();
 
         try {
-            $oidc->refreshToken($userInfo['refresh_token']);
+            $oidc->refreshToken($refreshToken);
         } catch (CertMichelin\ErrorResponse | JakubOnderka\ErrorResponse $e) {
             if ($e->getError() === 'invalid_grant') {
                 $this->log($user['email'], "Refreshing token is not possible because of `{$e->getMessage()}`, considering user is not valid");
@@ -304,6 +345,7 @@ class Oidc
         $clientSecret = $this->getConfig('client_secret');
         $issuer = $this->getConfig('issuer', null, false);
         $disableRequestObject = $this->getConfig('disable_request_object', false);
+        $disablePushedAuthorizationRequest = $this->getConfig('disable_pushed_authorization_request', false);
 
         if (class_exists("\CertMichelin\OpenIDConnectClient")) {
             $oidc = new \CertMichelin\OpenIDConnectClient($providerUrl, $clientId, $clientSecret, $issuer);
@@ -323,6 +365,13 @@ class Oidc
             throw new Exception("OpenID Connect client is not installed.");
         }
 
+        if ($disablePushedAuthorizationRequest) {
+            if (method_exists($oidc, 'setDisablePushedAuthorizationRequest')) {
+                $oidc->setDisablePushedAuthorizationRequest(true);
+            } else {
+                $oidc->providerConfigParam(['pushed_authorization_request_endpoint' => false]);
+            }
+        }
         $authenticationMethod = $this->getConfig('authentication_method', false);
         if ($authenticationMethod !== false && $authenticationMethod !== null) {
             $oidc->setAuthenticationMethod($authenticationMethod);
@@ -574,6 +623,30 @@ class Oidc
     }
 
     /**
+     * @param array $userInfo
+     * @return string|null Null when missing or not decryptable
+     */
+    private function readRefreshToken(array $userInfo)
+    {
+        if (!isset($userInfo['refresh_token'])) {
+            return null;
+        }
+        if (empty($userInfo['refresh_token_encrypted'])) {
+            return $userInfo['refresh_token']; // plaintext, stored without encryption key
+        }
+        try {
+            $encrypted = base64_decode($userInfo['refresh_token'], true);
+            if ($encrypted === false || !EncryptedValue::isEncrypted($encrypted)) {
+                return null;
+            }
+            return (new EncryptedValue($encrypted))->decrypt();
+        } catch (Throwable $e) {
+            $this->log(null, "Stored refresh token could not be decrypted: {$e->getMessage()}", LOG_WARNING);
+            return null;
+        }
+    }
+
+    /**
      * @param int $userId
      * @param stdClass $verifiedClaims
      * @param string|null $refreshToken
@@ -595,7 +668,13 @@ class Oidc
         }
         if ($refreshToken) {
             $value['validity_check_timestamp'] = time();
-            $value['refresh_token'] = $refreshToken;
+            if (Configure::read('Security.encryption_key')) {
+                // Encrypted form is binary, so keep it JSON-safe as base64
+                $value['refresh_token'] = base64_encode(EncryptedValue::encryptIfEnabled($refreshToken));
+                $value['refresh_token_encrypted'] = true;
+            } else {
+                $value['refresh_token'] = $refreshToken;
+            }
         }
 
         return $this->User->UserSetting->setSettingInternal($userId, 'oidc', $value);
@@ -610,6 +689,24 @@ class Oidc
     {
         $this->User->updateField($user, 'disabled', true);
         $this->log($user['email'], "User blocked by OIDC");
+    }
+
+    /**
+     * Create an `auth_fail` entry in the MISP Log (audit) table, mirroring the
+     * behaviour of AppController so SIEM/admins keep visibility of login attempts
+     * that are rejected here before a session is established.
+     *
+     * @param array $user
+     * @param string $title
+     */
+    private function logAuthFail(array $user, $title)
+    {
+        try {
+            $log = ClassRegistry::init('Log');
+            $log->createLogEntry($user, 'auth_fail', 'User', $user['id'], $title);
+        } catch (Exception $e) {
+            $this->log($user['email'] ?? null, "Could not create auth_fail log entry: {$e->getMessage()}", LOG_WARNING);
+        }
     }
 
     /**

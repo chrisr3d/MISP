@@ -83,6 +83,24 @@ class BackgroundJobsTool
         self::CMD_WORKFLOW,
     ];
 
+    /**
+     * Console switches that must never appear in a job's arguments.
+     *
+     * A job's arguments are handed to the `cake` console as argv, and
+     * ShellDispatcher::_parsePaths() scans the *whole* argv for these four keys
+     * - wherever they sit - taking the element after each one as a path. Any
+     * caller that lets user input reach an argument could therefore relocate the
+     * console's application root, including into an archive addressed through
+     * the phar:// stream wrapper, whose Config/core.php the Cake bootstrap then
+     * includes. Job arguments are data; they are never switches.
+     */
+    const RESERVED_ARGUMENTS = [
+        '-app', '--app',
+        '-working', '--working',
+        '-root', '--root',
+        '-webroot', '--webroot',
+    ];
+
     const CMD_TO_SHELL_DICT = [
         self::CMD_EVENT => 'EventShell',
         self::CMD_SERVER => 'ServerShell',
@@ -93,6 +111,28 @@ class BackgroundJobsTool
     const JOB_STATUS_PREFIX = 'job_status',
         DATA_CONTENT_PREFIX = 'data_content',
         RUNNING_JOB_PREFIX = 'running';
+
+    /**
+     * Default settings, mirroring the `SimpleBackgroundJobs` block in
+     * config.default.php. Used to backfill any key missing from the live
+     * config so consumers never receive a null/undefined setting - e.g.
+     * `max_job_history_ttl`, which is passed to the typed Redis::setex().
+     *
+     * @var array
+     */
+    const DEFAULT_SETTINGS = [
+        'enabled' => false,
+        'redis_host' => 'localhost',
+        'redis_port' => 6379,
+        'redis_password' => '',
+        'redis_database' => 1,
+        'redis_namespace' => 'background_jobs',
+        'max_job_history_ttl' => 86400,
+        'supervisor_host' => 'localhost',
+        'supervisor_port' => 9001,
+        'supervisor_user' => 'supervisor',
+        'supervisor_password' => '',
+    ];
 
     /** @var array */
     private $settings;
@@ -120,7 +160,19 @@ class BackgroundJobsTool
      */
     public function __construct(array $settings)
     {
-        $this->settings = $settings;
+        // Backfill any key missing from the live config with its default, so
+        // an older config.php that predates a given key cannot pass a null
+        // through to a typed Redis call. User-supplied values take precedence.
+        $this->settings = $settings + self::DEFAULT_SETTINGS;
+
+        // max_job_history_ttl is handed to Redis::setex(int $expire); guard
+        // against a blank, zero or non-numeric config value, not just a
+        // missing key (which the union above already backfills).
+        $ttl = $this->settings['max_job_history_ttl'];
+        if (!is_numeric($ttl) || (int)$ttl <= 0) {
+            $ttl = self::DEFAULT_SETTINGS['max_job_history_ttl'];
+        }
+        $this->settings['max_job_history_ttl'] = (int)$ttl;
 
         if ($this->settings['enabled'] === true) {
             $this->RedisConnection = $this->createRedisConnection();
@@ -189,6 +241,8 @@ class BackgroundJobsTool
         array $metadata = []
     ): string {
 
+        $this->validateArgs($args);
+
         if (!$this->settings['enabled']) {
             return $this->resqueEnqueue($queue, self::CMD_TO_SHELL_DICT[$command], $args, $trackStatus, $jobId);
         }
@@ -196,6 +250,9 @@ class BackgroundJobsTool
         $this->validateQueue($queue);
         $this->validateCommand($command);
 
+        if ($jobId) {
+            $metadata['job_id'] = $jobId;
+        }
         $backgroundJob = new BackgroundJob(
             [
                 'id' => CakeText::uuid(),
@@ -633,6 +690,30 @@ class BackgroundJobsTool
                     implode(', ', self::ALLOWED_COMMANDS)
                 )
             );
+        }
+
+        return true;
+    }
+
+    /**
+     * Validate job arguments
+     *
+     * Refuses the console's own path switches, which would otherwise let an
+     * argument carrying user input move the application root of the process
+     * that runs the job. See RESERVED_ARGUMENTS.
+     *
+     * @param array $args
+     * @return boolean
+     * @throws InvalidArgumentException
+     */
+    private function validateArgs(array $args): bool
+    {
+        foreach ($args as $arg) {
+            if (is_string($arg) && in_array($arg, self::RESERVED_ARGUMENTS, true)) {
+                throw new InvalidArgumentException(
+                    sprintf('Job argument "%s" is reserved by the console dispatcher.', $arg)
+                );
+            }
         }
 
         return true;

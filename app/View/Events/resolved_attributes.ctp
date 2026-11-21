@@ -42,6 +42,7 @@
             <th><?php echo __('Distribution');?></th>
             <th><?php echo __('Comment');?></th>
             <th><?php echo __('Tags (separated by comma)');?></th>
+            <th><?php echo __('Tags to remove (separated by comma)');?></th>
             <th><?php echo __('Actions');?></th>
         </tr>
         <?php
@@ -185,6 +186,9 @@
             <td class="short">
                 <input type="text" class="freetextTagField" id="<?php echo 'Attribute' . $k . 'Tags'; ?>" <?php if (isset($item['tags']) && $item['tags'] !== false) echo 'value="' . h(implode(",",$item['tags'])) . '"'?>>
             </td>
+            <td class="short">
+                <input type="text" class="freetextRemoveTagField" id="<?php echo 'Attribute' . $k . 'RemoveTags'; ?>" title="<?php echo __('These tags are removed from the attribute already in the event that carries this value, if it has them.');?>" <?php if (isset($item['remove_tags']) && $item['remove_tags'] !== false) echo 'value="' . h(implode(",",$item['remove_tags'])) . '"'?>>
+            </td>
             <td class="action short">
                 <span class="fa fa-times useCursorPointer" title="<?php echo __('Remove resolved attribute');?>" role="button" tabindex="0" aria-label="<?php echo __('Remove resolved attribute');?>" onclick="freetextRemoveRow(<?php echo $k; ?>, <?php echo $event['Event']['id']; ?>);"></span>
             </td>
@@ -282,9 +286,15 @@
                 }
                 */
                 var $categorySelect = $('#' + currentId);
+                var previousCategory = $categorySelect.val();
                 $categorySelect.empty();
                 for (var category in currentOptions) {
                     $categorySelect.append(new Option(category, category));
+                }
+                // Keep the user's current category if it is still valid for the
+                // newly selected type, otherwise fall back to the default one.
+                if (previousCategory && currentOptions && currentOptions.hasOwnProperty(previousCategory)) {
+                    $categorySelect.val(previousCategory);
                 }
             });
         <?php

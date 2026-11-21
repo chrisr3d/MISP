@@ -43,7 +43,6 @@
             'correlations' => __('Correlations'),
             'sightings' => __('Sightings'),
             'proposals' => __('Proposals'),
-            'discussion' => __('Posts'),
             'report_count' => __('Report count'),
             'timestamp' => __('Last modified at'),
             'publish_timestamp' => __('Published at'),
@@ -71,6 +70,16 @@
                             'fa-icon' => 'search',
                             'onClick' => 'getPopup',
                             'onClickParams' => array(h($urlparams), 'events', 'filterEventIndex')
+                        ),
+                        array(
+                            'id' => 'event-template-picker-button',
+                            'requirement' => (
+                                $this->Acl->canAccess('eventTemplates', 'index')
+                                && $this->Acl->canAccess('eventTemplates', 'instantiate')
+                            ),
+                            'title' => __('Create event from template'),
+                            'fa-icon' => 'clone',
+                            'onClick' => 'openEventTemplatePicker'
                         )
                     )
                 ),
@@ -89,6 +98,46 @@
                             'fa-icon' => 'file-export',
                             'class' => 'hidden mass-export',
                             'onClick' => 'multiSelectExportEvents'
+                        ),
+                        array(
+                            'id' => 'multi-tag-button',
+                            'title' => __('Tag selected events (global where permitted, local otherwise)'),
+                            'html' => '<i class="fas fa-globe"></i> <i class="fas fa-tag"></i>',
+                            'class' => 'hidden mass-tag',
+                            'requirement' => $this->Acl->canAccess('tags', 'selectTaxonomy'),
+                            'data' => [
+                                'popover-popup' => $baseurl . '/tags/selectTaxonomy/selected/event',
+                            ],
+                        ),
+                        array(
+                            'id' => 'multi-local-tag-button',
+                            'title' => __('Add local tag to selected events'),
+                            'html' => '<i class="fas fa-user"></i> <i class="fas fa-tag"></i>',
+                            'class' => 'hidden mass-tag',
+                            'requirement' => $this->Acl->canAccess('tags', 'selectTaxonomy'),
+                            'data' => [
+                                'popover-popup' => $baseurl . '/tags/selectTaxonomy/local:1/selected/event',
+                            ],
+                        ),
+                        array(
+                            'id' => 'multi-galaxy-button',
+                            'title' => __('Add cluster to selected events (global where permitted, local otherwise)'),
+                            'html' => '<i class="fas fa-globe"></i> <i class="fas fa-book-open"></i>',
+                            'class' => 'hidden mass-galaxy',
+                            'requirement' => $this->Acl->canAccess('galaxies', 'selectGalaxyNamespace'),
+                            'data' => [
+                                'popover-popup' => $baseurl . '/galaxies/selectGalaxyNamespace/selected/event',
+                            ],
+                        ),
+                        array(
+                            'id' => 'multi-local-galaxy-button',
+                            'title' => __('Add local cluster to selected events'),
+                            'html' => '<i class="fas fa-user"></i> <i class="fas fa-book-open"></i>',
+                            'class' => 'hidden mass-galaxy',
+                            'requirement' => $this->Acl->canAccess('galaxies', 'selectGalaxyNamespace'),
+                            'data' => [
+                                'popover-popup' => $baseurl . '/galaxies/selectGalaxyNamespace/selected/event/local:1',
+                            ],
                         )
                     )
                 ),
@@ -191,6 +240,17 @@ echo $this->element('genericElements/assetLoader', [
     'css' => ['vis', 'distribution-graph'],
     'js' => ['vis', 'jquery-ui.min', 'network-distribution-graph'],
 ]);
+// Event-template picker modal for "Add Event → From Template" (PRD §5.2
+// F2.1/F2.2). Self-contained — exposes window.openEventTemplatePicker
+// which the toolbar button's onClick hands to ListTopBar. Gated on the
+// eventTemplates/instantiate ACL via the toolbar's `requirement`, so
+// users without access never see the button nor load the modal.
+if (!$ajax
+    && $this->Acl->canAccess('eventTemplates', 'index')
+    && $this->Acl->canAccess('eventTemplates', 'instantiate')
+) {
+    echo $this->element('eventTemplates/templatePickerModal');
+}
 if (!$ajax) {
     echo $this->element('/genericElements/SideMenu/side_menu', array('menuList' => 'event-collection', 'menuItem' => 'index'));
 }

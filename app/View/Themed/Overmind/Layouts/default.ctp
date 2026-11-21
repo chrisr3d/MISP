@@ -1,58 +1,102 @@
+<?php
+/**
+ * Overmind theme layout.
+ */
+
+// Load the Overmind page registry in order to decide which asset stack to emit.
+App::uses('OvermindPages', 'Tools');
+App::uses('I18n', 'I18n');
+
+$currentController = $this->params['controller'];
+$currentAction = $this->params['action'];
+
+$useBootstrap5 = OvermindPages::isMigrated($currentController, $currentAction);
+
+
+// Overmind pages which own the whole viewport (no navbar, no footer, no header strip)
+$isAuthPage  = $useBootstrap5 && OvermindPages::isAuthPage($currentController, $currentAction);
+
+
+$isLegacyFullViewportPage = !$useBootstrap5
+    && OvermindPages::normalise($currentController) === 'workflows'
+    && OvermindPages::normalise($currentAction) === 'editor';
+
+// Offset behavior for the legacy navbar 
+$mainStyle = '';
+if (!$useBootstrap5) {
+    $debugBarShown = !empty($debugMode) && $debugMode !== 'debugOff';
+    $navbarOffset = ($debugBarShown || $isLegacyFullViewportPage) ? 0 : 50;
+    $mainStyle = ' style="padding-top:' . $navbarOffset . 'px;"';
+}
+
+// Conversion between ISO 639-2 code (`Config.language`) and BCP 47 tag (lang attribute) 
+$htmlLang = 'en';
+$configLanguage = (string)Configure::read('Config.language');
+if ($configLanguage !== '') {
+    if (strlen($configLanguage) === 3) {
+        $mappedLanguage = I18n::getInstance()->l10n->map($configLanguage);
+        $htmlLang = $mappedLanguage ?: 'en';
+    } else {
+        $htmlLang = str_replace('_', '-', $configLanguage);
+    }
+}
+
+
+// Auto-logout feature : new event-driven check if MISP.disable_auto_logout is false
+$autoLogoutEnabled = $useBootstrap5
+    && !$isAuthPage
+    && !empty($me)
+    && !Configure::read('MISP.disable_auto_logout');
+
+if (substr($currentAction, 0, 6) === 'admin_') {
+    $here = $baseurl . '/admin/' . $currentController . '/'
+        . substr($currentAction, 6);
+} else {
+    $here = $baseurl . '/' . $currentController . '/' . $currentAction;
+}
+
+
+?>
+
+
+
 <!DOCTYPE html>
-<html lang="<?= Configure::read('Config.language') === 'eng' ? 'en' : Configure::read('Config.language') ?>">
+<html lang="<?= h($htmlLang) ?>">
 <head>
     <meta charset="utf-8">
     <meta http-equiv="X-UA-Compatible" content="IE=edge">
     <meta name="viewport" content="width=device-width, initial-scale=1">
-    <link rel="shortcut icon" href="<?= $baseurl ?>/img/favicon.png">
+    <link rel="shortcut icon" href="<?= $baseurl ?>/img/faviconOvermind.png">
     <title><?= h($title_for_layout) .  ' - ' . h(Configure::read('MISP.title_text') ?: 'MISP') ?></title>
     <?php
-        $bootstrap5Pages = [
-            ['controller' => 'users', 'action' => 'login'],
-            ['controller' => 'noticelists', 'action' => 'index'],
-            ['controller' => 'events', 'action' => 'index'],
-        ];
-
-        $currentController = $this->params['controller'];
-        $currentAction = $this->params['action'];
-
-        $useBootstrap5 = false;
-
-        foreach ($bootstrap5Pages as $page) {
-            if (
-                $currentController === $page['controller'] &&
-                $currentAction === $page['action']
-            ) {
-                $useBootstrap5 = true;
-                break;
-            }
-        }
-
         if ($useBootstrap5) {
+            // Order matters: more specific stylesheets must come after more generic ones, so that they can override them.
             $css = [
                 ['bootstrap5-custom.min', ['preload' => true]],
+                ['tom-select.bootstrap5.min', ['preload' => true]],
                 ['mainOvermind', ['preload' => true]],
                 ['fontawesome7.min', ['preload' => true]],
                 ['print', ['media' => 'print']],
+                ['misp-iconify', ['preload' => true]],
+                ['onboarding', ['preload' => true]],
             ];
             $js = [
-                ['jquery', ['preload' => true]],
-                ['chosen.jquery.min', ['preload' => true]]
+                ['tom-select.complete.min', ['preload' => true]],
             ];
         } else {
             $css = [
                 ['bootstrap', ['preload' => true]],
-                ['main', ['preload' => true]],
                 ['bootstrap-datepicker', ['preload' => true]],
                 ['bootstrap-colorpicker', ['preload' => true]],
                 ['font-awesome', ['preload' => true]],
                 ['chosen.min', ['preload' => true]],
+                ['main', ['preload' => true]],
                 ['print', ['media' => 'print']],
             ];
             $js = [
                 ['jquery', ['preload' => true]],
                 ['chosen.jquery.min', ['preload' => true]],
-        ];
+            ];
         }
         if (Configure::read('MISP.custom_css')) {
             $css[] = preg_replace('/\.css$/i', '', Configure::read('MISP.custom_css'));
@@ -68,47 +112,51 @@
             'js' => $js,
         ]);
     ?>
+    <?php if ($isLegacyFullViewportPage): ?>
+        <style>
+            /* Give the workflow editor full viewport height */
+            body[data-controller="workflows"][data-action="editor"] .root-container {
+                height: 100vh;
+                margin-top: 0;
+            }
+        </style>
+    <?php endif; ?>
+    <script>(function(){if(localStorage.getItem('darkMode')==='true'){document.documentElement.setAttribute('data-bs-theme','dark');}})()</script>
 </head>
-<body data-controller="<?= h($this->params['controller']) ?>" data-action="<?= h($this->params['action']) ?>">
+<body class="bg-light" data-controller="<?= h($currentController) ?>" data-action="<?= h($currentAction) ?>">
     <div class="main-wrapper">
         <!-- Navbar -->
         <header>
             <?php
-                if ($useBootstrap5){
-                    // Don't print the navbar for the login page
-                    if (!($currentController === 'users' && $currentAction === 'login')) {
-                        $context = [
-                            'me' => $me,
-                            'baseurl' => $baseurl,
-                            'isAdmin' => $isAdmin,
-                            'isSiteAdmin' => $isSiteAdmin,
-                            'isAclSync' => $isAclSync,
-                            'isAclRegexp' => $isAclRegexp,
-                            'isAclAudit' => $isAclAudit,
-                            'hostOrgUser' => $hostOrgUser,
-                            'bookmarks' => $bookmarks,
-                            'themes' => $themes,
-                        ];
-                        $menus = $this->Navbar->build($context);
-                        echo $this->element('navbar', [
-                            'menus' => $menus,
-                            'baseurl' => $baseurl,
-                            'me' => $me ?? null
-                        ]);
+                if (!$useBootstrap5) {
+                    if (!$isLegacyFullViewportPage) {
+                        echo $this->element('global_menu');
                     }
-                    $topPadding = '0';
-                }
-                else {
-                    echo $this->element('global_menu');
-                    $topPadding = '50';
-                    if (!empty($debugMode) && $debugMode != 'debugOff') {
-                        $topPadding = '0';
-                    }
+                } elseif (!$isAuthPage) {
+                    $context = [
+                        'me' => $me ?? null,
+                        'baseurl' => $baseurl,
+                        'isAdmin' => $isAdmin ?? false,
+                        'isSiteAdmin' => $isSiteAdmin ?? false,
+                        'isAclSync' => $isAclSync ?? false,
+                        'isAclRegexp' => $isAclRegexp ?? false,
+                        'isAclAudit' => $isAclAudit ?? false,
+                        'hostOrgUser' => $hostOrgUser ?? false,
+                        'bookmarks' => $bookmarks ?? [],
+                        'themes' => $themes ?? [],
+                        'theme' => $theme ?? null,
+                        'themesEnabled' => $themesEnabled ?? false,
+                    ];
+                    echo $this->element('navbar', [
+                        'menus' => $this->Navbar->build($context),
+                        'baseurl' => $baseurl,
+                        'me' => $me ?? null,
+                    ]);
                 }
             ?>
-        </header> 
-        <?php if ($useBootstrap5): ?>
-            <?php if (Configure::read('debug') > 0): ?>
+        </header>
+        <?php if ($useBootstrap5 && !$isAuthPage && Configure::read('debug') > 0): ?>
+            <!-- Debug strip, filled by initDebugStrip() in mispOvermind.js -->
             <div class="accordion mb-0" id="debugAccordionWrapper">
                 <div class="accordion-item border-0">
                     <h2 class="accordion-header" id="debugHeading">
@@ -119,40 +167,47 @@
                                 data-bs-target="#debugCollapse"
                                 aria-expanded="false"
                                 aria-controls="debugCollapse">
-
                             <div class="d-flex justify-content-between align-items-center w-100 me-2">
                                 <span>
                                     <i class="fas fa-bug me-2"></i>
-                                    Debug Mode Enabled
+                                    <?= __('Debug Mode Enabled') ?>
                                 </span>
-
-                                <span id="debugErrorBadge"
-                                    class="badge bg-secondary ms-3">
-                                    0 error
+                                <span class="d-flex gap-2 ms-3">
+                                    <span id="debugSqlBadge" class="badge bg-dark d-none"></span>
+                                    <span id="debugInfoBadge" class="badge bg-info text-dark d-none"></span>
+                                    <span id="debugErrorBadge" class="badge bg-success">
+                                        <?= __('0 errors') ?>
+                                    </span>
                                 </span>
                             </div>
-
                         </button>
                     </h2>
-
                     <div id="debugCollapse"
                         class="accordion-collapse collapse"
                         aria-labelledby="debugHeading"
                         data-bs-parent="#debugAccordionWrapper">
-
                         <div id="debugAccordionContent"
-                            class="accordion-body bg-dark text-light small"
-                            style="max-height:500px; overflow:auto;">
-                            <!-- Errors are going to be injected here -->
+                            class="accordion-body bg-dark text-light small p-0 overflow-auto"
+                            style="max-height:500px;">
+                            <div class="d-flex justify-content-end px-3 pt-2">
+                                <button type="button" id="debugClear"
+                                        class="btn btn-sm btn-outline-secondary py-0">
+                                    <i class="fas fa-eraser me-1"></i><?= __('Clear') ?>
+                                </button>
+                            </div>
+                            <div id="debugEntries" class="px-3 py-2">
+                                <div id="debugEmpty" class="fst-italic opacity-75">
+                                    <?= __('No debug output so far.') ?>
+                                </div>
+                            </div>
+                            <div id="debugSqlLog" class="px-3 pb-3 d-none"></div>
                         </div>
-
                     </div>
                 </div>
             </div>
-            <?php endif; ?>
         <?php endif; ?>
         <!-- Flash & Content -->
-        <main role="main" class="content">
+        <main role="main" class="content"<?= $mainStyle ?>>
             <div id="flashOverlay">
                 <div id="flashContainer">
                     <?= $this->Flash->render(); ?>
@@ -160,10 +215,19 @@
             </div>
             <div>
                 <?php
-                if ($useBootstrap5 && !($currentController === 'users' && $currentAction === 'login') && !empty($title_for_layout)) {
+                /*
+                 * `hideHeaderSection` function is intended for pages where it is not necessary to print a title page
+                 */
+                if ($useBootstrap5 && !$isAuthPage && empty($hideHeaderSection)) {
                     echo $this->element('headerSection', [
-                        'pageTitle' => $title_for_layout,
-                        'headerActions' => $headerActions ?? []
+                        'currentController' => $currentController,
+                        'currentAction' => $currentAction,
+                        'headerActions' => $headerActions ?? [],
+                        'headerTitle' => $headerTitle ?? null,
+                        'headerDescription' => $headerDescription ?? null,
+                        'headerIdentity' => $headerIdentity ?? null,
+                        'headerStats' => $headerStats ?? [],
+                        'headerCount' => $headerCount ?? null,
                     ]);
                 }
                 ?>
@@ -172,62 +236,37 @@
         </main>
     </div>
 
-
-    <!-- TO DO Footer & SQL dump -->
+    <!-- Footer -->
     <?php
-        if ($useBootstrap5){
-            // Don't print the footer for the login page
-            if (!($currentController === 'users' && $currentAction === 'login')) {
-                echo $this->element('footerBS5'); 
+        if (!$useBootstrap5) {
+            if (!$isLegacyFullViewportPage) {
+                echo $this->element('footer');
             }
-        }
-        else {
-            echo $this->element('footer');
+        } elseif (!$isAuthPage) {
+            echo $this->element('footerBS5');
         }
     ?>
+
+    <!-- Cake's query log, rendered only when debug is on -->
     <?= $this->element('sql_dump') ?>
 
-    <!-- Modals, Toasts and Popovers -->
-    <div id="popover_form" class="ajax_popover_form"></div>
-    <div id="popover_form_large" class="ajax_popover_form ajax_popover_form_large"></div>
-    <div id="popover_form_x_large" class="ajax_popover_form ajax_popover_form_x_large"></div>
-    <div id="popover_matrix" class="ajax_popover_form ajax_popover_matrix"></div>
-    <div id="popover_box" class="popover_box"></div>
-    <div id="confirmation_box"></div>
-    <div id="gray_out"></div>
-    <div id="mainModal" class="modal fade" tabindex="-1" role="dialog" aria-hidden="true"></div>
-    <div id="mainToastContainer" class="main-toast-container"></div>
-    <div id="mainModalContainer"></div>
-
-
-    <!-- Ajax Results -->
-    <div id="ajax_success_container" class="ajax_container">
-        <div id="ajax_success" class="ajax_result ajax_success"></div>
-    </div>
-    <div id="ajax_fail_container" class="ajax_container">
-        <div id="ajax_fail" class="ajax_result ajax_fail"></div>
-    </div>
-
-
-     <!-- Loading -->
-    <div class="loading">
-        <div class="spinner"></div>
-        <div class="loadingText"><?= __('Loading'); ?></div>
-    </div>
-
+    <!-- Modals, toasts, popovers and the loading overlay -->
+    <?= $this->element('chrome_containers', ['legacy' => !$useBootstrap5]) ?>
 
     <!-- Additional JS for MISP -->
     <?php
         if ($useBootstrap5) {
-            // Bootstrap 5 JS 
+            // Bootstrap 5 JS
+            $bs5Js = [
+                'bootstrap.bundle.min',
+                'mispOvermind',
+            ];
+            if (!$isAuthPage) {
+                $bs5Js[] = 'onboarding';
+                $bs5Js[] = 'overmind-invaders';
+            }
             echo $this->element('genericElements/assetLoader', [
-                'js' => [
-                    'misp-touch',
-                    'bootstrap.bundle.min',
-                    'misp',
-                    'keyboard-shortcuts-definition',
-                    'keyboard-shortcuts',
-                ],
+                'js' => $bs5Js,
             ]);
         } else {
             // Bootstrap 2 JS
@@ -247,100 +286,24 @@
     ?>
 
     <script>
-    <?php
-        if (!isset($debugMode)):
-    ?>
-        $(window).scroll(function() {
-            $('.actions').css('left',-$(window).scrollLeft());
-        });
-    <?php
-        endif;
-    ?>
-        var baseurl = '<?php echo $baseurl; ?>';
-        var here = '<?php
-                if (substr($this->params['action'], 0, 6) === 'admin_') {
-                    echo $baseurl . '/admin/' . h($this->params['controller']) . '/' . h(substr($this->params['action'], 6));
-                } else {
-                    echo $baseurl . '/' . h($this->params['controller']) . '/' . h($this->params['action']);
-                }
-            ?>';
-        <?php
-            if (!Configure::read('MISP.disable_auto_logout') && isset($me) && $me):
-        ?>
-                //checkIfLoggedIn();
-        <?php
-            endif;
-        ?>
+        var baseurl = <?= json_encode($baseurl, JSON_UNESCAPED_SLASHES) ?>;
+        // CSRF token for hand-built same-origin AJAX, which has no rendered form
+        // to carry _Token fields. Sent as the X-CSRF-Token header - see
+        // BetterSecurityComponent::_validateCsrf().
+        var csrfToken = <?= json_encode(isset($this->request->params['_Token']['key']) ? $this->request->params['_Token']['key'] : '') ?>;
+        var here = <?= json_encode($here, JSON_UNESCAPED_SLASHES) ?>;
 
-        $(document).on('click', '.ajax-toggle, .ajax-call', function(e) {
-            e.preventDefault();
+<?php if ($autoLogoutEnabled): ?>
+        window.mispAutoLogout = true;
+<?php endif; ?>
+<?php if ($useBootstrap5 && !$isAuthPage && !empty($onboardingAutostart)): ?>
+        <?php // Set by AppController::beforeRender when the user has never been
+              // shown the tour. onboarding.js reads it on DOMContentLoaded,
+              // which has not fired yet at this point in the document, and
+              // clears the marker server-side once the tour is up. ?>
+        window.mispOnboardingAutostart = true;
+<?php endif; ?>
 
-            var url = $(this).data('url');
-            var $row = $(this).closest('tr');
-
-            $.ajax({
-                type: "get",
-                url: url,
-                success: function(data) {
-
-                    var $temp = $('<div>').html(data);
-                    var $form = $temp.find('form');
-
-                    if ($form.length) {
-                        $.post($form.attr('action'), $form.serialize(), function() {
-                            showMessage('success', 'Field updated.');
-                            location.reload();
-                        });
-                    } else {
-                        showMessage('success', 'Action executed.');
-                        location.reload();
-                    }
-                },
-                error: function() {
-                    showMessage('fail', 'Action failed.');
-                }
-            });
-        });
-
-
-        $(document).ready(function () {
-            var $flash = $('#flashContainer');
-
-            if ($flash.children().length > 0) {
-                setTimeout(function () {
-                    $flash.addClass('fade-out');
-
-                    setTimeout(function () {
-                        $flash.remove();
-                    }, 600); // correspond à la durée de transition
-                }, 10000); // 10 secondes
-            }
-        });
-
-        document.addEventListener("DOMContentLoaded", function () {
-            var debugContainer = document.getElementById("debugAccordionContent");
-            if (!debugContainer) return;
-            var cakeErrors = document.querySelectorAll(".cake-error");
-            var count = cakeErrors.length;
-
-            var badge = document.getElementById("debugErrorBadge");
-            badge.textContent = count + " error";
-
-            if (count > 0) {
-                if (count > 1) {
-                    badge.textContent += "s";
-                }
-                badge.classList.remove("bg-secondary");
-                badge.classList.add("bg-danger");
-            } else {
-                badge.classList.remove("bg-danger");
-                badge.classList.add("bg-success");
-            }
-
-            cakeErrors.forEach(function (error) {
-                debugContainer.appendChild(error);
-            });
-        });
     </script>
 </body>
 </html>

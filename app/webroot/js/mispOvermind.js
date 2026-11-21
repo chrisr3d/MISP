@@ -1,0 +1,9178 @@
+/* Overmind theme JS namespace — shared mutable handle for the event-view tabs. */
+window.mispView = window.mispView || {};
+
+/*******************************
+ * Dark mode
+ *******************************/
+function toggleDarkMode() {
+    const isDark = document.documentElement.getAttribute('data-bs-theme') === 'dark';
+    const next = !isDark;
+    document.documentElement.setAttribute('data-bs-theme', next ? 'dark' : 'light');
+    localStorage.setItem('darkMode', next);
+    updateDarkModeUI(next);
+}
+
+function updateDarkModeUI(isDark) {
+    document.querySelectorAll('.dark-mode-icon').forEach(function(icon) {
+        icon.className = 'fa-fw dark-mode-icon fas ' + (isDark ? 'fa-sun' : 'fa-moon');
+    });
+    document.querySelectorAll('.dark-mode-badge').forEach(function(badge) {
+        badge.textContent = isDark ? 'ON' : 'OFF';
+        badge.className = 'badge ms-2 dark-mode-badge ' + (isDark ? 'bg-success' : 'bg-secondary');
+    });
+}
+
+document.addEventListener('DOMContentLoaded', function() {
+    updateDarkModeUI(localStorage.getItem('darkMode') === 'true');
+});
+
+/*******************************
+ * Toast notifications
+ *******************************/
+function showToast(message, variant = 'success') {
+    const container = document.getElementById('mainToastContainer');
+    if (!container) return;
+
+    const id = 'toast-' + Date.now();
+    container.insertAdjacentHTML('beforeend', `
+        <div id="${id}" class="toast align-items-center text-bg-${variant} border-0" role="alert" aria-atomic="true">
+            <div class="d-flex">
+                <div class="toast-body">${message}</div>
+                <button type="button" class="btn-close btn-close-white me-2 m-auto" data-bs-dismiss="toast"></button>
+            </div>
+        </div>
+    `);
+    const el = document.getElementById(id);
+    const toast = new bootstrap.Toast(el, { delay: 3000 });
+    toast.show();
+    el.addEventListener('hidden.bs.toast', () => el.remove());
+}
+
+/*******************************
+ * Size the shared #mainModal dialog.
+ *
+ * Bootstrap ships four widths but only three classes: 'md' IS the class-less
+ * default (500px), so a medium modal is obtained by removing every size class,
+ * never by adding one. `modal-md` is in the remove list because the theme used
+ * to add it — it never had any CSS, so it silently meant 500px, but it stuck to
+ * the dialog for every later open.
+ *
+ *   'sm' 300px | 'md' / null 500px | 'lg' 800px | 'xl' 1140px
+ *   'fullscreen' the whole viewport (the galaxy matrix)
+ *******************************/
+function setModalSize(size, dialog) {
+    dialog = dialog || document.querySelector('#mainModal .modal-dialog');
+    if (!dialog) {
+        return;
+    }
+    dialog.classList.remove('modal-sm', 'modal-md', 'modal-lg', 'modal-xl', 'modal-fullscreen');
+    if (size && size !== 'md') {
+        dialog.classList.add('modal-' + size);
+    }
+}
+
+/*******************************
+ * Confirmation modal (inline — no AJAX)
+ *
+ * opts:
+ *   title         (string)   — modal title
+ *   body          (string)   — HTML for the body (already escaped by caller)
+ *   confirmLabel  (string)   — confirm button text
+ *   confirmClass  (string)   — Bootstrap btn class, default 'btn-primary'
+ *   cancelLabel   (string)   — cancel button text, default 'Cancel'
+ *   size          (string)   — see setModalSize: 'sm'|'md'|'lg'|'xl', default 'md'
+ *   onConfirm     (function) — called after the user confirms
+ *******************************/
+function showConfirmModal(opts) {
+    const modalEl   = document.getElementById('mainModal');
+    const modalBody = document.getElementById('mainModalBody');
+    if (!modalEl || !modalBody) return;
+
+    const size         = opts.size         || 'md';
+    const confirmClass = opts.confirmClass || 'btn-primary';
+    const confirmLabel = opts.confirmLabel || 'Confirm';
+    const cancelLabel  = opts.cancelLabel  || 'Cancel';
+
+    modalBody.innerHTML =
+        '<div class="p-4">' +
+            (opts.title
+                ? '<h5 class="fw-semibold mb-3">' + escapeHtml(opts.title) + '</h5>'
+                : '') +
+            (opts.body
+                ? '<div class="mb-4">' + opts.body + '</div>'
+                : '') +
+            '<div class="d-flex gap-2 justify-content-end">' +
+                '<button type="button" class="btn btn-sm btn-outline-secondary"' +
+                        ' data-bs-dismiss="modal">' + escapeHtml(cancelLabel) + '</button>' +
+                '<button type="button" class="btn btn-sm ' + escapeHtml(confirmClass) + '"' +
+                        ' id="confirmModalOkBtn">' + escapeHtml(confirmLabel) + '</button>' +
+            '</div>' +
+        '</div>';
+
+    setModalSize(size, modalEl.querySelector('.modal-dialog'));
+
+    const bsModal = bootstrap.Modal.getOrCreateInstance(modalEl);
+    bsModal.show();
+
+    document.getElementById('confirmModalOkBtn').addEventListener('click', function () {
+        bsModal.hide();
+        if (typeof opts.onConfirm === 'function') opts.onConfirm();
+    }, { once: true });
+}
+
+// Initializing Bootstrap 5 tooltips
+document.addEventListener('DOMContentLoaded', function() {
+    var tooltipTriggerList = [].slice.call(document.querySelectorAll('[data-bs-toggle="tooltip"]'))
+    var tooltipList = tooltipTriggerList.map(function (tooltipTriggerEl) {
+        return new bootstrap.Tooltip(tooltipTriggerEl)
+    });
+});
+
+/*******************************
+ * Index Filtering Bar
+ *******************************/
+function openModal(url, size = 'xl') {
+    setModalSize(size);
+
+    fetch(url, { headers: { 'X-Requested-With': 'XMLHttpRequest' } })
+        .then(response => response.text())
+        .then(html => {
+            const container = document.getElementById('mainModalBody');
+            container.innerHTML = html;
+            container.querySelectorAll('script:not([type="application/json"])').forEach(oldScript => {
+                const newScript = document.createElement('script');
+                if (oldScript.src) {
+                    newScript.src = oldScript.src;
+                } else {
+                    // Wrap in IIFE so const/let declarations don't leak into the
+                    // global scope and cause redeclaration errors on repeated opens.
+                    newScript.textContent = '(function(){\n' + oldScript.textContent + '\n})();';
+                }
+                document.body.appendChild(newScript);
+                document.body.removeChild(newScript);
+            });
+
+            initTomSelect(container);
+            initChoiceFields(container);
+            initJsonFields(container);
+            initDateFields(container);
+            keepTabOnFormReturn(container);
+            initPgpKeyLookup(container);
+            initCollectionForm(container);
+            initServerForm(container);
+            initSharingGroupForm(container);
+            initObjectForm(container);
+            initDeleteConfirmations(container);
+
+            // Reuse the single instance for #mainModal — calling openModal again
+            // while a modal is already open must not spawn a second Bootstrap.Modal instance
+            let modal = bootstrap.Modal.getOrCreateInstance(document.getElementById('mainModal'));
+            modal.show();
+        });
+}
+
+/**
+ * Bring a modal form back to the tab it was opened from.
+ *
+ * A modal form posts as a plain navigation and the server answers with a
+ * redirect to the referer, which never carries the fragment - so the event
+ * view came back on its first tab. A redirect whose Location has no fragment
+ * inherits the one of the URL that was requested, so putting the active tab
+ * (view_layout keeps it in location.hash) on the form's action is enough.
+ * The fragment is never sent, and fetch() ignores it.
+ *
+ * @param {ParentNode} container the modal body
+ */
+function keepTabOnFormReturn(container) {
+    const hash = /^#tab-[\w-]+$/.test(window.location.hash) ? window.location.hash : '';
+    if (!hash) return;
+    container.querySelectorAll('form[action]').forEach(function (form) {
+        const action = form.getAttribute('action');
+        if (action === '' || action.indexOf('#') !== -1) return;
+        form.setAttribute('action', action + hash);
+    });
+}
+
+/**
+ * Go back to an event's view after a modal flow that changed its content.
+ *
+ * view_layout keeps location.hash in step with the active tab
+ * (`history.replaceState` on shown.bs.tab), so the tab the enrichment or import
+ * was launched from is already in the URL - it only has to survive the trip.
+ * Assigning a URL that differs from the current one by its hash alone does not
+ * reload anything, so returning to the same event asks for the reload outright.
+ *
+ * @param {number|string} eventId
+ */
+function returnToEventView(eventId) {
+    const hash = /^#tab-[\w-]+$/.test(window.location.hash) ? window.location.hash : '';
+    /* baseurl is absolute on most instances but empty on some, so the two sides
+     * of the comparison are resolved against the current document rather than
+     * compared as written. */
+    const target = new URL(baseurl + '/events/view2/' + eventId + hash, window.location.href);
+    if (target.origin === window.location.origin && target.pathname === window.location.pathname) {
+        if (hash && window.location.hash !== hash) {
+            window.location.hash = hash;
+        }
+        window.location.reload();
+    } else {
+        window.location.href = target.href;
+    }
+}
+
+/**
+ * Write a figure into a view_layout tab's title.
+ *
+ * The count is rendered server-side once and then goes stale the moment anything
+ * is added or removed, so whatever knows the new figure calls this. The tab must
+ * have been rendered with a `count` key, even a zero one, or there is no span to
+ * write into.
+ *
+ * @param {string} tabId  the tab's id, e.g. 'objects'
+ * @param {number} count
+ */
+function setTabCount(tabId, count) {
+    const el = document.querySelector('.ov-tab-count[data-tab-count="' + tabId + '"]');
+    if (el) { el.textContent = '(' + count + ')'; }
+}
+
+/**
+ * Read it back, so a caller that only knows it removed one row can say so.
+ *
+ * @param {string} tabId
+ * @return {number|null} null when the tab carries no count
+ */
+function getTabCount(tabId) {
+    const el = document.querySelector('.ov-tab-count[data-tab-count="' + tabId + '"]');
+    if (!el) { return null; }
+    const n = parseInt(el.textContent.replace(/[^0-9-]/g, ''), 10);
+    return isNaN(n) ? null : n;
+}
+
+/**
+ * Reload whichever event-view index tab is currently shown.
+ *
+ * Where the tag, galaxy and relationship modals are opened from an attribute
+ * row there is no card to refresh: the change shows in the attribute or object
+ * index behind the modal. Each tab exposes { loadFn, buildFn } on
+ * window.mispView once rendered (view_attributes.ctp / Objects/index.ctp), and
+ * neither exists outside the event view - a global index gets nothing to do.
+ *
+ * @return {boolean} whether a tab was reloaded
+ */
+function reloadEventViewIndexTab() {
+    const view = window.mispView || {};
+    const tabs = [
+        { sel: '.ajax-tab-content[data-url*="viewObjects"]',    api: view.objects },
+        { sel: '.ajax-tab-content[data-url*="viewAttributes"]', api: view.attrs }
+    ];
+    const reload = function (api) {
+        if (api && typeof api.loadFn === 'function'
+                && typeof api.buildFn === 'function') {
+            api.loadFn(api.buildFn());
+            return true;
+        }
+        return false;
+    };
+    /* Prefer the tab whose container is currently visible. */
+    for (let i = 0; i < tabs.length; i++) {
+        const cont = document.querySelector(tabs[i].sel);
+        if (cont && cont.offsetParent !== null && reload(tabs[i].api)) {
+            return true;
+        }
+    }
+    /* Fallback: any exposed tab API. */
+    for (let j = 0; j < tabs.length; j++) {
+        if (reload(tabs[j].api)) {
+            return true;
+        }
+    }
+    return false;
+}
+
+/**
+ * Bind the delete confirmations (Modals/confirmation_form + Forms/delete_mode)
+ * rendered in `container`: the form posts through fetch() instead of
+ * navigating, since the delete endpoints answer JSON, and the index behind the
+ * modal is refreshed rather than patched row by row — a row also lives in the
+ * card view, and the counts and the Deleted toggle move with it.
+ *
+ * @param {Element} container
+ */
+function initDeleteConfirmations(container) {
+    (container || document).querySelectorAll('script[data-delete-mode]').forEach(function (payloadEl) {
+        const form = payloadEl.closest('form');
+        const cfg = readJsonPayload(payloadEl);
+        if (!form || !cfg || form._deleteModeBound) { return; }
+        form._deleteModeBound = true;
+
+        const box = form.querySelector('[data-delete-permanent]');
+        const permanent = function () { return cfg.hard || (box !== null && box.checked); };
+        const syncNotes = function () {
+            const mode = permanent() ? 'hard' : 'soft';
+            form.querySelectorAll('[data-delete-note]').forEach(function (note) {
+                note.classList.toggle('d-none', note.dataset.deleteNote !== mode);
+            });
+        };
+        if (box) { box.addEventListener('change', syncNotes); }
+        syncNotes();
+
+        form.addEventListener('submit', async function (e) {
+            e.preventDefault();
+            const submit = form.querySelector('[type="submit"]');
+            if (submit) { submit.disabled = true; }
+
+            const ids = (cfg.ids || []).map(String);
+            const parts = [];
+            if (!cfg.inUrl) {
+                parts.push('data[' + cfg.model + '][ids]=' + encodeURIComponent(JSON.stringify(cfg.ids)));
+            }
+            if (permanent()) { parts.push('data[hard]=1'); }
+
+            let ok = false;
+            let data = {};
+            try {
+                const r = await fetch(form.action, {
+                    method: 'POST',
+                    headers: {
+                        'X-Requested-With': 'XMLHttpRequest',
+                        'Accept': 'application/json',
+                        'X-CSRF-Token': getCsrfToken(),
+                        'Content-Type': 'application/x-www-form-urlencoded',
+                    },
+                    body: parts.join('&'),
+                });
+                data = await r.json().catch(function () { return {}; });
+                ok = r.ok;
+            } catch (_e) {
+                data = {};
+            }
+
+            // Only what the server says it deleted counts: a refused request
+            // carries no ids and must not read as a success. The single-row
+            // endpoints answer `saved` alone.
+            let deleted = [];
+            if (ok && Array.isArray(data.ids)) {
+                deleted = data.ids.map(String);
+            } else if (ok && data.saved === true && cfg.inUrl) {
+                deleted = ids;
+            }
+            const msg = cfg.messages || {};
+            if (deleted.length === 0) {
+                showToast(data.errors || data.message || msg.fail, 'danger');
+                if (submit) { submit.disabled = false; }
+                return;
+            }
+
+            // Reloading an index does not recount its tab, so the server said
+            // up front which of these rows that count is made of.
+            if (cfg.countTab) {
+                const counted = (cfg.counted || []).map(String);
+                const left = deleted.filter(function (id) { return counted.indexOf(id) !== -1; }).length;
+                const n = getTabCount(cfg.countTab);
+                if (left > 0 && n !== null) { setTabCount(cfg.countTab, Math.max(0, n - left)); }
+            }
+            if (cfg.model === 'Object') {
+                if (window.objIndexSelection) { window.objIndexSelection.clear(deleted); }
+            } else if (typeof selectedItems !== 'undefined') {
+                deleted.forEach(function (id) { selectedItems.delete(id); });
+                updateMultiSelectToolbar();
+            }
+
+            const modal = bootstrap.Modal.getInstance(document.getElementById('mainModal'));
+            if (modal) { modal.hide(); }
+            showToast(data.success || msg.done, 'success');
+            if (data.saved === false && data.errors) { showToast(data.errors, 'warning'); }
+
+            refreshAfterRowChange(cfg, deleted, permanent());
+        });
+    });
+}
+
+/**
+ * Bring the page behind a delete or restore confirmation up to date.
+ *
+ * The record's own page is reloaded, or left for its parent once the record is
+ * gone for good. Otherwise the index the rows came from is reloaded in place:
+ * an event-view tab through its own API, any other lazy tab through its filter
+ * override (which rebuilds the URL from the filters on screen) — only a visible
+ * one, since a hidden tab can hold an unrelated row under the same id.
+ *
+ * @param {Object} cfg        the Forms/delete_mode payload, or { ownPage }
+ * @param {string[]} ids      ids of the rows that changed
+ * @param {boolean} permanent the records are gone for good
+ */
+function refreshAfterRowChange(cfg, ids, permanent) {
+    if (cfg.ownPage) {
+        if (permanent && cfg.parentUrl) {
+            window.location.href = cfg.parentUrl;
+        } else {
+            window.location.reload();
+        }
+        return;
+    }
+    if (reloadEventViewIndexTab()) {
+        return;
+    }
+    const holder = Array.from(document.querySelectorAll('.ajax-tab-content')).find(function (c) {
+        return c.offsetParent !== null && ids.some(function (id) {
+            return c.querySelector('tr[data-primary-id="' + id + '"]') !== null;
+        });
+    });
+    if (holder) {
+        const over = holder.__indexFilterOverride;
+        if (over && typeof over.buildUrl === 'function' && typeof over.reload === 'function') {
+            over.reload(over.buildUrl());
+            return;
+        }
+        if (holder.dataset.url) {
+            window.reloadAjaxTabIndex(holder, holder.dataset.url);
+            return;
+        }
+    }
+    window.location.reload();
+}
+
+/**
+ * Announce that page entity attributes may have changed so derived cards can update.
+ *
+ * Listeners use document.addEventListener('misp:attributes-changed').
+ */
+function notifyAttributesChanged() {
+    document.dispatchEvent(new CustomEvent('misp:attributes-changed'));
+}
+window.notifyAttributesChanged = notifyAttributesChanged;
+
+// Attribute mutations in the event view all go through #mainModal, so closing it
+// is the point where derived cards can re-read the event.
+(function () {
+    const modalEl = document.getElementById('mainModal');
+    if (!modalEl || modalEl._attrChangeBound) {
+        return;
+    }
+    modalEl._attrChangeBound = true;
+    modalEl.addEventListener('hidden.bs.modal', function () {
+        // A chained open only swaps content and does not mutate data.
+        if (modalEl._chaining) {
+            modalEl._chaining = false;
+            return;
+        }
+        notifyAttributesChanged();
+    });
+})();
+
+// Once #mainModal is fully closed, remove any leftover backdrops and restore body scrolling.
+(function () {
+    const modalEl = document.getElementById('mainModal');
+    if (!modalEl || modalEl._backdropReaperBound) {
+        return;
+    }
+    modalEl._backdropReaperBound = true;
+    modalEl.addEventListener('hidden.bs.modal', function () {
+        window.setTimeout(function () {
+            if (document.querySelector('.modal.show')) {
+                return;
+            }
+            document.querySelectorAll('.modal-backdrop').forEach(function (b) { b.remove(); });
+            document.body.classList.remove('modal-open');
+            document.body.style.removeProperty('overflow');
+            document.body.style.removeProperty('padding-right');
+        }, 300);
+    });
+})();
+
+// Hover enrichment
+(function () {
+    if (window._omHoverEnrichmentBound) {
+        return;
+    }
+    window._omHoverEnrichmentBound = true;
+
+    const SHOW_DELAY = 400;
+    const HIDE_DELAY = 250;
+    let showTimer = null;
+    let hideTimer = null;
+    let currentId = null;
+    const cache = {};
+    let pop = null;
+
+    function popover() {
+        if (!pop) {
+            pop = document.createElement('div');
+            pop.id = 'omHoverEnrichment';
+            pop.className = 'shadow border rounded bg-body';
+            pop.style.cssText = 'position:fixed; z-index:1090; width:min(520px,92vw); max-height:70vh; overflow:auto; display:none;';
+            pop.addEventListener('mouseenter', function () { window.clearTimeout(hideTimer); });
+            pop.addEventListener('mouseleave', hideSoon);
+            document.body.appendChild(pop);
+        }
+        return pop;
+    }
+
+    function place(anchor) {
+        const p = popover();
+        const r = anchor.getBoundingClientRect();
+        p.style.visibility = 'hidden';
+        p.style.display = 'block';
+        const pw = p.offsetWidth;
+        const ph = p.offsetHeight;
+        const left = Math.max(8, Math.min(r.left, window.innerWidth - pw - 8));
+        let top = r.bottom + 6;
+        if (top + ph > window.innerHeight - 8) {
+            const above = r.top - 6 - ph;
+            top = above > 8 ? above : Math.max(8, window.innerHeight - ph - 8);
+        }
+        p.style.left = left + 'px';
+        p.style.top = top + 'px';
+        p.style.visibility = 'visible';
+    }
+
+    function show(anchor, id) {
+        currentId = id;
+        const p = popover();
+        if (cache[id] !== undefined) {
+            p.innerHTML = cache[id];
+            p.style.display = 'block';
+            place(anchor);
+            return;
+        }
+        p.innerHTML = '<div class="p-3 text-muted small d-flex align-items-center gap-2">'
+                    + '<span class="spinner-border spinner-border-sm"></span></div>';
+        p.style.display = 'block';
+        place(anchor);
+        fetch(baseurl + '/attributes/hoverEnrichment/' + encodeURIComponent(id), {
+            headers: { 'X-Requested-With': 'XMLHttpRequest' }
+        })
+            .then(function (r) { return r.text(); })
+            .then(function (html) {
+                cache[id] = html;
+                if (currentId === id) { p.innerHTML = html; place(anchor); }
+            })
+            .catch(function () {
+                if (currentId === id) {
+                    p.innerHTML = '<div class="p-3 text-danger small">'
+                        + '<i class="fas fa-triangle-exclamation me-1"></i>Enrichment lookup failed.</div>';
+                }
+            });
+    }
+
+    function hideSoon() {
+        window.clearTimeout(hideTimer);
+        hideTimer = window.setTimeout(function () {
+            if (pop) { pop.style.display = 'none'; }
+            currentId = null;
+        }, HIDE_DELAY);
+    }
+
+    function hideNow() {
+        window.clearTimeout(showTimer);
+        window.clearTimeout(hideTimer);
+        if (pop) { pop.style.display = 'none'; }
+        currentId = null;
+    }
+
+    document.body.addEventListener('mouseover', function (e) {
+        const el = e.target.closest && e.target.closest('.om-hover-enrichment[data-hover-trigger="hover"]');
+        if (!el) { return; }
+        window.clearTimeout(hideTimer);
+        const id = el.getAttribute('data-hover-enrichment-id');
+        if (id === currentId) { return; }
+        window.clearTimeout(showTimer);
+        showTimer = window.setTimeout(function () { show(el, id); }, SHOW_DELAY);
+    });
+
+    document.body.addEventListener('mouseout', function (e) {
+        const el = e.target.closest && e.target.closest('.om-hover-enrichment[data-hover-trigger="hover"]');
+        if (!el) { return; }
+        window.clearTimeout(showTimer);
+        hideSoon();
+    });
+
+    document.body.addEventListener('click', function (e) {
+        const el = e.target.closest && e.target.closest('.om-hover-enrichment[data-hover-trigger="click"]');
+        if (!el) { return; }
+        e.preventDefault();
+        const id = el.getAttribute('data-hover-enrichment-id');
+        if (pop && pop.style.display === 'block' && currentId === id) { hideNow(); return; }
+        show(el, id);
+    });
+
+    // Dismiss the popover on an outside click / Escape / page scroll.
+    document.addEventListener('click', function (e) {
+        if (!pop || pop.style.display !== 'block') { return; }
+        if (pop.contains(e.target)) { return; }
+        if (e.target.closest && e.target.closest('.om-hover-enrichment')) { return; }
+        hideNow();
+    });
+    document.addEventListener('keydown', function (e) { if (e.key === 'Escape') { hideNow(); } });
+    window.addEventListener('scroll', function (e) {
+        if (pop && pop.style.display === 'block' && !(pop.contains(e.target))) { hideNow(); }
+    }, true);
+})();
+
+// Close the currently-open #mainModal (if any) and then open `url` in it.
+// Used to chain modals without stacking a second Bootstrap backdrop.
+function openModalChained(url, size = 'xl') {
+    const el = document.getElementById('mainModal');
+    const inst = el ? bootstrap.Modal.getInstance(el) : null;
+    if (inst && el.classList.contains('show')) {
+        el.addEventListener('hidden.bs.modal', function handler() {
+            el.removeEventListener('hidden.bs.modal', handler);
+            openModal(url, size);
+        });
+        el._chaining = true;
+        inst.hide();
+    } else {
+        openModal(url, size);
+    }
+}
+
+// Inject HTML into #mainModalBody and (re-)run its inline scripts in IIFEs.
+function renderMainModalContent(html) {
+    const container = document.getElementById('mainModalBody');
+    container.innerHTML = html;
+    container.querySelectorAll('script:not([type="application/json"])').forEach(oldScript => {
+        const newScript = document.createElement('script');
+        if (oldScript.src) {
+            newScript.src = oldScript.src;
+        } else {
+            newScript.textContent = '(function(){\n' + oldScript.textContent + '\n})();';
+        }
+        document.body.appendChild(newScript);
+        document.body.removeChild(newScript);
+    });
+    if (typeof initTomSelect === 'function') {
+        initTomSelect(container);
+    }
+    if (typeof initChoiceFields === 'function') {
+        initChoiceFields(container);
+    }
+    if (typeof initJsonFields === 'function') {
+        initJsonFields(container);
+    }
+    if (typeof initDateFields === 'function') {
+        initDateFields(container);
+    }
+    keepTabOnFormReturn(container);
+    if (typeof initObjectForm === 'function') {
+        initObjectForm(container);
+    }
+    if (typeof initPgpKeyLookup === 'function') {
+        initPgpKeyLookup(container);
+    }
+    initDeleteConfirmations(container);
+}
+
+// POST `body` to `url` and render the HTML response into #mainModal, chaining
+// from the currently-open modal (hide → show) so backdrops don't stack.
+function openModalPostChained(url, body, size = 'xl') {
+    const el = document.getElementById('mainModal');
+    const inst = el ? bootstrap.Modal.getInstance(el) : null;
+    const run = () => {
+        setModalSize(size, el.querySelector('.modal-dialog'));
+        fetch(url, { method: 'POST', body: body, headers: { 'X-Requested-With': 'XMLHttpRequest' } })
+            .then(response => response.text())
+            .then(html => {
+                renderMainModalContent(html);
+                bootstrap.Modal.getOrCreateInstance(el).show();
+            });
+    };
+    if (inst && el.classList.contains('show')) {
+        el.addEventListener('hidden.bs.modal', function handler() {
+            el.removeEventListener('hidden.bs.modal', handler);
+            run();
+        });
+        el._chaining = true;
+        inst.hide();
+    } else {
+        run();
+    }
+}
+
+function multiSelectItems(url, suffixe, size = 'md') {
+    if (selectedItems.size === 0) {
+        return;
+    }
+    const ids = Array.from(selectedItems.keys());
+    const fullUrl = url + '/' + JSON.stringify(ids) + suffixe;
+    openModal(fullUrl, size);
+}
+
+function redirectToExportResult() {
+    const returnFormat = document.getElementById('EventReturnFormat')?.value;
+    let idListStr = document.getElementById('PromptForm')?.dataset.idlist;
+
+    if (!returnFormat) return;
+
+    if (Array.isArray(idListStr)) {
+        idListStr = JSON.stringify(idListStr);
+    }
+
+    window.location = baseurl + '/events/restSearchExport/' + idListStr + '/' + returnFormat;
+}
+
+function toggleAllAttributeCheckboxes(selectAllEl) {
+    // Prefer the element passed directly from onclick="…(this)" so that
+    // when multiple scaffolds are loaded in sibling tab-panes (e.g.
+    // Attributes and Reports both have a select-all checkbox), we always
+    // operate on the one the user actually clicked rather than the first
+    // matching getElementById result.
+    const selectAll = selectAllEl || document.getElementById('select_all');
+    if (!selectAll) return;
+    const checked = selectAll.checked;
+    // Scope to the enclosing tab-pane so checkboxes in sibling tabs are
+    // not accidentally included. Fall back to document on standalone pages.
+    const scope = selectAll.closest('.tab-pane') || document;
+    const checkboxes = scope.querySelectorAll('.item-checkbox');
+
+    checkboxes.forEach(checkbox => {
+        checkbox.checked = checked;
+        checkbox.dispatchEvent(new Event('change', { bubbles: true }));
+    });
+}
+
+function isMobile() {
+    return window.innerWidth < 1000;
+}
+
+function animateIndexView(el) {
+    if (!el) return;
+    el.classList.remove('idx-view-anim');
+    void el.offsetWidth;
+    el.classList.add('idx-view-anim');
+    el.addEventListener('animationend', function () {
+        el.classList.remove('idx-view-anim');
+    }, { once: true });
+}
+
+/**
+ * Switch an index between its table and card views.
+ *
+ * `scope` exists because an index can be rendered inside an ajax tab, where
+ * several #tableView/#cardView pairs share the document and getElementById
+ * would always answer with the first one.
+ */
+function setView(view, save = true, scope = document) {
+    const tableView = scope.querySelector('#tableView');
+    const cardView  = scope.querySelector('#cardView');
+    const viewList  = scope.querySelector('#viewList');
+    const viewCard  = scope.querySelector('#viewCard');
+    // Only a deliberate toggle launches the animation
+    if (save) animateIndexView(view === 'card' ? cardView : tableView);
+    if (view === 'card') {
+        tableView?.classList.add('d-none');
+        cardView?.classList.remove('d-none');
+        viewList?.classList.remove('active');
+        viewCard?.classList.add('active');
+    } else {
+        cardView?.classList.add('d-none');
+        tableView?.classList.remove('d-none');
+        viewCard?.classList.remove('active');
+        viewList?.classList.add('active');
+    }
+
+    if (save) localStorage.setItem('indexViewMode', view);
+}
+
+function updateMultiSelectToolbar() {
+    // When multiple tabs each contain a mass-action toolbar (e.g. Attributes
+    // and Reports), getElementById would return the first one in DOM order
+    // regardless of which tab is visible.  Scope the lookup to the active
+    // tab-pane so we always update the currently visible toolbar.
+    // On standalone index pages (no tab-pane) fall back to document.
+    const scope = document.querySelector('.tab-pane.active') || document;
+    const toolbar        = scope.querySelector('#multiSelectToolbar');
+    const selectedCount  = scope.querySelector('#selectedCount');
+    const deleteButton     = scope.querySelector('#multi-delete-button');
+    const softDeleteButton = scope.querySelector('#multi-soft-delete-button');
+    const editButton     = scope.querySelector('#mass-edit-button');
+    const tagButton      = scope.querySelector('#mass-tag-button');
+    const localtagButton = scope.querySelector('#mass-local-tag-button');
+    const clusterButton  = scope.querySelector('#mass-cluster-button');
+    const localclusterButton = scope.querySelector('#mass-local-cluster-button');
+    const objectButton   = scope.querySelector('#mass-object-button');
+    const relationshipButton = scope.querySelector('#mass-relationship-button');
+    const sightingButton = scope.querySelector('#mass-sighting-button');
+    const fetchButton    = scope.querySelector('#mass-fetch-button');
+    const enableButton   = scope.querySelector('#mass-enable-button');
+    const disableButton  = scope.querySelector('#mass-disable-button');
+    const requireButton   = scope.querySelector('#mass-require-button');
+    const optionalButton  = scope.querySelector('#mass-optional-button');
+    const highlightButton   = scope.querySelector('#mass-highlight-button');
+    const removehighlightButton  = scope.querySelector('#mass-removehighlight-button');
+
+    const count          = selectedItems.size;
+
+    if (count === 0) {
+        toolbar?.classList.add('d-none');
+        return;
+    }
+
+    toolbar?.classList.remove('d-none');
+    if (selectedCount) selectedCount.textContent = count;
+
+    let canDeleteAll = true;
+    let allEnabled = true;
+    let allDisabled = true;
+    let allRequired = true;
+    let allOptional = true;
+    let allHighlighted = true;
+    let allRemovehighlighted = true;
+
+    selectedItems.forEach(item => {
+        if (!item.canDelete) canDeleteAll = false;
+        if (item.enable === '1') allDisabled = false;
+        if (item.enable === '0') allEnabled = false;
+        if (item.require === '1') allOptional = false;
+        if (item.require === '0') allRequired = false;
+        if (item.highlight === '1') allRemovehighlighted = false;
+        if (item.highlight === '0') allHighlighted = false;
+    });
+
+    const isHidden = !canDeleteAll;
+
+    deleteButton?.classList.toggle('d-none', isHidden);
+    softDeleteButton?.classList.toggle('d-none', isHidden);
+    editButton?.classList.toggle('d-none', isHidden);
+    tagButton?.classList.toggle('d-none', isHidden);
+    localtagButton?.classList.toggle('d-none', isHidden);
+    clusterButton?.classList.toggle('d-none', isHidden);
+    localclusterButton?.classList.toggle('d-none', isHidden);
+    objectButton?.classList.toggle('d-none', isHidden);
+    relationshipButton?.classList.toggle('d-none', isHidden);
+    sightingButton?.classList.remove('d-none');
+
+    fetchButton?.classList.toggle('d-none', !allEnabled);
+
+    if (enableButton && disableButton) {
+        if (allDisabled) {
+            enableButton.classList.remove('d-none');
+            disableButton.classList.add('d-none');
+        } else if (allEnabled) {
+            enableButton.classList.add('d-none');
+            disableButton.classList.remove('d-none');
+        } else {
+            enableButton.classList.remove('d-none');
+            disableButton.classList.remove('d-none');
+        }
+    }
+
+    if (requireButton && optionalButton) {
+        if (allOptional) {
+            requireButton.classList.remove('d-none');
+            optionalButton.classList.add('d-none');
+        } else if (allRequired) {
+            requireButton.classList.add('d-none');
+            optionalButton.classList.remove('d-none');
+        } else {
+            requireButton.classList.remove('d-none');
+            optionalButton.classList.remove('d-none');
+        }
+    }
+
+    if (highlightButton && removehighlightButton) {
+        if (allRemovehighlighted) {
+            highlightButton.classList.remove('d-none');
+            removehighlightButton.classList.add('d-none');
+        } else if (allHighlighted) {
+            highlightButton.classList.add('d-none');
+            removehighlightButton.classList.remove('d-none');
+        } else {
+            highlightButton.classList.remove('d-none');
+            removehighlightButton.classList.remove('d-none');
+        }
+    }
+}
+
+function buildFilterUrl() {
+    const base = baseIndexUrl.replace(/\/search.*/, '');
+    let filters = {};
+
+    const searchMatch = window.location.pathname.match(/\/search(.+)/);
+    if (searchMatch) {
+        const parts = searchMatch[1].split('/search');
+        parts.forEach(part => {
+            const [key, value] = part.split(':');
+            if (key && value) filters[key] = decodeURIComponent(value);
+        });
+    }
+
+    const filterField = document.getElementById('filterField');
+    const quickValue = filterField ? filterField.value.trim() : '';
+
+    if (filterBarConfig.mode === 'legacy' || filterBarConfig.mode === 'event') {
+        delete filters[filterBarConfig.searchField];
+        if (filterBarConfig.idField) delete filters[filterBarConfig.idField];
+
+        if (quickValue !== '') {
+            const uuidRegex = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+            const numberRegex = /^[0-9]+$/;
+
+            if (filterBarConfig.idField && (uuidRegex.test(quickValue) || numberRegex.test(quickValue))) {
+                filters[filterBarConfig.idField] = encodeURIComponent(quickValue);
+            } else {
+                filters[filterBarConfig.searchField] = encodeURIComponent(quickValue);
+            }
+        }
+    } else {
+        delete filters['quickFilter'];
+        if (quickValue !== '') {
+            filters['quickFilter'] = encodeURIComponent(quickValue);
+        }
+    }
+
+    document.querySelectorAll('.topbar-filter').forEach(el => {
+        const name  = el.getAttribute('name');
+        const value = el.value;
+        if (!name) return;
+        if (value !== '') filters[name] = encodeURIComponent(value);
+        else delete filters[name];
+    });
+
+    let newUrl = base;
+    if (filterBarConfig.mode === 'event') {
+        Object.keys(filters).forEach(key => {
+            newUrl += '/search' + key + ':' + filters[key];
+        });
+    } else {
+        Object.keys(filters).forEach(key => {
+            newUrl += '/' + key + ':' + filters[key];
+        });
+    }
+
+    return newUrl;
+}
+
+// Safe global fallback — filter_bar.ctp re-declares this per scaffold,
+// but mispOvermind.js references it unconditionally in its change listener.
+if (typeof selectedItems === 'undefined') {
+    var selectedItems = new Map();
+}
+
+document.addEventListener('DOMContentLoaded', () => {
+    document.getElementById('viewList')?.addEventListener('click', () => setView('table'));
+    document.getElementById('viewCard')?.addEventListener('click', () => setView('card'));
+
+    const savedView = localStorage.getItem('indexViewMode');
+    setView(isMobile() ? 'card' : (savedView || 'table'), false);
+
+    document.getElementById('quickFilterButton')?.addEventListener('click', () => {
+        window.location.href = buildFilterUrl();
+    });
+
+    document.getElementById('quickFilterField')?.addEventListener('keypress', function(e) {
+        if (e.key === 'Enter') window.location.href = buildFilterUrl();
+    });
+
+    // [data-manual] filters (free-text value_match inputs) are applied by their
+    // own button/Enter handler in filter_bar.ctp, never on change.
+    document.querySelectorAll('.topbar-filter:not([data-manual])').forEach(el => {
+        el.addEventListener('change', () => {
+            window.location.href = buildFilterUrl();
+        });
+    });
+
+    document.addEventListener('change', function(e) {
+        if (!e.target.classList.contains('item-checkbox')) return;
+
+        const checkbox = e.target;
+        const id       = checkbox.dataset.itemId;
+        const canDelete = checkbox.dataset.canDelete == "1";
+        const publish    = checkbox.dataset.publish;
+        const enable    = checkbox.dataset.enable;
+        const require    = checkbox.dataset.require;
+        const highlight    = checkbox.dataset.highlight;
+
+        if (checkbox.checked) {
+            selectedItems.set(id, { id, canDelete, publish, enable, require, highlight});
+        } else {
+            selectedItems.delete(id);
+        }
+
+        // The scaffold draws every row twice (table and card view): keep the
+        // twin box in step, or a selection looks lost after a view switch.
+        if (id) {
+            const scope = checkbox.closest('.index-results') || document;
+            scope.querySelectorAll('.item-checkbox').forEach(twin => {
+                if (twin !== checkbox && twin.dataset.itemId === id) {
+                    twin.checked = checkbox.checked;
+                }
+            });
+        }
+
+        updateMultiSelectToolbar();
+    });
+});
+
+/*******************************
+ * Tags
+ *******************************/
+function toggleTags(badge) {
+    const container = badge.closest('.tag-container');
+    const hiddenTags = container.querySelectorAll('.extra-tag');
+
+    if (!hiddenTags.length) return;
+
+    const isHidden = hiddenTags[0].classList.contains('d-none');
+    hiddenTags.forEach(g => g.classList.toggle('d-none'));
+
+    badge.textContent = isHidden ? '−' : '+' + hiddenTags.length;
+}
+
+/**
+ * Favourite toggle on a tag badge's star.
+ *
+ */
+document.addEventListener('DOMContentLoaded', function () {
+    document.body.addEventListener('click', async function (e) {
+        const starIcon = e.target.closest('.tag-star');
+        if (!starIcon) { return; }
+
+        e.preventDefault();
+        e.stopPropagation();
+
+        // A second click while the first is in flight would post a stale form
+        // and race the two responses onto the same icon.
+        if (starIcon.dataset.busy === '1') { return; }
+        starIcon.dataset.busy = '1';
+
+        const root = (typeof baseurl !== 'undefined' ? baseurl : '');
+        const tagId = starIcon.getAttribute('data-id');
+        const label = tagLabel(starIcon);
+        const wasFavourite = starIcon.classList.contains('fas');
+        setStar(starIcon, !wasFavourite);
+
+        try {
+            const formResponse = await fetch(root + '/favourite_tags/getToggleField', {
+                credentials: 'same-origin',
+                headers: {'X-Requested-With': 'XMLHttpRequest'}
+            });
+            if (!formResponse.ok) { throw new Error('HTTP ' + formResponse.status); }
+
+            const form = new DOMParser()
+                .parseFromString(await formResponse.text(), 'text/html')
+                .querySelector('form');
+            if (!form) { throw new Error('no toggle form in the response'); }
+
+            const formData = new FormData(form);
+            formData.set('data[FavouriteTag][data]', tagId);
+
+            const response = await fetch(form.getAttribute('action') || root + '/favourite_tags/toggle', {
+                method: 'POST',
+                credentials: 'same-origin',
+                headers: {
+                    'X-Requested-With': 'XMLHttpRequest',
+                    'Accept': 'application/json'
+                },
+                body: new URLSearchParams(formData)
+            });
+
+            const result = await response.json().catch(function () { return {}; });
+            if (!result.saved) {
+                throw new Error(result.fails || result.message || 'HTTP ' + response.status);
+            }
+            showToast(wasFavourite
+                ? label + ' removed from your favourites.'
+                : label + ' added to your favourites.', 'success');
+        } catch (error) {
+            setStar(starIcon, wasFavourite);
+            showToast(wasFavourite
+                ? 'Could not remove ' + label + ' from your favourites.'
+                : 'Could not add ' + label + ' to your favourites.', 'danger');
+            console.error('Favourite tag toggle failed:', error);
+        } finally {
+            delete starIcon.dataset.busy;
+        }
+    });
+
+    function tagLabel(starIcon) {
+        const badge = starIcon.parentElement
+            ? starIcon.parentElement.querySelector('.badge')
+            : null;
+        const name = badge ? badge.textContent.trim() : '';
+        return name === '' ? 'Tag' : escapeHtml(name);
+    }
+
+    function setStar(element, isFavourite) {
+        element.classList.toggle('fas', isFavourite);
+        element.classList.toggle('far', !isFavourite);
+    }
+});
+
+
+/*******************************
+ * Servers
+ *******************************/
+
+
+function testSyncRule(id, method) {
+    function esc(input) {
+        return String(input === null || input === undefined ? '' : input)
+            .replace(/&/g, '&amp;')
+            .replace(/</g, '&lt;')
+            .replace(/>/g, '&gt;')
+            .replace(/"/g, '&quot;')
+            .replace(/'/g, '&#039;');
+    }
+
+    var resultContainer = document.getElementById("sync_rule_" + method + "_test_" + id);
+    if (!resultContainer) return;
+
+    resultContainer.innerHTML = '<span class="text-muted">' +
+        '<i class="fas fa-spinner fa-spin me-1"></i>Running test...' +
+        '</span>';
+
+    fetch(baseurl + '/servers/testSyncRules/' + id + '/' + method)
+        .then(response => response.json().catch(() => null))
+        .then(function(response) {
+            resultContainer.innerHTML = '';
+
+            if (typeof response !== 'object' || response === null) {
+                resultContainer.innerHTML =
+                    '<span class="text-danger fw-semibold">Internal error</span>';
+            } else if ("error" in response) {
+                resultContainer.innerHTML =
+                    '<span class="text-danger fw-semibold">Error: #' +
+                    esc(response.error) + '</span>';
+            } else {
+                var resultTextFiltered = response.without_rules - response.with_rules;
+                if (resultTextFiltered !== 0) {
+                    resultTextFiltered += ' (' + (((response.without_rules - response.with_rules) / response.without_rules) * 100).toFixed(1) + '%)';
+                }
+
+                var resultTextSync = response.with_rules;
+                if (resultTextSync !== 0) {
+                    resultTextSync += ' (' + ((response.with_rules / response.without_rules) * 100).toFixed(1) + '%)';
+                }
+
+                resultContainer.innerHTML =
+                    '<div class="border rounded p-2 bg-light">' +
+                    '<div class="d-flex justify-content-between gap-2">' +
+                    '<span class="text-muted">Dropped Events :</span>' +
+                    '<span class="fw-semibold text-danger text-end">' +
+                    esc(resultTextFiltered) + '</span></div>' +
+                    '<div class="d-flex justify-content-between gap-2">' +
+                    '<span class="text-muted">Events to be Synced :</span>' +
+                    '<span class="fw-semibold text-success text-end">' +
+                    esc(resultTextSync) + '</span></div>' +
+                    '</div>';
+            }
+        })
+        .catch(function() {
+            resultContainer.innerHTML =
+                '<span class="text-danger fw-semibold">Internal error</span>';
+        });
+}
+
+
+/*
+ * The two remote probes below are shared by the servers table view and the
+ * servers card view. The table renders `connection_test_<id>` /
+ * `sync_user_test_<id>` containers, the card view draws its own panels, and
+ * both views live in the DOM at once — so a caller can hand over its own
+ * container rather than fight over duplicate ids.
+ */
+function resolveServerTestContainer(target, fallbackId) {
+    if (target && target.nodeType === 1) return target;
+    if (typeof target === 'string' && target) return document.getElementById(target);
+    return document.getElementById(fallbackId);
+}
+
+// Both probes announce their outcome so a view can dress itself around the
+// result (the card view flips its header badge and tint on this).
+function announceServerTest(name, detail) {
+    document.dispatchEvent(new CustomEvent(name, { detail: detail }));
+}
+
+function testConnection(id, target) {
+    function esc(input) {
+        return String(input === null || input === undefined ? '' : input)
+            .replace(/&/g, '&amp;')
+            .replace(/</g, '&lt;')
+            .replace(/>/g, '&gt;')
+            .replace(/"/g, '&quot;')
+            .replace(/'/g, '&#039;');
+    }
+
+    var container = resolveServerTestContainer(target, "connection_test_" + id);
+    if (!container) return Promise.resolve();
+    var resultContainer = container.querySelector('.server-action-result') || container;
+
+    resultContainer.innerHTML = '<span class="text-muted">' +
+        '<i class="fas fa-spinner fa-spin me-1"></i>Running test...' +
+        '</span>';
+    announceServerTest('misp:server-connection', { id: id, state: 'running' });
+
+    return fetch(baseurl + '/servers/testConnection/' + id)
+        .then(response => response.json())
+        .then(function(result) {
+
+            function line(name, value, valid) {
+                var badgeClass = 'text-secondary';
+                if (valid === true || valid === 'green') {
+                    badgeClass = 'text-end text-success';
+                } else if (valid === false || valid === 'red') {
+                    badgeClass = 'text-end text-danger';
+                } else if (valid === 'orange') {
+                    badgeClass = 'text-end text-warning';
+                }
+
+                var valueText = esc(value || '-');
+                return '<div class="d-flex justify-content-between gap-2">' +
+                    '<span class="text-muted">' + name + '</span>' +
+                    '<span class="fw-semibold ' + badgeClass + '">' +
+                    valueText + '</span></div>';
+            }
+
+            var html = '';
+
+            if (result.client_certificate) {
+                var cert = result.client_certificate;
+                html += '<div class="fw-semibold mb-1">Client certificate</div>';
+                html += '<div class="border rounded p-2 mb-2 bg-light">';
+
+                if (cert.error) {
+                    html += '<div class="text-danger fw-semibold">Error: ' +
+                        esc(cert.error) + '</div>';
+                } else {
+                    html += line("Subject", cert.subject);
+                    html += line("Issuer", cert.issuer);
+                    html += line("Serial number", cert.serial_number);
+                    html += line("Valid from", cert.valid_from, cert.valid_from_ok);
+                    html += line("Valid to", cert.valid_to, cert.valid_to_ok);
+                    html += line(
+                        "Public key",
+                        cert.public_key_type + ' (' + cert.public_key_size + ' bits)',
+                        cert.public_key_size_ok
+                    );
+                }
+                html += '</div>';
+            }
+
+            switch (result.status) {
+                case 1:
+                    var status_message = "OK";
+                    var compatibility = "Compatible";
+                    var compatibility_colour = "green";
+                    var colours = {local: 'green', remote: 'green', status: 'green'};
+                    var issue_colour = "red";
+
+                    if (result.mismatch == "hotfix" || result.mismatch == "major_compatible") issue_colour = "orange";
+
+                    if (result.newer == "local") {
+                        colours.remote = issue_colour;
+
+                        if (result.mismatch == "minor") {
+                            compatibility = "Pull only";
+                            compatibility_colour = "orange";
+                        } else if (result.mismatch == "major") {
+                            compatibility = "Incompatible";
+                            compatibility_colour = "red";
+                        } else if (result.mismatch == "minor_compatible" || result.mismatch == "major_compatible") {
+                            compatibility_colour = "green";
+                        }
+                    } else if (result.newer == "remote") {
+                        colours.local = issue_colour;
+
+                        if (result.mismatch != "hotfix" && result.mismatch != "major_compatible") {
+                            compatibility = "Incompatible";
+                            compatibility_colour = "red";
+                        }
+                    } else if (result.mismatch == "proposal") {
+                        compatibility_colour = "orange";
+                        compatibility = "Proposal pull disabled (remote version < v2.4.111)";
+                    }
+
+                    if (result.mismatch !== false && result.mismatch != "proposal") {
+                        if (result.newer == "remote") {
+                            if (result.mismatch == "major_compatible") {
+                                status_message = "Local instance on 2.5, moving to 3.0 is recommended.";
+                            } else {
+                                status_message = "Local instance outdated, update!";
+                            }
+                        } else if (result.newer == "local") {
+                            if (result.mismatch == "minor_compatible") {
+                                status_message = "Remote on 2.4, moving to 2.5 is recommended.";
+                            } else if (result.mismatch == "major_compatible") {
+                                status_message = "Remote on 2.5, moving to 3.0 is recommended.";
+                            } else {
+                                status_message = "Remote outdated, notify admin!";
+                            }
+                        }
+                        colours.status = issue_colour;
+                    }
+
+                    var post_result = '';
+                    if (result.post !== false) {
+                        var post_colour = "red";
+
+                        if (result.post == 1) {
+                            post_colour = "green";
+                            post_result = "Received sent package";
+                        } else if (result.post == 8) {
+                            post_result = "Could not POST message";
+                        } else if (result.post == 9) {
+                            post_result = "Invalid body";
+                        } else if (result.post == 10) {
+                            post_result = "Invalid headers";
+                        } else {
+                            post_colour = "orange";
+                            post_result = "Remote too old for this test";
+                        }
+                    }
+
+                    html += '<div class="border rounded p-2 bg-light">';
+                    html += line('Local version', result.local_version, colours.local);
+                    html += line('Remote version', result.version, colours.remote);
+                    html += line('Status', status_message, colours.status);
+                    html += line('Compatibility', compatibility, compatibility_colour);
+                    html += line('POST test', post_result, post_colour);
+                    html += '</div>';
+                    break;
+
+                case 2:
+                    html += '<div class="text-danger fw-semibold">Server unreachable</div>';
+                    break;
+                case 3:
+                    html += '<div class="text-danger fw-semibold">Unexpected error</div>';
+                    break;
+                case 4:
+                    html += '<div class="text-danger fw-semibold">Authentication failed</div>';
+                    break;
+                case 5:
+                    html += '<div class="text-danger fw-semibold">Password change required</div>';
+                    break;
+                case 6:
+                    html += '<div class="text-danger fw-semibold">Terms not accepted</div>';
+                    break;
+                case 7:
+                    html += '<div class="text-warning fw-semibold">Remote user not a sync user</div>';
+                    break;
+                case 8:
+                    html += '<div class="text-warning fw-semibold">Remote user not a sync user (sightings only)</div>';
+                    break;
+            }
+
+            resultContainer.innerHTML = html;
+            announceServerTest('misp:server-connection', {
+                id: id,
+                state: result.status === 1 ? 'ok' : 'down',
+                status: result.status
+            });
+        })
+        .catch(function() {
+            resultContainer.innerHTML = '<span class="text-danger fw-semibold">Internal error</span>';
+            announceServerTest('misp:server-connection', { id: id, state: 'down' });
+        });
+}
+
+
+function getRemoteSyncUser(id, target) {
+    function esc(input) {
+        return String(input === null || input === undefined ? '' : input)
+            .replace(/&/g, '&amp;')
+            .replace(/</g, '&lt;')
+            .replace(/>/g, '&gt;')
+            .replace(/"/g, '&quot;')
+            .replace(/'/g, '&#039;');
+    }
+
+    var container = resolveServerTestContainer(target, "sync_user_test_" + id);
+    if (!container) return Promise.resolve();
+    var resultContainer = container.querySelector('.server-action-result') || container;
+    announceServerTest('misp:server-sync-user', { id: id, state: 'running' });
+
+    return fetch(baseurl + '/servers/getRemoteUser/' + id)
+        .then(function(response) {
+            resultContainer.innerHTML = '<span class="text-muted">' +
+                '<i class="fas fa-spinner fa-spin me-1"></i>Running test...' +
+                '</span>';
+            return response.json().catch(() => null);
+        })
+        .then(function(response) {
+            resultContainer.innerHTML = '';
+
+            if (typeof response !== 'object' || response === null) {
+                resultContainer.innerHTML =
+                    '<span class="text-danger fw-semibold">Internal error</span>';
+                announceServerTest('misp:server-sync-user', { id: id, state: 'down' });
+            } else if ("error" in response) {
+                resultContainer.innerHTML =
+                    '<div class="text-danger fw-semibold">Error: #' +
+                    esc(response.error) + '</div>';
+                announceServerTest('misp:server-sync-user', { id: id, state: 'down' });
+            } else {
+                announceServerTest('misp:server-sync-user', { id: id, state: 'ok' });
+                var wrapper = document.createElement('div');
+                wrapper.className = 'border rounded p-2 bg-light';
+                Object.keys(response).forEach(function(key) {
+                    var value = response[key];
+                    var row = document.createElement('div');
+                    row.className = 'd-flex justify-content-between gap-2';
+                    row.innerHTML = '<span class="text-muted">' + esc(key) + '</span>' +
+                        '<span class="fw-semibold">' + esc(value) + '</span>';
+                    wrapper.appendChild(row);
+                });
+                resultContainer.appendChild(wrapper);
+            }
+        })
+        .catch(function() {
+            resultContainer.innerHTML =
+                '<span class="text-danger fw-semibold">Internal error</span>';
+            announceServerTest('misp:server-sync-user', { id: id, state: 'down' });
+        });
+}
+
+/*******************************
+ * Other
+ *******************************/
+async function getPopup(id, context, target, admin, popupType) {
+    const grayOut = document.querySelector("#gray_out");
+    const loadingIcons = document.querySelectorAll(".loading");
+    if (!popupType) popupType = '#popover_form';
+    const popupElement = document.querySelector(popupType);
+
+    if (grayOut) {
+        grayOut.style.display = "block";
+        grayOut.style.opacity = "1";
+    }
+
+    let url = baseurl;
+    if (admin) url += "/admin";
+    if (context) url += "/" + context;
+    if (target) url += "/" + target;
+    if (id) url += "/" + id;
+
+    loadingIcons.forEach(el => el.style.display = "block");
+
+    try {
+        const response = await fetch(url, {
+            method: 'GET',
+            cache: 'no-cache'
+        });
+
+        if (!response.ok) throw response;
+
+        const data = await response.text();
+        loadingIcons.forEach(el => el.style.display = "none");
+        if (popupElement) {
+            popupElement.innerHTML = data;
+            openPopup(popupType, false);
+        }
+    } catch (error) {
+        loadingIcons.forEach(el => el.style.display = "none");
+        if (grayOut) grayOut.style.display = "none";
+        if (typeof xhrFailCallback === "function") {
+            xhrFailCallback(error);
+        }
+    }
+}
+
+function publishPopup(id, type, scope) {
+    scope = scope === undefined ? 'events' : scope;
+    let action = "alert";
+
+    if (type === "publish") action = "publish";
+    else if (type === "unpublish") action = "unpublish";
+    else if (type === "sighting") action = "publishSightings";
+
+    fetch(`${baseurl}/${scope}/${action}/${id}`)
+        .then(response => {
+            if (!response.ok) throw response;
+            return response.json();
+        })
+        .then(data => openConfirmation(data))
+        .catch(error => {
+            if (typeof xhrFailCallback === 'function') xhrFailCallback(error);
+        });
+}
+
+function openConfirmation(data) {
+    const box = document.getElementById("confirmation_box");
+    if (box) {
+        box.innerHTML = data;
+        openPopup(box);
+    }
+}
+
+function openPopup(id, adjust_layout = true, callback) {
+    const el = (typeof id === 'string') ? document.querySelector(id) : id;
+    const grayOut = document.getElementById("gray_out");
+
+    if (!el) return;
+
+    if (adjust_layout) {
+        el.style.top = '';
+        el.style.height = '';
+        el.classList.remove('vertical-scroll');
+
+        const windowHeight = window.innerHeight;
+        const popupHeight = el.offsetHeight;
+
+        if (windowHeight < popupHeight) {
+            el.style.top = "50px";
+            el.style.height = (windowHeight - 50) + "px";
+            el.classList.add('vertical-scroll');
+        } else {
+            let topOffset;
+            if (windowHeight > (300 + popupHeight)) {
+                topOffset = ((windowHeight - popupHeight) / 2) - 125;
+            } else {
+                topOffset = (windowHeight - popupHeight) / 2;
+            }
+            el.style.top = topOffset + "px";
+        }
+    }
+
+    if (grayOut) {
+        grayOut.style.display = 'block';
+        grayOut.animate([{ opacity: 0 }, { opacity: 1 }], { duration: 400 });
+    }
+
+    el.style.display = 'block';
+    const animation = el.animate([{ opacity: 0 }, { opacity: 1 }], { duration: 400 });
+
+    animation.onfinish = () => {
+        if (typeof callback === 'function') {
+            callback();
+        }
+    };
+}
+
+function cancelPrompt(isolated) {
+    const grayOut = document.getElementById('gray_out');
+    if (grayOut && isolated === undefined) {
+        const fade = grayOut.animate([{ opacity: 1 }, { opacity: 0 }], { duration: 300, fill: 'forwards' });
+        fade.onfinish = () => { grayOut.style.display = 'none'; };
+    }
+    ['popover_form', 'confirmation_box'].forEach(id => {
+        const el = document.getElementById(id);
+        if (!el) return;
+        const fade = el.animate([{ opacity: 1 }, { opacity: 0 }], { duration: 300, fill: 'forwards' });
+        fade.onfinish = () => {
+            el.style.display = 'none';
+            if (id === 'confirmation_box') el.innerHTML = '';
+        };
+    });
+}
+
+// No-arg wrapper so the index-page top-bar action and the side menu
+// can both trigger the same popover without inlining getPopup args.
+function openEventTemplateLibraryUpdatePopup() {
+    getPopup('', 'event_templates', 'update');
+}
+
+async function submitEventTemplatesLibraryUpdate() {
+    const loadingIcons = document.querySelectorAll('.ov-loading-overlay');
+    loadingIcons.forEach(el => el.style.display = 'block');
+    try {
+        const response = await fetch(`${baseurl}/event_templates/update`, {
+            method: 'POST',
+            headers: {'Accept': 'application/json', 'X-Requested-With': 'XMLHttpRequest', 'X-CSRF-Token': (window.csrfToken || '')},
+            cache: 'no-cache',
+        });
+        if (!response.ok) throw response;
+        const summary = await response.json();
+        cancelPrompt();
+        const counts = {
+            installed: (summary.installed || []).length,
+            updated: (summary.updated || []).length,
+            skipped_current: (summary.skipped_current || []).length,
+            skipped_forked: (summary.skipped_forked || []).length,
+            failed: (summary.failed || []).length,
+        };
+        const msg = `Library update — installed ${counts.installed}, updated ${counts.updated}, `
+            + `skipped ${counts.skipped_current + counts.skipped_forked}, failed ${counts.failed}.`;
+        if (typeof showMessage === 'function') {
+            showMessage(counts.failed > 0 ? 'fail' : 'success', msg);
+        }
+        setTimeout(() => window.location.reload(), 800);
+    } catch (error) {
+        loadingIcons.forEach(el => el.style.display = 'none');
+        if (typeof xhrFailCallback === 'function') xhrFailCallback(error);
+    } finally {
+        loadingIcons.forEach(el => el.style.display = 'none');
+    }
+}
+
+/**
+ * Turn every `.tom-select` in `container` into a TomSelect. Safe to call more
+ * than once on the same scope — which happens routinely (a modal body, an
+ * ajax fragment, and initChoiceCards' sharing-group reveal all call it).
+ *
+ * The selector is qualified by tag on purpose: TomSelect copies the source
+ * element's class list onto the `.ts-wrapper` div it builds, so a bare
+ * `.tom-select` query matches twice per control after the first pass — and the
+ * wrapper carries no `.tomselect` back-reference, so it slips past the guard
+ * below and `new TomSelect(div)` throws on `e.value.trim()`.
+ */
+function initTomSelect(container) {
+    container.querySelectorAll('select.tom-select').forEach(el => {
+        if (el.tomselect) return;
+
+        const config = {
+            create: false,
+            persist: false,
+            placeholder: el.dataset.placeholder || 'Select options...'
+        };
+
+        if (el.hasAttribute('multiple')) {
+            config.plugins = ['remove_button'];
+        }
+
+        new TomSelect(el, config);
+    });
+}
+
+function initCollectionForm(container) {
+    const distributionSelect = container.querySelector('#distribution-select');
+    const sgContainer = container.querySelector('#sg-container');
+
+    if (!distributionSelect || !sgContainer) return;
+
+    function toggleSharingGroup() {
+        if (parseInt(distributionSelect.value) === 4) {
+            sgContainer.classList.remove('d-none');
+        } else {
+            sgContainer.classList.add('d-none');
+        }
+    }
+
+    toggleSharingGroup();
+    distributionSelect.addEventListener('change', toggleSharingGroup);
+}
+
+function toggleSecret(fieldId, btn) {
+    const input = document.getElementById(fieldId);
+    const icon = btn.querySelector('i');
+
+    if (input.type === 'password') {
+        input.type = 'text';
+        icon.classList.replace('fa-eye', 'fa-eye-slash');
+        btn.classList.add('text-primary');
+    } else {
+        input.type = 'password';
+        icon.classList.replace('fa-eye-slash', 'fa-eye');
+        btn.classList.remove('text-primary');
+    }
+}
+
+/*******************************
+ * PGP key lookup on the CIRCL key server, for the user forms.
+ *
+ * The form only describes where the pieces are:
+ *   [data-pgp-lookup]   the button
+ *   [data-pgp-email]    the email input the search runs on
+ *   [data-pgp-target]   the textarea the chosen key lands in
+ *   [data-pgp-results]  the panel the result list is dropped into
+ *
+ * `users/searchGpgKey` answers with Users/ajax/fetchpgpkey (the themed
+ * fragment), so the rows arrive ready to display and are only read back for
+ * their `data-pgp-fingerprint`; `users/fetchGpgKey` then answers with the
+ * armoured key itself. Both are gated server-side on
+ * GnuPG.key_fetching_disabled, and a 403 is reported as such rather than
+ * swallowed.
+ *******************************/
+function initPgpKeyLookup(container) {
+    const root = container || document;
+    const button = root.querySelector('[data-pgp-lookup]');
+    if (!button || button.dataset.pgpBound) return;
+    button.dataset.pgpBound = '1';
+
+    const email = root.querySelector('[data-pgp-email]');
+    const target = root.querySelector('[data-pgp-target]');
+    const panel = root.querySelector('[data-pgp-results]');
+    if (!email || !target || !panel) return;
+
+    const label = button.innerHTML;
+    const base = (typeof baseurl === 'string') ? baseurl : '';
+
+    function busy(on) {
+        button.disabled = on || email.value.trim() === '';
+        button.innerHTML = on
+            ? '<span class="spinner-border spinner-border-sm me-1" aria-hidden="true"></span>' + button.dataset.pgpBusyLabel
+            : label;
+    }
+
+    function notice(variant, icon, message) {
+        panel.innerHTML = '<div class="alert alert-' + variant + ' d-flex align-items-start gap-2 mb-0 py-2"'
+            + ' style="font-size:.8rem;"><i class="fas ' + icon + ' mt-1"></i><div>' + escapeHtml(message) + '</div></div>';
+        panel.classList.remove('d-none');
+    }
+
+    function clear() {
+        panel.innerHTML = '';
+        panel.classList.add('d-none');
+    }
+
+    /* Show four keys and make the rest scroll to avoid pushing buttons off-screen. */
+    function capList() {
+        const list = panel.querySelector('[data-pgp-list]');
+        if (!list) return;
+        const rows = list.querySelectorAll('[data-pgp-fingerprint]');
+        if (rows.length <= 4) return;
+        const height = rows[4].getBoundingClientRect().top - list.getBoundingClientRect().top;
+        if (height > 0) {
+            list.style.maxHeight = Math.round(height) + 'px';
+            list.style.overflowY = 'auto';
+        }
+    }
+
+    // The button is only ever as usable as the email field it searches on.
+    email.addEventListener('input', function () { busy(false); });
+    busy(false);
+
+    button.addEventListener('click', function () {
+        const address = email.value.trim();
+        if (address === '') return;
+        clear();
+        busy(true);
+        fetch(base + '/users/searchGpgKey/' + encodeURIComponent(address), {
+            headers: { 'X-Requested-With': 'XMLHttpRequest' }
+        })
+        .then(function (response) {
+            return response.text().then(function (body) {
+                return { status: response.status, body: body };
+            });
+        })
+        .then(function (result) {
+            if (result.status === 403) {
+                notice('secondary', 'fa-ban', button.dataset.pgpDisabledMessage);
+            } else if (result.status === 404) {
+                notice('warning', 'fa-circle-question', button.dataset.pgpEmptyMessage);
+            } else if (result.status >= 400) {
+                notice('danger', 'fa-circle-exclamation', button.dataset.pgpErrorMessage);
+            } else {
+                panel.innerHTML = result.body;
+                panel.classList.remove('d-none');
+                capList(); // only measurable once the panel is shown
+            }
+        })
+        .catch(function () {
+            notice('danger', 'fa-circle-exclamation', button.dataset.pgpErrorMessage);
+        })
+        .finally(function () { busy(false); });
+    });
+
+    // One delegated handler for the injected list: dismiss, or take a key.
+    panel.addEventListener('click', function (event) {
+        if (event.target.closest('[data-pgp-dismiss]')) {
+            clear();
+            return;
+        }
+        const row = event.target.closest('[data-pgp-fingerprint]');
+        if (!row) return;
+
+        row.classList.add('disabled');
+        fetch(base + '/users/fetchGpgKey/' + encodeURIComponent(row.dataset.pgpFingerprint), {
+            headers: { 'X-Requested-With': 'XMLHttpRequest' }
+        })
+        .then(function (response) {
+            if (!response.ok) { throw new Error(response.status); }
+            return response.text();
+        })
+        .then(function (key) {
+            target.value = key.trim();
+            target.dispatchEvent(new Event('input', { bubbles: true }));
+            clear();
+            if (typeof showToast === 'function') {
+                showToast(button.dataset.pgpFoundMessage);
+            }
+        })
+        .catch(function () {
+            row.classList.remove('disabled');
+            notice('danger', 'fa-circle-exclamation', button.dataset.pgpErrorMessage);
+        });
+    });
+}
+
+
+/**
+ * Displays a success or error message
+ */
+function showMessage(success, message, fullError) {
+    let duration = 1000 + (message.length * 40);
+    const contentId = `ajax_${success}`;
+    const containerId = `ajax_${success}_container`;
+
+    const contentElem = document.getElementById(contentId);
+    const containerElem = document.getElementById(containerId);
+
+    if (!contentElem || !containerElem) return;
+
+    if (message.indexOf("$flashErrorMessage") >= 0) {
+        const flashMessageLink = `<a href="#" class="bold" data-content="${escapeHtml(fullError)}" data-html="true" onclick="event.preventDefault(); bootstrap.Popover.getOrCreateInstance(this).show();">here</a>`;
+        message = message.replace("$flashErrorMessage", flashMessageLink);
+        duration = 5000;
+    }
+
+    contentElem.innerHTML = message;
+    containerElem.style.display = 'block';
+
+    const fadeIn = containerElem.animate([{ opacity: 0 }, { opacity: 1 }], {
+        duration: 600,
+        fill: 'forwards'
+    });
+
+    fadeIn.onfinish = () => {
+        setTimeout(() => {
+            const fadeOut = containerElem.animate([{ opacity: 1 }, { opacity: 0 }], {
+                duration: 600,
+                fill: 'forwards'
+            });
+
+            fadeOut.onfinish = () => {
+                containerElem.style.display = 'none';
+            };
+        }, duration);
+    };
+}
+
+function escapeHtml(unsafe) {
+    if (typeof unsafe === "boolean" || typeof unsafe === "number") {
+        return unsafe;
+    }
+    if (!unsafe) return "";
+
+    const map = {
+        '&': '&amp;',
+        '<': '&lt;',
+        '>': '&gt;',
+        '"': '&quot;',
+        "'": '&#039;'
+    };
+
+    return unsafe.replace(/[&<>"']/g, (m) => map[m]);
+}
+
+function getCsrfToken() {
+    const match = document.cookie.match(/(?:^|;\s*)csrfToken=([^;]*)/);
+    if (match) {
+        return decodeURIComponent(match[1]);
+    }
+    return window.csrfToken || '';
+}
+
+/*******************************
+ * Proposals (shadow attributes)
+ *
+ * Shared by the attribute and object event-view indexes. Accept is a direct
+ * XHR (no confirmation); discard goes through a confirmation modal. Both toast
+ * and refresh whichever proposal-bearing tab(s) are loaded — no page reload.
+ *
+ *******************************/
+function reloadProposalTabs() {
+    if (window.mispView.attrs && typeof window.mispView.attrs.loadFn === 'function') {
+        window.mispView.attrs.loadFn(window.mispView.attrs.buildFn());
+    }
+    if (window.mispView.objects && typeof window.mispView.objects.loadFn === 'function') {
+        window.mispView.objects.loadFn(window.mispView.objects.buildFn());
+    }
+}
+
+function acceptProposal(id) {
+    fetch(baseurl + '/shadow_attributes/accept/' + id, {
+        method: 'POST',
+        headers: {
+            'X-Requested-With': 'XMLHttpRequest',
+            'Accept':           'application/json',
+            'X-CSRF-Token':     getCsrfToken()
+        }
+    })
+        .then(function (r) { return r.json().catch(function () { return {}; }); })
+        .then(function (resp) {
+            if (resp && resp.saved) {
+                showToast(resp.success || 'Proposal accepted.', 'success');
+                reloadProposalTabs();
+            } else {
+                showToast((resp && resp.errors) ? resp.errors : 'Could not accept the proposal.', 'danger');
+            }
+        })
+        .catch(function () { showToast('Could not accept the proposal.', 'danger'); });
+}
+
+function copyToClipboard(btn, text) {
+    const originalHtml = btn.innerHTML;
+
+    const proceedCopy = () => {
+        btn.innerHTML = '<i class="fas fa-check text-primary"></i>';
+
+        const tooltip = bootstrap.Tooltip.getInstance(btn);
+        if (tooltip) {
+            btn.setAttribute('data-bs-original-title', 'Copied!');
+            tooltip.show();
+        }
+
+        setTimeout(() => {
+            btn.innerHTML = originalHtml;
+            if (tooltip) {
+                btn.setAttribute('data-bs-original-title', 'Copy to clipboard');
+                tooltip.hide();
+            }
+        }, 2000);
+    };
+
+    if (navigator.clipboard && window.isSecureContext) {
+        navigator.clipboard.writeText(text).then(proceedCopy);
+    } else {
+        const textarea = document.createElement("textarea");
+        textarea.value = text;
+        textarea.style.position = "fixed";
+        document.body.appendChild(textarea);
+        textarea.focus();
+        textarea.select();
+        try {
+            document.execCommand("copy");
+            proceedCopy();
+        } catch (err) {
+            console.error('Fallback copy failed', err);
+        }
+        document.body.removeChild(textarea);
+    }
+}
+
+/**
+ * Copy an arbitrary string to the clipboard and show a discreet toast.
+ * This helper is what index row "copy" actions use.
+ */
+function copyValueToClipboard(text, message) {
+    if (text === undefined || text === null || text === '') {
+        showToast('Nothing to copy', 'warning');
+        return;
+    }
+
+    const done = () => showToast(message || 'Copied to clipboard');
+
+    if (navigator.clipboard && window.isSecureContext) {
+        navigator.clipboard.writeText(text).then(done).catch((err) => {
+            console.error('Clipboard copy failed', err);
+        });
+    } else {
+        const textarea = document.createElement('textarea');
+        textarea.value = text;
+        textarea.style.position = 'fixed';
+        textarea.style.opacity = '0';
+        document.body.appendChild(textarea);
+        textarea.focus();
+        textarea.select();
+        try {
+            document.execCommand('copy');
+            done();
+        } catch (err) {
+            console.error('Fallback copy failed', err);
+        }
+        document.body.removeChild(textarea);
+    }
+}
+
+function toggleFormats(button, containerId) {
+    const container = document.getElementById(containerId);
+    const extraFormats = container.querySelectorAll('.extra-format');
+    const isExpanding = extraFormats[0].classList.contains('d-none');
+
+    extraFormats.forEach(el => {
+        if (isExpanding) {
+            el.classList.remove('d-none');
+            el.classList.add('animate__animated', 'animate__fadeIn');
+        } else {
+            el.classList.add('d-none');
+        }
+    });
+
+    if (isExpanding) {
+        button.innerHTML = '<i class="fas fa-minus small me-1"></i>';
+        button.classList.replace('bg-dark', 'bg-primary');
+        button.classList.replace('text-primary', 'text-dark');
+    } else {
+        button.innerHTML = '<i class="fas fa-plus small me-1"></i>' + extraFormats.length;
+        button.classList.replace('bg-primary', 'bg-dark');
+        button.classList.replace('text-dark', 'text-primary');
+    }
+}
+
+
+/*******************************
+ * Server Add/Edit
+ *******************************/
+
+function initServerForm(container) {
+    const form = container.querySelector('#ServerEditForm') || container.querySelector('#ServerAddForm');
+    if (!form) return;
+
+    /**********************************
+     * Organisation type logic
+     **********************************/
+    const orgType = container.querySelector('[name="data[Server][organisation_type]"], #ServerOrganisationType');
+
+    const externalContainer = container.querySelector('#ServerExternalContainer');
+    const localContainer    = container.querySelector('#ServerLocalContainer');
+    const nameContainer     = container.querySelector('#ServerExternalNameContainer');
+    const uuidContainer     = container.querySelector('#ServerExternalUuidContainer');
+
+    function hideAllOrgFields() {
+        if (externalContainer) externalContainer.style.display = 'none';
+        if (localContainer)    localContainer.style.display = 'none';
+        if (nameContainer)     nameContainer.style.display = 'none';
+        if (uuidContainer)     uuidContainer.style.display = 'none';
+    }
+
+    function updateOrganisationFields() {
+        if (!orgType) return;
+
+        const value = orgType.value;
+
+        hideAllOrgFields();
+        switch (value) {
+            case 'local':
+            case '0':
+                if (localContainer) localContainer.style.display = 'block';
+                break;
+
+            case 'external':
+            case '1':
+                if (externalContainer) externalContainer.style.display = 'block';
+                break;
+
+
+            case 'new':
+            case '2':
+                if (nameContainer) nameContainer.style.display = 'block';
+                if (uuidContainer) uuidContainer.style.display = 'block';
+                break;
+        }
+    }
+
+    if (orgType) {
+        orgType.addEventListener('change', updateOrganisationFields);
+        updateOrganisationFields();
+    }
+
+    /**********************************
+     * PEM certificate dropzones
+     **********************************/
+    container.querySelectorAll('.pem-dropzone').forEach(zone => {
+        const inputId = zone.dataset.target;
+        const input   = inputId ? container.querySelector('#' + inputId) : null;
+        if (!input) return;
+
+        zone.addEventListener('click', () => input.click());
+
+        zone.addEventListener('keydown', e => {
+            if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); input.click(); }
+        });
+
+        zone.addEventListener('dragover', e => {
+            e.preventDefault();
+            zone.classList.add('pem-drag-over');
+        });
+
+        zone.addEventListener('dragleave', () => zone.classList.remove('pem-drag-over'));
+
+        zone.addEventListener('drop', e => {
+            e.preventDefault();
+            zone.classList.remove('pem-drag-over');
+            const file = e.dataTransfer.files[0];
+            if (file) _setPemFile(zone, input, file);
+        });
+
+        input.addEventListener('change', () => {
+            if (input.files[0]) _setPemFile(zone, input, input.files[0]);
+        });
+    });
+
+    container.querySelectorAll('.pem-existing').forEach(marker => {
+        const zone        = container.querySelector('#' + marker.dataset.zone);
+        const input       = container.querySelector('#' + marker.dataset.input);
+        const deleteField = container.querySelector('#' + marker.dataset.deleteField);
+        const filename    = marker.dataset.filename;
+
+        if (!zone || !input) return;
+
+        // Displays the area as if a file were already loaded
+        _setPemExisting(zone, input, deleteField, filename);
+
+        marker.remove();
+    });
+
+    /**********************************
+     * Sync Rules
+     **********************************/
+
+    const syncRuleStates = {}; // Map<string, string>  (value -> label)
+    const typeFilterStates = {}; // direction -> { attributes: Map, objects: Map }
+
+    function _renderPills(pillsEl, jsonInputEl, items, badgeClass, onUpdate) {
+        pillsEl.innerHTML = '';
+        items.forEach((label, value) => {
+            const pill = document.createElement('span');
+            pill.className = `badge d-inline-flex align-items-center gap-1 ${badgeClass}`;
+            pill.style.cssText = 'font-size:.75rem;font-weight:500;padding:4px 8px;';
+            pill.innerHTML =
+                escapeHtml(label) +
+                '<button type="button" class="btn-close btn-close-white ms-1" ' +
+                'style="font-size:.55rem;" aria-label="Remove"></button>';
+            pill.querySelector('.btn-close').addEventListener('click', () => {
+                items.delete(value);
+                _renderPills(pillsEl, jsonInputEl, items, badgeClass, onUpdate);
+                if (typeof onUpdate === 'function') {
+                    onUpdate();
+                }
+            });
+            pillsEl.appendChild(pill);
+        });
+        jsonInputEl.value = JSON.stringify([...items.keys()]);
+    }
+
+    function _syncRuleRender(fieldKey) {
+        const pillsEl  = container.querySelector('#SyncRulePills_' + fieldKey);
+        const jsonEl   = container.querySelector('#SyncRuleJson_' + fieldKey);
+        if (!pillsEl || !jsonEl) return;
+        const items      = syncRuleStates[fieldKey] || new Map();
+        const badgeClass = fieldKey.includes('blockedlist') ? 'text-bg-danger' : 'text-bg-success';
+        const updateLabel = () => {
+            const contextLabel = pillsEl.closest('.sync-rule-box')?.querySelector('.sync-rule-label');
+            if (contextLabel) contextLabel.classList.toggle('d-none', items.size === 0);
+        };
+        _renderPills(pillsEl, jsonEl, items, badgeClass, updateLabel);
+        updateLabel();
+    }
+
+
+    function _syncRuleAdd(fieldKey, value, label) {
+        const trimmed = value.trim();
+        if (!trimmed) return;
+        if (!syncRuleStates[fieldKey]) syncRuleStates[fieldKey] = new Map();
+        syncRuleStates[fieldKey].set(trimmed, (label || trimmed).trim());
+        _syncRuleRender(fieldKey);
+    }
+
+
+    // Initializes the states using the existing JSON values (edit mode)
+    container.querySelectorAll('.sync-rule-box').forEach(box => {
+        const fieldKey = `${box.dataset.direction}_${box.dataset.type}_${box.dataset.list}`;
+        const jsonInput = container.querySelector('#SyncRuleJson_' + fieldKey);
+        syncRuleStates[fieldKey] = new Map();
+
+        if (jsonInput && jsonInput.value && jsonInput.value !== '[]') {
+            try {
+                // In edit mode, we only have the IDs, we display the ID while waiting for TomSelect to be ready to resolve the labels
+                const existing = JSON.parse(jsonInput.value);
+                existing.forEach(v => syncRuleStates[fieldKey].set(String(v), String(v)));
+                _syncRuleRender(fieldKey);
+            } catch(e) {}
+        }
+
+        // "+" button and free text
+        const addBtn   = box.querySelector('.sync-rule-add-btn');
+        const freetext = box.querySelector('.sync-rule-freetext');
+
+        if (addBtn && freetext) {
+            addBtn.addEventListener('click', () => {
+                _syncRuleAdd(fieldKey, freetext.value, freetext.value);
+                freetext.value = '';
+            });
+            freetext.addEventListener('keydown', e => {
+                if (e.key === 'Enter') {
+                    e.preventDefault();
+                    _syncRuleAdd(fieldKey, freetext.value, freetext.value);
+                    freetext.value = '';
+                }
+            });
+        }
+
+        // TomSelect — retrieves the label from the selected option
+        const selectEl = container.querySelector('#SyncRule_' + fieldKey + '_select');
+        if (selectEl) {
+            const waitForTs = setInterval(() => {
+                if (!selectEl.tomselect) return;
+                clearInterval(waitForTs);
+
+                // Label resolution for preloaded values (edit mode)
+                syncRuleStates[fieldKey].forEach((lbl, val) => {
+                    const opt = selectEl.tomselect.options[val];
+                    if (opt) syncRuleStates[fieldKey].set(val, opt.text);
+                });
+                _syncRuleRender(fieldKey);
+
+                selectEl.tomselect.on('item_add', value => {
+                    const opt   = selectEl.tomselect.options[value];
+                    const label = opt ? opt.text : value;
+                    _syncRuleAdd(fieldKey, value, label);
+                    selectEl.tomselect.removeItem(value, true);
+                });
+            }, 50);
+        }
+    });
+
+    /**********************************
+     * Pull rules — fetch remote tags & orgs
+     **********************************/
+    const serverId = form.dataset.serverId || '';
+
+    if (serverId) {
+        fetch(baseurl + '/servers/queryAvailableSyncFilteringRules/' + serverId, {
+            method: 'POST',
+            headers: {
+                'X-Requested-With': 'XMLHttpRequest',
+                'Accept': 'application/json',
+                'Content-Type': 'application/json',
+                'X-CSRF-Token': getCsrfToken(),
+            },
+        })
+            .then(r => r.json())
+            .then(response => {
+                const alertFetching = container.querySelector('.sync-pull-fetching');
+                const alertSuccess  = container.querySelector('.sync-pull-success');
+                const alertError    = container.querySelector('.sync-pull-error');
+
+                if (response.error && response.error.length > 0) {
+                    // We display the error and enable freetext only
+                    if (alertFetching) alertFetching.classList.add('d-none');
+                    if (alertError) {
+                        alertError.classList.remove('d-none');
+                        alertError.querySelector('.sync-pull-error-msg').textContent = response.error;
+                    }
+
+                    container.querySelectorAll('[data-remote="true"]').forEach(sel => {
+                        sel.closest('div.mb-2')?.remove();
+                    });
+                    return;
+                }
+
+                const remoteTags  = response.data.tags          || [];
+                const remoteOrgs  = response.data.organisations || [];
+
+                container.querySelectorAll('[data-remote="true"]').forEach(selectEl => {
+                    const fieldKey  = selectEl.dataset.fieldKey;
+                    const isOrgSel  = fieldKey.includes('_orgs_');
+                    const dataset   = isOrgSel ? remoteOrgs : remoteTags;
+
+                    //  Wait until TomSelect is ready
+                    const waitTs = setInterval(() => {
+                        if (!selectEl.tomselect) return;
+                        clearInterval(waitTs);
+
+                        const ts = selectEl.tomselect;
+                        ts.enable();
+                        ts.clearOptions();
+
+                        dataset.forEach(entry => {
+                            if (entry.uuid !== undefined && entry.name !== undefined) {
+                                ts.addOption({ value: entry.uuid, text: entry.name });
+                            } else {
+                                ts.addOption({ value: entry, text: entry });
+                            }
+                        });
+                        ts.refreshOptions(false);
+
+                        ts.on('item_add', value => {
+                            const opt   = ts.options[value];
+                            const label = opt ? opt.text : value;
+                            _syncRuleAdd(fieldKey, value, label);
+                            ts.removeItem(value, true);
+                        });
+                    }, 50);
+                });
+
+                if (alertFetching) alertFetching.classList.add('d-none');
+                if (alertSuccess)  alertSuccess.classList.remove('d-none');
+            })
+            .catch(err => {
+                const alertFetching = container.querySelector('.sync-pull-fetching');
+                const alertError    = container.querySelector('.sync-pull-error');
+                if (alertFetching) alertFetching.classList.add('d-none');
+                if (alertError) {
+                    alertError.classList.remove('d-none');
+                    alertError.querySelector('.sync-pull-error-msg').textContent =
+                        'Connection error — ' + err.message;
+                }
+            });
+    }
+
+    /**********************************
+     * Type Filtering Rules
+     **********************************/
+
+    function _typeFilterRender(direction, scope) {
+        const pillsEl = container.querySelector(`#TypeFilterPills_${direction}_${scope}`);
+        const jsonEl  = container.querySelector(`#TypeFilterJson_${direction}_${scope}`);
+        if (!pillsEl || !jsonEl) return;
+        const items = typeFilterStates[direction]?.[scope] || new Map();
+        _renderPills(pillsEl, jsonEl, items, 'text-bg-danger');
+    }
+
+    ['push', 'pull'].forEach(direction => {
+        typeFilterStates[direction] = { attributes: new Map(), objects: new Map() };
+
+        ['attributes', 'objects'].forEach(scope => {
+            const jsonInput = container.querySelector(`#TypeFilterJson_${direction}_${scope}`);
+            if (!jsonInput || !jsonInput.value || jsonInput.value === '[]') return;
+            try {
+                const existing = JSON.parse(jsonInput.value);
+                existing.forEach(v => typeFilterStates[direction][scope].set(String(v), String(v)));
+                _typeFilterRender(direction, scope);
+            } catch(e) {}
+
+            const selectEl = container.querySelector(`#TypeFilterSelect_${direction}_${scope}`);
+            if (!selectEl) return;
+            const waitForTs = setInterval(() => {
+                if (!selectEl.tomselect) return;
+                clearInterval(waitForTs);
+                typeFilterStates[direction][scope].forEach((lbl, val) => {
+                    const opt = selectEl.tomselect.options[val];
+                    if (opt) typeFilterStates[direction][scope].set(val, opt.text);
+                });
+                _typeFilterRender(direction, scope);
+            }, 50);
+        });
+
+        // Main toggle — shows/hides the warning block
+        const toggleCb  = container.querySelector('#typeFilteringEnable_' + direction);
+        const warningEl = container.querySelector('#typeFilteringWarning_' + direction);
+        if (toggleCb && warningEl) {
+            toggleCb.addEventListener('change', () => {
+                warningEl.classList.toggle('d-none', !toggleCb.checked);
+                // If we uncheck the checkbox, we also uncheck the selected items and clear the confirmations
+                if (!toggleCb.checked) {
+                    const confirmCb  = container.querySelector('#typeFilteringConfirm_' + direction);
+                    const selectsEl  = container.querySelector('#typeFilteringSelects_' + direction);
+                    if (confirmCb)  confirmCb.checked = false;
+                    if (selectsEl)  selectsEl.classList.add('d-none');
+                    // Vider les states
+                    typeFilterStates[direction].attributes.clear();
+                    typeFilterStates[direction].objects.clear();
+                    _typeFilterRender(direction, 'attributes');
+                    _typeFilterRender(direction, 'objects');
+                }
+            });
+        }
+
+        // Confirmation checkbox — shows/hides the dropdown menus
+        const confirmCb = container.querySelector('#typeFilteringConfirm_' + direction);
+        const selectsEl = container.querySelector('#typeFilteringSelects_' + direction);
+        if (confirmCb && selectsEl) {
+            confirmCb.addEventListener('change', () => {
+                selectsEl.classList.toggle('d-none', !confirmCb.checked);
+            });
+        }
+
+        // TomSelect — listens for item_add on both select elements
+        ['attributes', 'objects'].forEach(scope => {
+            const scopeKey = scope === 'attributes' ? 'attributes' : 'objects';
+            const selectEl = container.querySelector(
+                '#TypeFilterSelect_' + direction + '_' + scope
+            );
+            if (!selectEl) return;
+
+            const waitTs = setInterval(() => {
+                if (!selectEl.tomselect) return;
+                clearInterval(waitTs);
+
+                selectEl.tomselect.on('item_add', value => {
+                    const opt   = selectEl.tomselect.options[value];
+                    const label = opt ? opt.text : value;
+                    typeFilterStates[direction][scopeKey].set(value, label);
+                    _typeFilterRender(direction, scope);
+                    selectEl.tomselect.removeItem(value, true);
+                });
+            }, 50);
+        });
+    });
+
+
+    /**********************************
+     * url_params — JSON validation
+     **********************************/
+    const urlParamsEl  = container.querySelector('#SyncRulePullUrlParams');
+    const urlParamsErr = container.querySelector('#SyncRulePullUrlParamsError');
+
+    if (urlParamsEl) {
+        urlParamsEl.addEventListener('blur', function () {
+            const val = urlParamsEl.value.trim();
+            if (!val) {
+                urlParamsEl.classList.remove('is-invalid', 'is-valid');
+                return;
+            }
+            try {
+                JSON.parse(val);
+                urlParamsEl.classList.remove('is-invalid');
+                urlParamsEl.classList.add('is-valid');
+                if (urlParamsErr) urlParamsErr.textContent = '';
+            } catch (e) {
+                urlParamsEl.classList.remove('is-valid');
+                urlParamsEl.classList.add('is-invalid');
+                if (urlParamsErr) urlParamsErr.textContent = e.message;
+            }
+        });
+    }
+
+
+
+    /**********************************
+     * Debug helper
+     **********************************/
+    //console.log('[initServerForm] initialized');
+}
+
+function serverSubmitForm(action) {
+    const form = document.getElementById('Server' + action + 'Form');
+    if (!form) return;
+
+    // ── 1. JSON Setup ──────────────────────────────────────────────────
+    let ajax = {};
+    const orgType = document.getElementById('ServerOrganisationType').value;
+    switch (orgType) {
+        case '0': ajax = { id: document.getElementById('ServerLocal').value };    break;
+        case '1': ajax = { id: document.getElementById('ServerExternal').value }; break;
+        case '2':
+            ajax = {
+                name: document.getElementById('ServerExternalName').value,
+                uuid: document.getElementById('ServerExternalUuid').value
+            };
+            break;
+    }
+    document.getElementById('ServerJson').value = JSON.stringify(ajax);
+
+    // ── 2. Read a SyncRuleJson field (returns [] if missing or invalid) ────────
+    function readJsonField(id) {
+        const el = form.querySelector('#' + id);
+        if (!el) return [];
+        try { return JSON.parse(el.value) || []; } catch { return []; }
+    }
+
+    // ── 3. Build push_rules ──────────────────────────────────────────────
+    const pushRules = {
+        tags: {
+            OR:  readJsonField('SyncRuleJson_push_tags_allowedlist'),
+            NOT: readJsonField('SyncRuleJson_push_tags_blockedlist'),
+        },
+        orgs: {
+            OR:  readJsonField('SyncRuleJson_push_orgs_allowedlist'),
+            NOT: readJsonField('SyncRuleJson_push_orgs_blockedlist'),
+        },
+        type_attributes: {
+            NOT: readJsonField('TypeFilterJson_push_attributes'),
+        },
+        type_objects: {
+            NOT: readJsonField('TypeFilterJson_push_objects'),
+        },
+    };
+
+    const pushRulesField = form.querySelector('[name="data[Server][push_rules]"]');
+    if (pushRulesField) pushRulesField.value = JSON.stringify(pushRules);
+
+    // ── 4. Build pull_rules ──────────────────────────────────────────────
+    const pullRules = {
+        tags: {
+            OR:  readJsonField('SyncRuleJson_pull_tags_allowedlist'),
+            NOT: readJsonField('SyncRuleJson_pull_tags_blockedlist'),
+        },
+        orgs: {
+            OR:  readJsonField('SyncRuleJson_pull_orgs_allowedlist'),
+            NOT: readJsonField('SyncRuleJson_pull_orgs_blockedlist'),
+        },
+        type_attributes: {
+            NOT: readJsonField('TypeFilterJson_pull_attributes'),
+        },
+        type_objects: {
+            NOT: readJsonField('TypeFilterJson_pull_objects'),
+        },
+        url_params: '',
+    };
+
+    // Inject url_params from the textarea (without submitting it directly)
+    const urlParamsEl = form.querySelector('#SyncRulePullUrlParams');
+    if (urlParamsEl) {
+        const raw = urlParamsEl.value.trim();
+        if (raw) {
+            // Validate that it is valid JSON, but store the raw string
+            try {
+                JSON.parse(raw);
+                pullRules.url_params = raw;
+            } catch {
+                pullRules.url_params = raw;
+            }
+        } else {
+            pullRules.url_params = '';
+        }
+    }
+
+    const pullRulesField = form.querySelector('[name="data[Server][pull_rules]"]');
+    if (pullRulesField) pullRulesField.value = JSON.stringify(pullRules);
+
+    form.submit();
+}
+
+
+function _setPemFile(zone, input, file) {
+    _renderPemZone(zone, input, file.name, null, null);
+}
+
+function _setPemExisting(zone, input, deleteField, filename) {
+    _renderPemZone(zone, input, filename, deleteField, () => {
+        if (deleteField) deleteField.checked = true;
+    });
+}
+
+function _renderPemZone(zone, input, filename, deleteField, onRemoveExtra) {
+    zone.classList.add('pem-has-file');
+    const hint = zone.querySelector('.pem-hint');
+    const icon = zone.querySelector('.pem-icon');
+    const name = zone.querySelector('.pem-filename');
+    if (!name) return;
+
+    if (hint) hint.classList.add('d-none');
+    if (icon) icon.classList.add('d-none');
+
+    name.classList.remove('d-none');
+    name.innerHTML =
+        '<i class="fas fa-file-certificate me-1"></i>' + escapeHtml(filename) +
+        ' <button type="button" class="pem-remove-btn" aria-label="Remove file">' +
+        '<i class="fas fa-trash-alt"></i></button>';
+
+    name.querySelector('.pem-remove-btn').addEventListener('click', e => {
+        e.stopPropagation();
+        input.value = '';
+        zone.classList.remove('pem-has-file');
+        name.classList.add('d-none');
+        name.innerHTML = '';
+        if (hint) hint.classList.remove('d-none');
+        if (icon) icon.classList.remove('d-none');
+        if (onRemoveExtra) onRemoveExtra();
+    });
+}
+
+
+
+function _onTomSelectReady(el, callback) {
+    if (!el) return;
+    const interval = setInterval(() => {
+        if (!el.tomselect) return;
+        clearInterval(interval);
+        callback(el.tomselect);
+    }, 50);
+}
+
+
+
+
+/*******************************
+ * Sharing Group Add/Edit
+ *******************************/
+
+function initSharingGroupForm(container) {
+    const form = container.querySelector('#sharingGroupForm');
+    if (!form) return;
+
+    let sgConfig = {};
+    const sgConfigNode = container.querySelector('#sharingGroupFormConfig');
+    if (sgConfigNode) {
+        try {
+            sgConfig = JSON.parse(sgConfigNode.textContent) || {};
+        } catch (e) {
+            console.error('Sharing group form: could not parse its configuration', e);
+        }
+    }
+    const sgInitData      = sgConfig.initData      || null;
+    const sgDefaultOrg    = sgConfig.defaultOrg    || null;
+    const sgDefaultServer = sgConfig.defaultServer || null;
+    const sgOrgMeta       = sgConfig.orgMeta       || {};
+    const sgServerMeta    = sgConfig.serverMeta    || {};
+
+    const orgState    = new Map();  // organisations : Map<id|uuid, { id, name, type, uuid, extend, removable }>
+    const serverState = new Map();  // servers       : Map<id,      { id, name, url,  all_orgs, removable }>
+
+    // ── Helpers DOM ───────────────────────────────────────────────────────────
+    const orgsBody    = container.querySelector('#organisations_table_body');
+    const serversBody = container.querySelector('#servers_table_body');
+    const jsonInput   = container.querySelector('#SharingGroupJson');
+    const roamingCb   = container.querySelector('#SharingGroupRoaming');
+    const serverList  = container.querySelector('#serverList');
+
+    // ── Organisations table display ────────────────────────────────────────
+    function renderOrgs() {
+        if (!orgsBody) return;
+        orgsBody.innerHTML = '';
+
+        orgState.forEach((org, key) => {
+            const tr = document.createElement('tr');
+            // Badge type
+            const typeBadge = org.type === 'local'
+                ? '<span class="badge text-bg-success">Local</span>'
+                : '<span class="badge text-bg-secondary">External</span>';
+
+            // Toggle extend
+            const extendChecked = org.extend ? 'checked' : '';
+            const removableAttr = org.removable === false ? 'disabled' : '';
+
+            tr.innerHTML = `
+                <td>${typeBadge}</td>
+                <td>${escapeHtml(org.name)}</td>
+                <td><small class="text-muted">${escapeHtml(org.uuid || '—')}</small></td>
+                <td>
+                    <div class="form-check form-switch mb-0">
+                        <input class="form-check-input sg-org-extend"
+                               type="checkbox"
+                               data-key="${escapeHtml(key)}"
+                               ${extendChecked}
+                               ${removableAttr}
+                               title="${escapeHtml('Allow this organisation to extend the sharing group')}">
+                    </div>
+                </td>
+                <td>
+                    ${org.removable !== false
+                        ? `<button type="button" class="btn btn-sm btn-outline-danger sg-org-remove" data-key="${escapeHtml(key)}">
+                               <i class="fas fa-trash-alt"></i>
+                           </button>`
+                        : '<span class="text-muted small">—</span>'
+                    }
+                </td>`;
+
+            // Extend toggle
+            tr.querySelector('.sg-org-extend')?.addEventListener('change', e => {
+                orgState.get(key).extend = e.target.checked;
+                _updateSummary();
+            });
+
+            // Remove
+            tr.querySelector('.sg-org-remove')?.addEventListener('click', () => {
+                orgState.delete(key);
+                renderOrgs();
+                _updateSummary();
+            });
+
+            orgsBody.appendChild(tr);
+        });
+
+        _updateSummary();
+    }
+
+    // ── Servers table display ──────────────────────────────────────────────
+    function renderServers() {
+        if (!serversBody) return;
+        serversBody.innerHTML = '';
+
+        serverState.forEach((srv, key) => {
+            const tr = document.createElement('tr');
+            const allOrgsChecked = srv.all_orgs ? 'checked' : '';
+            const removableAttr  = srv.removable === false ? 'disabled' : '';
+
+            tr.innerHTML = `
+                <td>${escapeHtml(srv.name)}</td>
+                <td><small class="text-muted">${escapeHtml(srv.url || '—')}</small></td>
+                <td>
+                    <div class="form-check form-switch mb-0">
+                        <input class="form-check-input sg-srv-allorgs"
+                               type="checkbox"
+                               data-key="${escapeHtml(key)}"
+                               ${allOrgsChecked}
+                               ${removableAttr}
+                               title="${escapeHtml('Sync with all organisations on this instance')}">
+                    </div>
+                </td>
+                <td>
+                    ${srv.removable !== false
+                        ? `<button type="button" class="btn btn-sm btn-outline-danger sg-srv-remove" data-key="${escapeHtml(key)}">
+                               <i class="fas fa-trash-alt"></i>
+                           </button>`
+                        : '<span class="text-muted small">—</span>'
+                    }
+                </td>`;
+
+            tr.querySelector('.sg-srv-allorgs')?.addEventListener('change', e => {
+                serverState.get(key).all_orgs = e.target.checked;
+                _updateSummary();
+            });
+
+            tr.querySelector('.sg-srv-remove')?.addEventListener('click', () => {
+                serverState.delete(key);
+                renderServers();
+                _updateSummary();
+            });
+
+            serversBody.appendChild(tr);
+        });
+
+        _updateSummary();
+    }
+
+    // ── Local orgs ────────────────────────────────────────────────────────────────
+    _onTomSelectReady(container.querySelector('#sg-local-org-select'), ts => {
+        ts.on('item_add', value => {
+            ts.removeItem(value, true);
+            if (orgState.has(value)) return;
+            const opt  = ts.options[value];
+            const meta = sgOrgMeta[value] || {};
+            orgState.set(value, {
+                id:        value,
+                name:      opt?.text || value,
+                type:      'local',
+                uuid:      meta.uuid || '',
+                extend:    false,
+                removable: true,
+            });
+            renderOrgs();
+        });
+    });
+
+    // ── External orgs ─────────────────────────────────────────────────────────────
+    _onTomSelectReady(container.querySelector('#sg-ext-org-select'), ts => {
+        ts.on('item_add', value => {
+            ts.removeItem(value, true);
+            if (orgState.has(value)) return;
+            const opt  = ts.options[value];
+            const meta = sgOrgMeta[value] || {};
+            orgState.set(value, {
+                id:        value,
+                name:      opt?.text || value,
+                type:      'external',
+                uuid:      meta.uuid || '',
+                extend:    false,
+                removable: true,
+            });
+            renderOrgs();
+        });
+    });
+
+    // ── Servers ───────────────────────────────────────────────────────────────────
+    _onTomSelectReady(container.querySelector('#sg-server-select'), ts => {
+        ts.on('item_add', value => {
+            ts.removeItem(value, true);
+            if (serverState.has(value)) return;
+            const opt  = ts.options[value];
+            const meta = sgServerMeta[value] || {};
+            serverState.set(value, {
+                id:        value,
+                name:      opt?.text || value,
+                url:       meta.url  || '',
+                all_orgs:  false,
+                removable: true,
+            });
+            renderServers();
+        });
+    });
+
+
+
+    // ── Roaming toggle ────────────────────────────────────────────────────────
+    roamingCb?.addEventListener('change', () => {
+        if (serverList) serverList.style.display = roamingCb.checked ? 'none' : 'block';
+        _updateSummary();
+    });
+
+    // ── Navigation accordion (Next / Prev) ────────────────────────────────────
+    container.querySelectorAll('.sg-next').forEach(btn => {
+        btn.addEventListener('click', () => {
+            const targetId = btn.dataset.next;
+            const target   = container.querySelector('#' + targetId);
+            if (target) new bootstrap.Collapse(target, { toggle: false }).show();
+        });
+    });
+
+    container.querySelectorAll('.sg-prev').forEach(btn => {
+        btn.addEventListener('click', () => {
+            const targetId = btn.dataset.prev;
+            const target   = container.querySelector('#' + targetId);
+            if (target) new bootstrap.Collapse(target, { toggle: false }).show();
+        });
+    });
+
+    // ── Résumé (Step 4) ───────────────────────────────────────────────────────
+    function _updateSummary() {
+        const name         = container.querySelector('#SharingGroupName')?.value        || '—';
+        const releasable   = container.querySelector('#SharingGroupReleasability')?.value || '—';
+
+        _setText('summarytitle',      name);
+        _setText('summaryreleasable', releasable);
+
+        // Local orgs
+        const localOrgs    = [...orgState.values()].filter(o => o.type === 'local');
+        const localExtend  = localOrgs.filter(o => o.extend);
+        _setText('summarylocal',       localOrgs.length   ? localOrgs.map(o => o.name).join(', ')   : '—');
+        _setText('summarylocalextend', localExtend.length ? localExtend.map(o => o.name).join(', ') : ('none'));
+
+        // External orgs
+        const extOrgs      = [...orgState.values()].filter(o => o.type === 'external');
+        const extExtend    = extOrgs.filter(o => o.extend);
+        _setText('summaryexternal',       extOrgs.length   ? extOrgs.map(o => o.name).join(', ')   : '—');
+        _setText('summaryexternalextend', extExtend.length ? extExtend.map(o => o.name).join(', ') : ('none'));
+
+        // Servers
+        const roaming = roamingCb?.checked;
+        const srvText = roaming
+            ? ('Roaming mode — any connected instance')
+            : ([...serverState.values()].map(s => s.name).join(', ') || '—');
+        _setText('summaryservers', srvText);
+    }
+
+    function _setText(id, text) {
+        const el = container.querySelector('#' + id);
+        if (el) el.textContent = text;
+    }
+
+    // Resume update from Step 1
+    ['SharingGroupName', 'SharingGroupReleasability'].forEach(id => {
+        container.querySelector('#' + id)?.addEventListener('input', _updateSummary);
+    });
+
+    // ── Submit ────────────────────────────────────────────────────────────────
+    container.querySelector('#sg-submit-btn')?.addEventListener('click', () => {
+        const name = container.querySelector('#SharingGroupName')?.value.trim();
+        if (!name) {
+            const step1 = container.querySelector('#sgCollapse1');
+            if (step1) new bootstrap.Collapse(step1, { toggle: false }).show();
+            form.classList.add('was-validated');
+            return;
+        }
+
+        const payload = {
+            sharingGroup: {
+                name:          name,
+                releasability: container.querySelector('#SharingGroupReleasability')?.value.trim() || '',
+                description:   container.querySelector('#SharingGroupDescription')?.value.trim()   || '',
+                active:        container.querySelector('#SharingGroupActive')?.checked  ? 1 : 0,
+                roaming:       container.querySelector('#SharingGroupRoaming')?.checked ? 1 : 0,
+                uuid:          container.querySelector('#SharingGroupUuid')?.value.trim() || undefined,
+            },
+            organisations: [...orgState.values()].map(o => ({
+                id:     o.id,
+                name:   o.name,
+                type:   o.type,
+                uuid:   o.uuid || '',
+                extend: o.extend ? 1 : 0,
+            })),
+            servers: [...serverState.values()].map(s => ({
+                id:       s.id,
+                name:     s.name,
+                url:      s.url,
+                all_orgs: s.all_orgs ? 1 : 0,
+            })),
+        };
+
+        if (jsonInput) jsonInput.value = JSON.stringify(payload);
+        form.submit();
+    });
+
+    // ── Initialization in edit mode ───────────────────────────────────────────
+    // The controller passes $sharingGroup along with SharingGroupOrg and SharingGroupServer
+    // We initialize the two Maps using the inline PHP data
+    if (sgInitData) {
+        (sgInitData.organisations || []).forEach(o => {
+            const key = String(o.id);
+            orgState.set(key, {
+                id:        o.id,
+                name:      o.name,
+                type:      o.type,
+                uuid:      o.uuid || '',
+                extend:    !!o.extend,
+                removable: o.removable !== false,
+            });
+        });
+        (sgInitData.servers || []).forEach(s => {
+            const key = String(s.id || s.Server?.id);
+            serverState.set(key, {
+                id:        s.Server?.id || s.id,
+                name:      s.Server?.name || s.name || key,
+                url:       s.Server?.url  || s.url  || '',
+                all_orgs:  !!s.all_orgs,
+                removable: s.removable !== false,
+            });
+        });
+        renderOrgs();
+        renderServers();
+
+        // Step 1
+        if (sgInitData.sharingGroup) {
+            const sg = sgInitData.sharingGroup;
+            ['Name', 'Releasability', 'Description'].forEach(f => {
+                const el = container.querySelector('#SharingGroup' + f);
+                if (el && sg[f.toLowerCase()] !== undefined) el.value = sg[f.toLowerCase()];
+            });
+            if (sg.active  !== undefined && container.querySelector('#SharingGroupActive'))
+                container.querySelector('#SharingGroupActive').checked = !!sg.active;
+            if (sg.roaming !== undefined && roamingCb)  {
+                roamingCb.checked = !!sg.roaming;
+                if (serverList) serverList.style.display = roamingCb.checked ? 'none' : 'block';
+            }
+        }
+        _updateSummary();
+    } else {
+        if (sgDefaultOrg) {
+            const key = String(sgDefaultOrg.id);
+            orgState.set(key, { ...sgDefaultOrg, removable: false });
+        }
+        if (sgDefaultServer) {
+            const key = String(sgDefaultServer.id);
+            serverState.set(key, { ...sgDefaultServer, removable: false });
+        }
+        renderOrgs();
+        renderServers();
+    }
+}
+
+/*******************************
+ * Lazy index-table popovers
+ * Index rows are re-rendered by AJAX pagination and filtering, so these
+ * popovers are built on the first hover/focus rather than initialised up
+ * front on every render. `container: 'body'` keeps them out of the table's
+ * overflow container (.table-responsive.table-scroll), which would clip them.
+ *******************************/
+(function () {
+    var LAZY_POPOVERS = '.sighting-counts, .role-perm-counter';
+
+    function lazyPopover(e) {
+        var el = e.target && e.target.closest ? e.target.closest(LAZY_POPOVERS) : null;
+        if (!el || el._popoverReady) return;
+        el._popoverReady = true;
+        new bootstrap.Popover(el, {
+            trigger:   'hover focus',
+            html:      true,
+            placement: 'top',
+            container: 'body',
+        }).show();
+    }
+
+    // The triggering event predates the instance, hence the .show() above.
+    document.addEventListener('mouseenter', lazyPopover, true);
+    document.addEventListener('focusin', lazyPopover);
+})();
+
+/*******************************
+ * Sightings
+ * The cell actions of Fields/sightings.ctp (add on the attribute, add on every
+ * attribute holding the value, details) and the mass "Sightings" button. A
+ * change is announced as `misp:sighting-change` on the document, which the
+ * event view's Sightings card listens for.
+ *******************************/
+function postSighting(url, body) {
+    return fetch(url, {
+        method: 'POST',
+        headers: {
+            'X-Requested-With': 'XMLHttpRequest',
+            'Content-Type': 'application/x-www-form-urlencoded',
+            'X-CSRF-Token': getCsrfToken(),
+        },
+        body: body,
+    }).then(function (r) {
+        return r.json().catch(function () {
+            return { saved: false, errors: r.status + ' ' + r.statusText };
+        });
+    });
+}
+
+function notifySightingChange(detail) {
+    document.dispatchEvent(new CustomEvent('misp:sighting-change', { detail: detail || {} }));
+}
+
+function openSightingDetails(ids, context) {
+    openModal(baseurl + '/sightings/advanced/' + ids + '/' + (context || 'attribute'), 'xl');
+}
+
+function openSelectedSightings() {
+    if (typeof selectedItems === 'undefined' || selectedItems.size === 0) return;
+    openSightingDetails(Array.from(selectedItems.keys()).join('|'));
+}
+
+(function installSightingActions() {
+    document.addEventListener('click', function (e) {
+        var more = e.target.closest('.sighting-more');
+        if (more) {
+            e.preventDefault();
+            bootstrap.Dropdown.getOrCreateInstance(more, {
+                popperConfig: { strategy: 'fixed' }
+            }).toggle();
+            return;
+        }
+
+        var details = e.target.closest('[data-sighting-details]');
+        if (details) {
+            e.preventDefault();
+            var pop = bootstrap.Popover.getInstance(details);
+            if (pop) pop.hide();
+            openSightingDetails(details.dataset.sightingDetails);
+            return;
+        }
+
+        var onValue = e.target.closest('[data-sighting-value]');
+        if (onValue) {
+            e.preventDefault();
+            openModal(baseurl + '/sightings/quickAdd/' + onValue.dataset.sightingValue
+                + '/' + onValue.dataset.type + '/1', 'md');
+            return;
+        }
+
+        var btn = e.target.closest('.sighting-add');
+        if (!btn || btn.disabled) return;
+        e.preventDefault();
+        var attrId = btn.dataset.attributeId;
+        var type = btn.dataset.type;
+        btn.disabled = true;
+        postSighting(baseurl + '/sightings/add/' + attrId,
+            'data[Sighting][type]=' + encodeURIComponent(type))
+            .then(function (data) {
+                if (!data.saved) {
+                    showToast(data.errors || data.message || 'Could not add the sighting.', 'danger');
+                    return;
+                }
+                var countEl = document.querySelector('#sightings_' + attrId
+                    + ' .sighting-' + (type === '0' ? 's' : 'f'));
+                if (countEl) countEl.textContent = (parseInt(countEl.textContent, 10) || 0) + 1;
+                showToast(data.success || 'Sighting added.', 'success');
+                notifySightingChange({ attributeId: attrId, type: type });
+            })
+            .catch(function () {
+                showToast('Request failed, please try again.', 'danger');
+            })
+            .finally(function () {
+                btn.disabled = false;
+            });
+    });
+
+    document.addEventListener('keydown', function (e) {
+        if (e.key !== 'Enter' && e.key !== ' ') return;
+        var details = e.target.closest && e.target.closest('.sighting-counts[data-sighting-details]');
+        if (!details) return;
+        e.preventDefault();
+        details.click();
+    });
+})();
+
+
+/*******************************
+ * Overmind form shared utilities
+ * Used by Events/add, Attributes/add, and any form with a
+ * distribution TomSelect or non-correlating type logic.
+ *******************************/
+/* ── Distribution colours / icons ──────────────────────────────────────── */
+var DIST_MAP = {
+    0: { icon: 'misp-icon misp-icon-organisation misp-simple', bg: '#f8d7da', color: '#842029' },
+    1: { icon: 'fas fa-users',                                  bg: '#ffe5b4', color: '#b45309' },
+    2: { icon: 'fas fa-network-wired',                          bg: '#e7d3c3', color: '#5a3e2b' },
+    3: { icon: 'fas fa-globe',                                  bg: '#d1f7e0', color: '#0f5132' },
+    4: { icon: 'misp-icon misp-icon-sharing-group misp-simple', bg: '#6a96ee', color: '#0e146d' },
+    5: { icon: 'fas fa-code-fork',                              bg: '#e6b7df', color: '#380f33' },
+};
+
+function renderDistOption(data, escape) {
+    var cfg = DIST_MAP[parseInt(data.value, 10)]
+        || { icon: 'fas fa-question', bg: '#f1f1f1', color: '#333' };
+    return '<div class="d-flex align-items-center gap-2 py-1">'
+        + '<span class="badge d-inline-flex align-items-center px-2 py-1" style="'
+            + 'background:' + cfg.bg + ';color:' + cfg.color + ';'
+            + 'border:1px solid ' + cfg.color + '33;">'
+        + '<i class="' + cfg.icon + '"></i>'
+        + '</span>'
+        + '<span>' + escape(data.text) + '</span>'
+        + '</div>';
+}
+
+function renderDistSelected(data, escape) {
+    var cfg = DIST_MAP[parseInt(data.value, 10)]
+        || { icon: 'fas fa-question', bg: '#f1f1f1', color: '#333' };
+    return '<div class="d-flex align-items-center gap-1">'
+        + '<span class="badge d-inline-flex align-items-center px-1" style="'
+            + 'background:' + cfg.bg + ';color:' + cfg.color + ';'
+            + 'border:1px solid ' + cfg.color + '33; font-size:.65rem;">'
+        + '<i class="' + cfg.icon + '"></i>'
+        + '</span>'
+        + '<span>' + escape(data.text) + '</span>'
+        + '</div>';
+}
+
+/*
+ * distBadgeHtml(level, withLabel?, labels?)
+ * Renders a small inline distribution badge (icon + optional label).
+ * @param {number}  level      Distribution level 0–5
+ * @param {boolean} withLabel  Show the text label beside the icon
+ * @param {object}  labels     Map of level → label string (e.g. distLevels from PHP)
+ */
+function distBadgeHtml(level, withLabel, labels) {
+    var d   = DIST_MAP[level] || DIST_MAP[0];
+    var lbl = (withLabel && labels && labels[level]) ? labels[level] : '';
+    return '<span class="badge d-inline-flex align-items-center gap-1 px-2 py-1"'
+        + ' style="background:' + d.bg + ';color:' + d.color
+        + ';border:1px solid ' + d.color + '30;font-weight:500;">'
+        + '<i class="' + d.icon + '"></i>'
+        + (lbl ? '<span class="ms-1" style="font-size:.7rem;">' + escapeHtml(lbl) + '</span>' : '')
+        + '</span>';
+}
+
+/*******************************
+ * tagTextColour / tagBadgeStyle
+ * The client-side mirror of TextColourHelper::getTextColour() and of the
+ * badge styling in Elements/genericElementsBS5/Badges/tag.ctp — a tag drawn
+ * by JavaScript has to come out looking exactly like one drawn by PHP.
+ * @param {string} hex  Tag colour, '#rrggbb'
+ *******************************/
+function tagTextColour(hex) {
+    hex = hex || '#0088cc';
+    var r = parseInt(hex.slice(1, 3), 16);
+    var g = parseInt(hex.slice(3, 5), 16);
+    var b = parseInt(hex.slice(5, 7), 16);
+    return ((2 * r) + b + (3 * g)) / 6 < 127 ? 'white' : 'black';
+}
+
+function tagBadgeStyle(colour) {
+    colour = colour || '#0088cc';
+    return 'background-color:' + colour + '; color:' + tagTextColour(colour) + ';'
+        + ' filter: drop-shadow(-1px 3px 2px rgba(50, 50, 0, 0.5));'
+        + ' background-image: linear-gradient(145deg, rgba(255,255,255,0.25) 0%,'
+        + ' rgba(255,255,255,0.05) 40%, rgba(0,0,0,0.05) 100%);'
+        + ' text-align:left; white-space:normal; word-wrap:break-word;';
+}
+
+/*******************************
+ * initTagPickerSection
+ * The tag picker used everywhere in the theme: category buttons, a TomSelect
+ * search over the current category, and the picked tags drawn below as real
+ * MISP badges with a remove cross. Drives both the standalone edit-tags modal
+ * (Modals/tag_picker.ctp, one section per locality) and the in-form field
+ * (Forms/tag_picker_field.ctp).
+ *
+ * `root` must contain .tag-cat-btn buttons (each with data-cat), a
+ * select.tag-picker, .tag-selected and .tag-selected-empty.
+ *
+ * @param {Element}  root      Section container
+ * @param {object}   catData   {<cat>: [{id,name,colour}], collections: [{id,name,tags:[…]}]}
+ * @param {Array}    initTags  Pre-selected [{id,name,colour}]
+ * @param {object}   [options] localMarker: draw the local user glyph on badges;
+ *                             onChange: called with the selected id array
+ * @return {{ids: function}} the current selection
+ *******************************/
+function initTagPickerSection(root, catData, initTags, options) {
+    options = options || {};
+    var selEl = root.querySelector('.tag-selected');
+    var emptyEl = root.querySelector('.tag-selected-empty');
+    var pickerEl = root.querySelector('.tag-picker');
+
+    var selected = {};               /* id(string) -> {id,name,colour} */
+    var currentCat = 'all';
+
+    function ids() {
+        return Object.keys(selected).map(Number);
+    }
+
+    function addTag(tag) {
+        if (!tag || tag.id == null) { return; }
+        selected[String(tag.id)] = {
+            id: tag.id, name: tag.name, colour: tag.colour || '#0088cc'
+        };
+    }
+
+    function render() {
+        var keys = Object.keys(selected);
+        emptyEl.classList.toggle('d-none', keys.length > 0);
+        selEl.innerHTML = '';
+        keys.sort(function (a, b) {
+            return selected[a].name.localeCompare(selected[b].name);
+        });
+        keys.forEach(function (id) {
+            var t = selected[id];
+
+            var wrap = document.createElement('div');
+            wrap.className = 'd-inline-flex align-items-center';
+
+            var badge = document.createElement('span');
+            badge.className = 'badge me-1 mb-1 d-inline-flex align-items-center gap-1';
+            badge.style.cssText = tagBadgeStyle(t.colour);
+
+            var txt = document.createElement('span');
+            if (options.localMarker) {
+                txt.innerHTML = '<i class="fas fa-user me-1"></i>';
+            }
+            txt.appendChild(document.createTextNode(t.name));
+
+            var x = document.createElement('i');
+            x.className = 'fas fa-times';
+            x.style.cssText = 'cursor:pointer; opacity:.8;';
+            x.setAttribute('role', 'button');
+            x.setAttribute('aria-label', 'Remove');
+            x.addEventListener('click', function () {
+                delete selected[id];
+                render();
+            });
+
+            badge.appendChild(txt);
+            badge.appendChild(x);
+            wrap.appendChild(badge);
+            selEl.appendChild(wrap);
+        });
+        if (typeof options.onChange === 'function') { options.onChange(ids()); }
+    }
+
+    function buildOptions(cat) {
+        if (cat === 'collections') {
+            return (catData.collections || []).map(function (c) {
+                return {
+                    value: String(c.id), name: c.name,
+                    count: (c.tags || []).length, isCollection: true
+                };
+            });
+        }
+        return (catData[cat] || []).map(function (t) {
+            return { value: String(t.id), name: t.name, colour: t.colour };
+        });
+    }
+
+    function renderOpt(item, escape) {
+        if (item.isCollection) {
+            return '<div class="d-flex align-items-center gap-2 py-1">'
+                + '<i class="fas fa-layer-group text-tag"></i>'
+                + '<span class="text-truncate">'
+                + escape(item.name) + '</span>'
+                + '<span class="badge bg-light text-muted ms-auto">'
+                + (item.count || 0) + '</span></div>';
+        }
+        var col = item.colour || '#0088cc';
+        return '<div class="d-flex align-items-center gap-2 py-1">'
+            + '<span style="display:inline-block;width:10px;height:10px;'
+            + 'border-radius:2px;flex-shrink:0;background:' + escape(col) + ';"></span>'
+            + '<span class="text-truncate">'
+            + escape(item.name) + '</span></div>';
+    }
+
+    var ts = new TomSelect(pickerEl, {
+        valueField: 'value',
+        labelField: 'name',
+        searchField: ['name'],
+        maxItems: 1,
+        options: [],
+        render: { option: renderOpt, item: renderOpt, option_create: false },
+        onItemAdd: function (value) {
+            if (currentCat === 'collections') {
+                var coll = (catData.collections || []).find(function (c) {
+                    return String(c.id) === String(value);
+                });
+                if (coll) { (coll.tags || []).forEach(addTag); }
+            } else {
+                var tag = (catData[currentCat] || []).find(function (t) {
+                    return String(t.id) === String(value);
+                });
+                if (tag) { addTag(tag); }
+            }
+            render();
+            var self = this;
+            setTimeout(function () { self.clear(true); self.blur(); }, 0);
+        }
+    });
+
+    function setCategory(cat) {
+        currentCat = cat;
+        root.querySelectorAll('.tag-cat-btn').forEach(function (b) {
+            b.classList.toggle('active', b.getAttribute('data-cat') === cat);
+        });
+        ts.clear(true);
+        ts.clearOptions();
+        ts.addOptions(buildOptions(cat));
+        ts.refreshOptions(false);
+    }
+
+    root.querySelectorAll('.tag-cat-btn').forEach(function (btn) {
+        btn.addEventListener('click', function () {
+            setCategory(btn.getAttribute('data-cat'));
+        });
+    });
+
+    (initTags || []).forEach(addTag);
+    render();
+    var first = root.querySelector('.tag-cat-btn');
+    setCategory(first ? first.getAttribute('data-cat') : 'all');
+
+    return { ids: ids };
+}
+
+/*******************************
+ * galaxyBadgeStyle
+ * The client-side mirror of GalaxyColour::palette()/badgeStyle() — a cluster
+ * badge drawn by JavaScript has to come out looking exactly like one drawn by
+ * PHP, so keep the numbers in sync with the lib.
+ * @param {number} hue  GalaxyColour::hue() of the cluster's galaxy
+ *******************************/
+function galaxyBadgeStyle(hue) {
+    hue = (hue == null) ? 270 : hue;
+    return 'background-color:hsla(' + hue + ',65%,55%,var(--galaxy-alpha,0.12));'
+        + 'color:hsl(' + hue + ',65%,28%);'
+        + 'border:1px solid hsl(' + hue + ',55%,65%);'
+        + 'background-image:linear-gradient(145deg,rgba(255,255,255,0.15) 0%,'
+        + 'rgba(255,255,255,0.04) 40%,rgba(0,0,0,0.04) 100%);'
+        + 'white-space:normal;word-wrap:break-word;text-align:left;max-width:260px;';
+}
+
+/*******************************
+ * initGalaxyPickerSection
+ * The galaxy cluster picker used everywhere in the theme: galaxy category
+ * buttons, a TomSelect searching the cluster endpoint remotely (an empty query
+ * lists the scoped galaxy's clusters, "All Galaxies" needs 2 characters), and
+ * the picked clusters drawn below as galaxy badges with a remove cross. Drives
+ * both the standalone edit-clusters modal (Modals/galaxy_picker.ctp, one
+ * section per locality) and the in-form field (Forms/galaxy_picker_field.ctp).
+ *
+ * `root` must contain .galaxy-cat-btn buttons (the per-galaxy ones carrying
+ * data-galaxy-id), a select.galaxy-picker, .galaxy-selected and
+ * .galaxy-selected-empty.
+ *
+ * @param {Element} root          Section container
+ * @param {Array}   initClusters  Pre-selected [{id,name,galaxy,hue}]
+ * @param {object}  options       searchUrl: cluster search endpoint (required);
+ *                                localMarker: draw the local user glyph on badges;
+ *                                onChange: called with the selected id array
+ * @return {{ids: function}} the current selection
+ *******************************/
+function initGalaxyPickerSection(root, initClusters, options) {
+    options = options || {};
+    var selEl = root.querySelector('.galaxy-selected');
+    var emptyEl = root.querySelector('.galaxy-selected-empty');
+    var pickerEl = root.querySelector('.galaxy-picker');
+    var searchUrl = options.searchUrl;
+
+    var selected = {};          /* id(string) -> {id,name,galaxy,hue} */
+    var currentGalaxyId = null; /* null = "All" (search across galaxies) */
+
+    function ids() {
+        return Object.keys(selected).map(Number);
+    }
+
+    function addCluster(c) {
+        if (!c || c.id == null) { return; }
+        selected[String(c.id)] = {
+            id: c.id, name: c.name, galaxy: c.galaxy || '',
+            hue: (c.hue == null ? 270 : c.hue)
+        };
+    }
+
+    function render() {
+        var keys = Object.keys(selected);
+        emptyEl.classList.toggle('d-none', keys.length > 0);
+        selEl.innerHTML = '';
+        keys.sort(function (a, b) {
+            return selected[a].name.localeCompare(selected[b].name);
+        });
+        keys.forEach(function (id) {
+            var c = selected[id];
+
+            var badge = document.createElement('span');
+            badge.className = 'badge p-2 d-inline-flex align-items-center gap-2';
+            badge.style.cssText = galaxyBadgeStyle(c.hue);
+            if (c.galaxy) { badge.title = c.galaxy; }
+
+            var txt = document.createElement('span');
+            txt.style.cssText = 'overflow:hidden;text-overflow:ellipsis;'
+                + 'white-space:nowrap;min-width:0;';
+            if (options.localMarker) {
+                txt.innerHTML = '<i class="fas fa-user me-1"></i>';
+            }
+            txt.appendChild(document.createTextNode(c.name));
+
+            var x = document.createElement('i');
+            x.className = 'fas fa-times';
+            x.style.cssText = 'cursor:pointer; opacity:.8; flex-shrink:0;';
+            x.setAttribute('role', 'button');
+            x.setAttribute('aria-label', 'Remove');
+            x.addEventListener('click', function () {
+                delete selected[id];
+                render();
+            });
+
+            badge.appendChild(txt);
+            badge.appendChild(x);
+            selEl.appendChild(badge);
+        });
+        if (typeof options.onChange === 'function') { options.onChange(ids()); }
+    }
+
+    function renderOpt(item, escape) {
+        return '<div class="d-flex flex-column py-1">'
+            + '<span>' + escape(item.name) + '</span>'
+            + (item.galaxy
+                ? '<span class="text-muted" style="font-size:.72rem;">'
+                    + escape(item.galaxy) + '</span>'
+                : '')
+            + '</div>';
+    }
+
+    var ts = new TomSelect(pickerEl, {
+        valueField:   'id',
+        labelField:   'name',
+        searchField:  ['name', 'galaxy'],
+        maxItems:     1,
+        options:      [],
+        loadThrottle: 300,
+        /* Use a different class name for the loading state to avoid a CSS collision. */
+        loadingClass: 'ts-loading',
+        /* When a galaxy is selected, even an empty query lists its clusters */
+        shouldLoad:   function (q) {
+            return currentGalaxyId ? true : q.length >= 2;
+        },
+        /* The endpoint handles matching, so TomSelect's filter is disabled to keep all server-sorted results. */
+        score:        function () {
+            return function () { return 1; };
+        },
+        load: function (query, callback) {
+            var self = this;
+            var url = searchUrl + '?q=' + encodeURIComponent(query);
+            if (currentGalaxyId) {
+                url += '&galaxy_id=' + encodeURIComponent(currentGalaxyId);
+            }
+            fetch(url, { headers: { 'X-Requested-With': 'XMLHttpRequest' } })
+                .then(function (r) { return r.json(); })
+                .then(function (json) {
+                    /* clearOptions() clears stale results and forces the endpoint to reload when the query changes. */
+                    self.clearOptions();
+                    callback(json);
+                })
+                .catch(function () { callback(); });
+        },
+        render: {
+            option: renderOpt,
+            item: renderOpt,
+            option_create: false,
+            /* Use a custom loading spinner to avoid a CSS collision */
+            loading: function () {
+                return '<div class="text-center py-2">'
+                    + '<span class="spinner-border spinner-border-sm '
+                    + 'text-galaxy" role="status" aria-hidden="true">'
+                    + '</span></div>';
+            }
+        },
+        onItemAdd: function (value) {
+            var item = this.options[value];
+            if (item) { addCluster(item); render(); }
+            var self = this;
+            setTimeout(function () { self.clear(true); self.blur(); }, 0);
+        }
+    });
+
+    /* Clear stale results when the query is too short to offer any valid options. */
+    ts.on('type', function (q) {
+        if (currentGalaxyId || q.length >= 2) { return; }
+        if (Object.keys(ts.options).length === 0) { return; }
+        ts.clearOptions();
+        ts.refreshOptions();
+    });
+
+    /* Category buttons: "All" (remote search) or one galaxy (scoped) */
+    root.querySelectorAll('.galaxy-cat-btn').forEach(function (btn) {
+        btn.addEventListener('click', function () {
+            root.querySelectorAll('.galaxy-cat-btn').forEach(function (b) {
+                b.classList.toggle('active', b === btn);
+            });
+            var gid = btn.getAttribute('data-galaxy-id');
+            currentGalaxyId = gid ? gid : null;
+
+            /* reset cache + options so the new scope reloads cleanly */
+            ts.clearOptions();
+            ts.clearCache();
+
+            if (currentGalaxyId) {
+                /* preload this galaxy's clusters and show them */
+                ts.load('');
+                ts.focus();
+                ts.open();
+            }
+        });
+    });
+
+    (initClusters || []).forEach(addCluster);
+    render();
+
+    return { ids: ids };
+}
+
+/**
+ * The `d-none` toggle a choice field can drive on another block — the
+ * distribution field revealing its sharing group. Returns a function to call
+ * with the current value; a group that declares no reveal gets a no-op, so
+ * callers never branch.
+ */
+function choiceRevealBinder(group) {
+    var expected = group.dataset.choiceRevealValue;
+    var target = group.dataset.choiceRevealTarget
+        ? document.querySelector(group.dataset.choiceRevealTarget)
+        : null;
+    if (!target || expected === undefined) {
+        return function () {};
+    }
+    return function (current) {
+        target.classList.toggle('d-none', String(current) !== expected);
+    };
+}
+
+/*******************************
+ * initChoiceCards
+ * Wires every card-based radio group inside `container` — the markup of
+ * Elements/genericElementsBS5/Forms/choice_cards.ctp, which the distribution
+ * field, the analysis level and the threat level are all built from.
+ *
+ * The hidden <select> stays the value: the cards only mirror it, and a click
+ * fires a real `change` on it so host forms (an object's review pane, a
+ * warning banner) keep listening to the select and to nothing else.
+ *
+ * Idempotent — a group is bound once, so calling this on a container that is
+ * already live costs nothing.
+ * @param {Element|Document} [container]  defaults to the whole document
+ *******************************/
+function initChoiceCards(container) {
+    var scope = container || document;
+
+    scope.querySelectorAll('[data-choice-cards]').forEach(function (group) {
+        if (group.dataset.choiceBound) { return; }
+        group.dataset.choiceBound = '1';
+
+        var select = group.querySelector('[data-choice-input]');
+        var cards = Array.prototype.slice.call(
+            group.querySelectorAll('[data-choice-value]')
+        );
+        if (!select || !cards.length) { return; }
+
+        var reveal = choiceRevealBinder(group);
+        var revealTarget = group.dataset.choiceRevealTarget
+            ? document.querySelector(group.dataset.choiceRevealTarget)
+            : null;
+
+        function sync() {
+            var current = String(select.value);
+            var hit = false;
+            cards.forEach(function (card) {
+                var on = card.dataset.choiceValue === current;
+                if (on) { hit = true; }
+                card.classList.toggle('is-selected', on);
+                card.setAttribute('aria-checked', on ? 'true' : 'false');
+                /* Only the selected card is in the tab order, so the group is
+                   one tab stop and the arrow keys move within it. */
+                card.tabIndex = on ? 0 : -1;
+            });
+            /* A value with no card of its own (a level the form dropped) would
+               otherwise leave the group unreachable by keyboard. */
+            if (!hit) { cards[0].tabIndex = 0; }
+            reveal(current);
+        }
+
+        function pick(card) {
+            if (card.dataset.choiceValue === String(select.value)) { return; }
+            select.value = card.dataset.choiceValue;
+            select.dispatchEvent(new Event('change', { bubbles: true }));
+        }
+
+        var steps = {
+            ArrowRight: 1, ArrowDown: 1, ArrowLeft: -1, ArrowUp: -1
+        };
+
+        cards.forEach(function (card, index) {
+            card.addEventListener('click', function () { pick(card); });
+            card.addEventListener('keydown', function (e) {
+                if (e.key === ' ' || e.key === 'Enter') {
+                    e.preventDefault();
+                    pick(card);
+                    return;
+                }
+                if (!(e.key in steps)) { return; }
+                e.preventDefault();
+                var next = cards[
+                    (index + steps[e.key] + cards.length) % cards.length
+                ];
+                pick(next);
+                next.focus();
+            });
+        });
+
+        select.addEventListener('change', sync);
+        sync();
+
+        /* The sharing-group select the distribution field reveals is a
+           .tom-select, and a full page has nothing else that would init it. */
+        if (revealTarget && typeof initTomSelect === 'function') {
+            initTomSelect(revealTarget);
+        }
+    });
+}
+window.initChoiceCards = initChoiceCards;
+
+/*******************************
+ * initChoiceSliders
+ * Wires every slider-based choice inside `container` — the markup of
+ * Elements/genericElementsBS5/Forms/choice_slider.ctp.
+ *
+ * The slider's own number is a position in the scale, never the value: option
+ * `i` of the hidden <select> is what stop `i` posts, and the select stays the
+ * one thing host forms read and listen on.
+ *
+ * Idempotent, like initChoiceCards.
+ * @param {Element|Document} [container]  defaults to the whole document
+ *******************************/
+function initChoiceSliders(container) {
+    var scope = container || document;
+
+    scope.querySelectorAll('[data-choice-slider]').forEach(function (group) {
+        if (group.dataset.choiceBound) { return; }
+        group.dataset.choiceBound = '1';
+
+        var select = group.querySelector('[data-choice-input]');
+        var range = group.querySelector('[data-choice-slider-input]');
+        var readout = group.querySelector('[data-slider-value]');
+        var subLine = group.querySelector('[data-slider-sub]');
+        var ticks = Array.prototype.slice.call(
+            group.querySelectorAll('[data-slider-index]')
+        );
+        if (!select || !range || !select.options.length) { return; }
+
+        var reveal = choiceRevealBinder(group);
+        var last = select.options.length - 1;
+
+        /* The stop's colour and gloss live on its tick, so repainting is a
+           read off the DOM rather than a table shipped in a data attribute. */
+        function paint(index) {
+            var option = select.options[index];
+            var tick = ticks[index];
+            if (!option) { return; }
+
+            group.style.setProperty(
+                '--ov-slider-fill', (last > 0 ? (index / last) * 100 : 0) + '%'
+            );
+            group.style.setProperty(
+                '--ov-slider-tone',
+                (tick && tick.style.getPropertyValue('--ov-slider-tone'))
+                    || 'var(--ov-slider-accent)'
+            );
+
+            if (readout) { readout.textContent = option.text; }
+            if (subLine) { subLine.textContent = tick ? tick.dataset.sub : ''; }
+            range.setAttribute('aria-valuetext', option.text);
+
+            ticks.forEach(function (t, i) {
+                t.classList.toggle('is-current', i === index);
+            });
+            reveal(option.value);
+        }
+
+        function pick(index) {
+            var bounded = Math.max(0, Math.min(last, index));
+            range.value = bounded;
+            paint(bounded);
+            if (select.selectedIndex === bounded) { return; }
+            select.selectedIndex = bounded;
+            /* Host forms listen on the select and on nothing else. */
+            select.dispatchEvent(new Event('change', { bubbles: true }));
+        }
+
+        /* `input` for the drag, so the readout follows the thumb. */
+        range.addEventListener('input', function () { pick(+range.value); });
+
+        /* The tick labels are a mouse shortcut, not a control: the range is
+           the focusable one, and it already reaches every stop by keyboard. */
+        ticks.forEach(function (tick) {
+            tick.addEventListener('click', function () {
+                pick(+tick.dataset.sliderIndex);
+                range.focus();
+            });
+        });
+
+        /* Something setting the select directly (a template prefill) must not
+           leave the slider behind. */
+        select.addEventListener('change', function () {
+            if (+range.value !== select.selectedIndex) {
+                range.value = select.selectedIndex;
+                paint(select.selectedIndex);
+            }
+        });
+
+        paint(+range.value);
+    });
+}
+window.initChoiceSliders = initChoiceSliders;
+
+/**
+ * The badge a choice_select draws beside an option — the same tile
+ * renderDistOption/renderDistSelected build for the distribution selects, but
+ * fed from the element's own glyph table instead of DIST_MAP, so a field that
+ * is not distribution gets one too.
+ *
+ * @param {Object} entry  {icon, tone, toneBg} for the option, or null
+ * @param {boolean} small the closed control's badge, tighter than a row's
+ * @returns {HTMLElement|null}
+ */
+function choiceBadge(entry, small) {
+    if (!entry || !entry.icon) { return null; }
+    var badge = document.createElement('span');
+    badge.className = 'badge d-inline-flex align-items-center '
+        + (small ? 'px-1' : 'px-2 py-1');
+    badge.style.background = entry.toneBg || 'transparent';
+    badge.style.color = entry.tone || 'inherit';
+    /* `33` is 20% alpha on the tone — the border every distribution badge in
+       the theme wears. */
+    badge.style.border = '1px solid ' + (entry.tone || 'transparent') + '33';
+    if (small) { badge.style.fontSize = '.65rem'; }
+
+    var icon = document.createElement('i');
+    icon.className = entry.icon;
+    badge.appendChild(icon);
+    return badge;
+}
+
+/**
+ * TomSelect render callback for a choice_select: the option's badge, then its
+ * wording. `small` picks the closed control's tighter shape.
+ */
+function choiceSelectRenderer(glyphs, small) {
+    return function (data) {
+        var row = document.createElement('div');
+        row.className = 'd-flex align-items-center '
+            + (small ? 'gap-1' : 'gap-2 py-1');
+
+        var badge = choiceBadge(glyphs[String(data.value)], small);
+        if (badge) { row.appendChild(badge); }
+
+        var label = document.createElement('span');
+        /* textContent, not the escape() helper: the wording never reaches the
+           DOM as markup, so nothing can be smuggled through an option title. */
+        label.textContent = data.text;
+        row.appendChild(label);
+        return row;
+    };
+}
+
+/*******************************
+ * initChoiceSelects
+ * Wires every compact choice inside `container` — the markup of
+ * Elements/genericElementsBS5/Forms/choice_select.ctp, the one-line shape of
+ * the same field the cards draw as tiles.
+ *
+ * It builds the TomSelect itself rather than leaving it to initTomSelect():
+ * the badges are the whole point of this shape, and they live in the render
+ * callbacks. Here the <select> is the control, not a mirror of one, so there is
+ * no value to keep in sync — only the reveal the cards also drive.
+ *
+ * Idempotent, like initChoiceCards.
+ * @param {Element|Document} [container]  defaults to the whole document
+ *******************************/
+function initChoiceSelects(container) {
+    var scope = container || document;
+
+    scope.querySelectorAll('[data-choice-select]').forEach(function (group) {
+        if (group.dataset.choiceBound) { return; }
+        group.dataset.choiceBound = '1';
+
+        var select = group.querySelector('[data-choice-input]');
+        if (!select) { return; }
+
+        var glyphs = {};
+        group.querySelectorAll('[data-choice-icon]').forEach(function (node) {
+            glyphs[node.dataset.choiceIcon] = {
+                icon: node.dataset.icon,
+                tone: node.dataset.tone,
+                toneBg: node.dataset.toneBg
+            };
+        });
+
+        var reveal = choiceRevealBinder(group);
+        var revealTarget = group.dataset.choiceRevealTarget
+            ? document.querySelector(group.dataset.choiceRevealTarget)
+            : null;
+
+        function sync() {
+            reveal(String(select.value));
+        }
+
+        if (typeof TomSelect === 'function' && !select.tomselect) {
+            new TomSelect(select, {
+                create: false,
+                persist: false,
+                render: {
+                    option: choiceSelectRenderer(glyphs, false),
+                    item: choiceSelectRenderer(glyphs, true)
+                },
+                onChange: sync
+            });
+        } else {
+            select.addEventListener('change', sync);
+        }
+        sync();
+
+        /* The sharing-group select this reveals is a .tom-select, and a full
+           page has nothing else that would init it — same as the cards. */
+        if (revealTarget && typeof initTomSelect === 'function') {
+            initTomSelect(revealTarget);
+        }
+    });
+}
+window.initChoiceSelects = initChoiceSelects;
+
+function initChoiceFields(container) {
+    initChoiceCards(container);
+    initChoiceSliders(container);
+    initChoiceSelects(container);
+}
+window.initChoiceFields = initChoiceFields;
+
+document.addEventListener('DOMContentLoaded', function () {
+    initChoiceFields(document);
+});
+
+/**
+ * The submit a JSON box can refuse, installed once for the whole page rather
+ * than once per form.
+ *
+ * It listens on the document in the capture phase, so it decides before any
+ * submit handler the form itself carries and those can read its decision off
+ * `event.defaultPrevented` — a form that swaps itself for a progress spinner
+ * on submit (the event import) would otherwise hide itself behind a spinner
+ * for an import the field then refused. For the same reason it does not
+ * stopPropagation: a host handler still has to see the event to know it was
+ * turned down.
+ */
+var jsonSubmitGuardInstalled = false;
+function installJsonSubmitGuard() {
+    if (jsonSubmitGuardInstalled) { return; }
+    jsonSubmitGuardInstalled = true;
+
+    document.addEventListener('submit', function (e) {
+        var form = e.target;
+        if (!form || !form.querySelectorAll) { return; }
+
+        var offender = null;
+        form.querySelectorAll('[data-json-field] [data-json-input]')
+            .forEach(function (node) {
+                if (offender) { return; }
+                var field = node.jsonField;
+                if (!field) { return; }
+                /* A hidden box is one the form swapped out (the user setting
+                   whose value became a select, a collapsed accordion section):
+                   refusing the submit over a box nobody can see would be a
+                   dead end. */
+                if (node.offsetParent === null) { return; }
+                if (!field.check()) { offender = node; }
+            });
+
+        if (offender) {
+            e.preventDefault();
+            offender.focus();
+        }
+    }, true);
+}
+
+/**
+ * The refusal of an empty `required` field, for a form marked
+ * `data-required-guard`. Forms are `novalidate`, so the browser says nothing:
+ * this flags the field with `.is-invalid` and one `.ov-field-error` line
+ * (worded by `data-required-msg`) that clears as the user types. Installed
+ * once on the document in the capture phase, like installJsonSubmitGuard,
+ * whose boxes it leaves alone.
+ */
+var requiredFieldGuardInstalled = false;
+function installRequiredFieldGuard() {
+    if (requiredFieldGuardInstalled) { return; }
+    requiredFieldGuardInstalled = true;
+
+    function anchorOf(field) {
+        return field.closest('.input-group')
+            || (field.tomselect && field.tomselect.wrapper)
+            || field;
+    }
+
+    function errorOf(field) {
+        var next = anchorOf(field).nextElementSibling;
+        return next && next.classList.contains('ov-field-error') ? next : null;
+    }
+
+    function clear(field) {
+        field.classList.remove('is-invalid');
+        anchorOf(field).classList.remove('is-invalid');
+        var msg = errorOf(field);
+        if (msg) { msg.remove(); }
+    }
+
+    function flag(field) {
+        field.classList.add('is-invalid');
+        if (field.tomselect) { field.tomselect.wrapper.classList.add('is-invalid'); }
+        if (errorOf(field)) { return; }
+        var msg = document.createElement('div');
+        msg.className = 'ov-field-error';
+        var icon = document.createElement('i');
+        icon.className = 'fas fa-circle-exclamation';
+        var text = document.createElement('span');
+        text.textContent = field.dataset.requiredMsg || 'This field is required.';
+        msg.appendChild(icon);
+        msg.appendChild(text);
+        var anchor = anchorOf(field);
+        anchor.parentNode.insertBefore(msg, anchor.nextSibling);
+
+        function onEdit() {
+            if (!String(field.value).trim()) { return; }
+            clear(field);
+            field.removeEventListener('input', onEdit);
+            field.removeEventListener('change', onEdit);
+        }
+        field.addEventListener('input', onEdit);
+        field.addEventListener('change', onEdit);
+    }
+
+    document.addEventListener('submit', function (e) {
+        var form = e.target;
+        if (!form || !form.matches || !form.matches('[data-required-guard]')) {
+            return;
+        }
+        var first = null;
+        form.querySelectorAll('[required]').forEach(function (field) {
+            if (field.disabled || field.closest('[data-json-field], [data-date-field]')) { return; }
+            if (field.type === 'checkbox' || field.type === 'radio') { return; }
+            if (String(field.value).trim()) {
+                clear(field);
+                return;
+            }
+            flag(field);
+            if (!first) { first = field; }
+        });
+        if (first) {
+            e.preventDefault();
+            (first.tomselect || first).focus();
+        }
+    }, true);
+}
+installRequiredFieldGuard();
+
+/*******************************
+ * installLengthGuards
+ * A form field carries its column's length as `maxlength` (MispFormHelper), and
+ * the browser cuts a paste at that length without a word — so say it did. A
+ * free-text box outside a POST form is a search or a filter: its text ends up
+ * in the URL, where nginx answers 414 long before any column is reached, so it
+ * gets a cap of its own the first time it is focused.
+ *******************************/
+var SEARCH_MAX_LENGTH = 512;
+var lengthGuardsInstalled = false;
+function installLengthGuards() {
+    if (lengthGuardsInstalled) { return; }
+    lengthGuardsInstalled = true;
+
+    function isTextField(el) {
+        if (el instanceof HTMLTextAreaElement) { return true; }
+        return el instanceof HTMLInputElement
+            && ['text', 'search', 'email', 'url', 'tel', ''].indexOf(el.type) !== -1;
+    }
+
+    document.addEventListener('focusin', function (e) {
+        var el = e.target;
+        if (!(el instanceof HTMLInputElement) || !isTextField(el)) { return; }
+        if (el.hasAttribute('maxlength')) { return; }
+        var form = el.form || el.closest('form');
+        if (form && String(form.getAttribute('method') || '').toLowerCase() === 'post') { return; }
+        el.maxLength = SEARCH_MAX_LENGTH;
+    }, true);
+
+    document.addEventListener('paste', function (e) {
+        var el = e.target;
+        if (!isTextField(el) || !(el.maxLength > 0) || !e.clipboardData) { return; }
+        var pasted = e.clipboardData.getData('text').length;
+        var kept = el.value.length - ((el.selectionEnd || 0) - (el.selectionStart || 0));
+        if (kept + pasted <= el.maxLength) { return; }
+
+        var anchor = el.closest('.input-group') || el;
+        var next = anchor.nextElementSibling;
+        if (next && next.classList.contains('ov-length-notice')) { next.remove(); }
+        var msg = document.createElement('div');
+        msg.className = 'ov-field-error ov-length-notice';
+        var icon = document.createElement('i');
+        icon.className = 'fas fa-scissors';
+        var text = document.createElement('span');
+        text.textContent = 'The pasted text was cut to ' + el.maxLength + ' characters, the most this field can hold.';
+        msg.appendChild(icon);
+        msg.appendChild(text);
+        anchor.parentNode.insertBefore(msg, anchor.nextSibling);
+
+        // The paste fires an input event of its own; only a later edit clears.
+        setTimeout(function () {
+            el.addEventListener('input', function () { msg.remove(); }, { once: true });
+        }, 0);
+    }, true);
+}
+installLengthGuards();
+
+/*******************************
+ * installOnDemandActions
+ * One delegated listener for every IndexTable/Fields/on_demand cell: GET the
+ * cell's url, or POST its text box as `value`, and list the JSON answer's
+ * keys under the button — or the `errors` of a refused one.
+ ******************************/
+var onDemandActionsInstalled = false;
+function installOnDemandActions() {
+    if (onDemandActionsInstalled) { return; }
+    onDemandActionsInstalled = true;
+
+    function line(key, value, className) {
+        var row = document.createElement('div');
+        if (className) { row.className = className; }
+        if (key !== null) {
+            var label = document.createElement('span');
+            label.className = 'fw-semibold';
+            label.textContent = key + ': ';
+            row.appendChild(label);
+        }
+        row.appendChild(document.createTextNode(
+            value !== null && typeof value === 'object' ? JSON.stringify(value) : String(value)
+        ));
+        return row;
+    }
+
+    function run(cell) {
+        var result = cell.querySelector('[data-on-demand-result]');
+        var input = cell.querySelector('[data-on-demand-value]');
+        var options = {
+            credentials: 'same-origin',
+            headers: {'X-Requested-With': 'XMLHttpRequest', 'Accept': 'application/json'}
+        };
+        if (input) {
+            options.method = 'POST';
+            options.headers['Content-Type'] = 'application/x-www-form-urlencoded';
+            options.body = new URLSearchParams({value: input.value.trim()}).toString();
+        }
+        result.replaceChildren(line(null, cell.dataset.running || '…', 'text-muted'));
+        fetch(cell.dataset.url, options)
+            .then(function (r) {
+                return r.json().catch(function () { return null; }).then(function (data) {
+                    return {ok: r.ok, status: r.status, data: data};
+                });
+            })
+            .then(function (answer) {
+                var data = answer.data;
+                if (!answer.ok || !data || typeof data !== 'object') {
+                    var reason = data && (data.errors || data.message || data.name);
+                    result.replaceChildren(
+                        line(null, 'Error ' + answer.status, 'text-danger fw-semibold'),
+                        line(null, reason || '', 'text-danger')
+                    );
+                    return;
+                }
+                result.replaceChildren.apply(result, Object.keys(data).map(function (key) {
+                    return line(key, data[key]);
+                }));
+            })
+            .catch(function (err) {
+                result.replaceChildren(line(null, String(err), 'text-danger'));
+            });
+    }
+
+    document.addEventListener('click', function (e) {
+        var button = e.target.closest('[data-on-demand-run]');
+        if (button) { run(button.closest('[data-on-demand]')); }
+    });
+    document.addEventListener('keydown', function (e) {
+        if (e.key !== 'Enter' || !e.target.matches('[data-on-demand-value]')) { return; }
+        e.preventDefault();
+        run(e.target.closest('[data-on-demand]'));
+    });
+}
+installOnDemandActions();
+
+/*******************************
+ * initJsonFields
+ * Wires every JSON box inside `container` — the markup of
+ * Elements/genericElementsBS5/Forms/json_field.ctp.
+ *
+ * What a bound field does on its own:
+ *   - parses as it is typed, and says so in the badge beside its label
+ *   - reports the parser's complaint, with the line it points at, under the
+ *     box, and reddens that number in the gutter
+ *   - re-indents on Format, and restores a default on Reset
+ *   - indents with Tab instead of leaving the field
+ *   - refuses a submit that would send a broken document, or an empty one for
+ *     a required field (see installJsonSubmitGuard)
+ *
+ * What a host adds, from a `misp:json-change` listener on the textarea:
+ *   a reading of the value it just parsed (`setPreview`), a complaint of its
+ *   own about a document that parses but says something the endpoint will not
+ *   understand (`setProblem`), or its own wording in the badge (`setStatus`).
+ *   `event.detail` carries {field, valid, empty, parsed, raw}, and `field` is
+ *   the same API, also reachable as `textarea.jsonField`.
+ *
+ * Idempotent: binding the same container twice binds nothing twice.
+ * @param {Element|Document} [container]  defaults to the whole document
+ *******************************/
+function initJsonFields(container) {
+    var scope = container || document;
+
+    scope.querySelectorAll('[data-json-field]').forEach(function (wrap) {
+        if (wrap.dataset.jsonBound) { return; }
+        wrap.dataset.jsonBound = '1';
+
+        var input = wrap.querySelector('[data-json-input]');
+        if (!input) { return; }
+
+        var box = wrap.querySelector('[data-json-box]');
+        var statusEl = wrap.querySelector('[data-json-status]');
+        var errorEl = wrap.querySelector('[data-json-error]');
+        var gutter = wrap.querySelector('[data-json-gutter] .ov-json-gutter-inner');
+        var previewEl = wrap.querySelector('[data-json-preview]');
+        var previewWrap = wrap.querySelector('[data-json-preview-wrap]');
+
+        var shape = wrap.dataset.jsonShape || 'any';
+        var required = wrap.dataset.jsonRequired === '1';
+        var allowXml = wrap.dataset.jsonXml === '1';
+
+        /* CakePHP 2 counts spellcheck among its minimized attributes, so a
+           template cannot write spellcheck="false" through FormHelper at all —
+           and a spellchecked JSON document is underlined on every key. */
+        input.spellcheck = false;
+
+        /* The element hands its wordings over as data attributes so they stay
+           translatable; a field rendered without them still works. */
+        var d = wrap.dataset;
+        var L = {
+            empty: d.lEmpty || 'Waiting for input',
+            valid: d.lValid || 'Valid',
+            invalid: d.lInvalid || 'Invalid JSON',
+            object: d.lObject || 'The value has to be a JSON object.',
+            array: d.lArray || 'The value has to be a JSON array.',
+            required: d.lRequired || 'Please fill this field in.',
+            keys: d.lKeys || '%s key(s)',
+            items: d.lItems || '%s item(s)',
+            line: d.lLine || 'line %s',
+            problem: d.lProblem || 'Check the content',
+            xml: d.lXml || 'XML document'
+        };
+
+        var lineCount = -1;
+        var errorLine = 0;
+        var state = {
+            valid: false, empty: true, xml: false, parsed: undefined, raw: ''
+        };
+
+        /* ── Badge, error line, gutter ── */
+
+        function setStatus(kind, text) {
+            if (!statusEl) { return; }
+            statusEl.className = 'badge ov-json-status bg-' + kind;
+            statusEl.textContent = text;
+        }
+
+        /* `soft` writes the message without reddening the box: the value is
+           not what the parser refused, so the field is not in an error state. */
+        function setError(message, soft) {
+            if (box) { box.classList.toggle('is-invalid-field', !!message && !soft); }
+            if (!errorEl) { return; }
+            errorEl.classList.toggle('d-none', !message);
+            errorEl.querySelector('span').textContent = message || '';
+        }
+
+        /* A host's complaint about a document that parses but says something
+           the endpoint will not understand. It reads as a warning rather than
+           a rejection, and it does not stop the submit — a host that wants to
+           refuse one says so from its own submit handler. */
+        function setProblem(message) {
+            if (!message) { return; }
+            /* Not L.invalid: the document parsed, so calling it invalid JSON
+               would send the reader looking for a syntax error there is
+               none of. */
+            setStatus('warning', L.problem);
+            setError(message, true);
+        }
+
+        function paintGutter() {
+            if (!gutter) { return; }
+            var count = state.raw.length ? state.raw.split('\n').length : 1;
+            if (count !== lineCount) {
+                lineCount = count;
+                var rows = '';
+                for (var i = 1; i <= count; i++) {
+                    rows += '<div>' + i + '</div>';
+                }
+                gutter.innerHTML = rows;
+            }
+            gutter.querySelectorAll('.is-error').forEach(function (node) {
+                node.classList.remove('is-error');
+            });
+            if (errorLine > 0 && errorLine <= count) {
+                gutter.children[errorLine - 1].classList.add('is-error');
+            }
+            gutter.style.transform = 'translateY(' + (-input.scrollTop) + 'px)';
+        }
+
+        /* Where the parser stopped, as a line number, or 0 when it cannot be
+           had. Firefox and Safari name the line; V8 names a character offset
+           and, in recent versions, the line beside it — except for its
+           "Unexpected token" messages, which carry neither and quote a window
+           of the document instead. There the token's place inside that window
+           is the position, but only when the window holds one candidate for
+           it: a number pointing at the wrong line is worse than none, so
+           anything ambiguous highlights nothing and leaves the message, which
+           quotes the text itself, to say where to look. */
+        function locate(message, raw) {
+            var m = /line (\d+)/.exec(message);
+            if (m) { return +m[1]; }
+            m = /position (\d+)/.exec(message);
+            if (m) {
+                return raw.slice(0, Math.min(+m[1], raw.length)).split('\n').length;
+            }
+            m = /^Unexpected token '(.)', (?:\.\.\.)?"([\s\S]*)"(?:\.\.\.)? is not valid JSON$/
+                .exec(message);
+            if (!m) { return 0; }
+
+            var token = m[1];
+            var window_ = m[2];
+            var at = raw.indexOf(window_);
+            if (at === -1) { return 0; }
+            /* A bare word V8 choked on opens a value or a key, so it follows a
+               separator; that is what tells it from the same letter inside a
+               string next to it. */
+            var pattern = '(?:^|[:,\\[{\\s])'
+                + token.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+            var hits = window_.match(new RegExp(pattern, 'g'));
+            if (!hits || hits.length !== 1) { return 0; }
+
+            var idx = window_.search(new RegExp(pattern));
+            /* The match may start on the separator before the token. */
+            while (window_.charAt(idx) !== token) { idx++; }
+            return raw.slice(0, at + idx).split('\n').length;
+        }
+
+        /* ── Reading the value ── */
+
+        function summary(parsed) {
+            if (Array.isArray(parsed)) {
+                return L.items.replace('%s', parsed.length);
+            }
+            if (parsed && typeof parsed === 'object') {
+                return L.keys.replace('%s', Object.keys(parsed).length);
+            }
+            return L.valid;
+        }
+
+        function shapeProblem(parsed) {
+            if (shape === 'object') {
+                var isObject = parsed && typeof parsed === 'object'
+                    && !Array.isArray(parsed);
+                return isObject ? null : L.object;
+            }
+            if (shape === 'array') {
+                return Array.isArray(parsed) ? null : L.array;
+            }
+            return null;
+        }
+
+        function refresh() {
+            var raw = input.value.trim();
+            state = {
+                valid: false,
+                empty: raw === '',
+                xml: allowXml && raw.charAt(0) === '<',
+                parsed: undefined,
+                raw: input.value
+            };
+            errorLine = 0;
+
+            if (state.empty) {
+                setStatus('secondary', L.empty);
+                setError(null);
+                setPreview(null);
+            } else if (state.xml) {
+                setStatus('success', L.xml);
+                setError(null);
+                setPreview(null);
+            } else {
+                var parsed;
+                var failure = null;
+                try {
+                    parsed = JSON.parse(raw);
+                } catch (e) {
+                    failure = e.message;
+                }
+
+                if (failure !== null) {
+                    errorLine = locate(failure, raw);
+                    setStatus('danger', L.invalid);
+                    setError(errorLine && !/line \d+/.test(failure)
+                        ? failure + ' — ' + L.line.replace('%s', errorLine)
+                        : failure);
+                    setPreview(null);
+                } else {
+                    var problem = shapeProblem(parsed);
+                    if (problem) {
+                        setStatus('danger', L.invalid);
+                        setError(problem);
+                        setPreview(null);
+                    } else {
+                        state.valid = true;
+                        state.parsed = parsed;
+                        setStatus('success', summary(parsed));
+                        setError(null);
+                    }
+                }
+            }
+
+            paintGutter();
+
+            /* Last word to the host: it knows what the endpoint accepts. */
+            input.dispatchEvent(new CustomEvent('misp:json-change', {
+                bubbles: true,
+                detail: {
+                    field: api,
+                    valid: state.valid,
+                    empty: state.empty,
+                    xml: state.xml,
+                    parsed: state.parsed,
+                    raw: state.raw
+                }
+            }));
+        }
+
+        /* ── The box a host fills from the parsed value ── */
+
+        function setPreview(node) {
+            if (!previewEl) { return; }
+            previewEl.innerHTML = '';
+            if (node) { previewEl.appendChild(node); }
+            if (previewWrap) { previewWrap.classList.toggle('d-none', !node); }
+        }
+
+        /* ── Editing ── */
+
+        input.addEventListener('input', refresh);
+        input.addEventListener('scroll', function () {
+            if (gutter) {
+                gutter.style.transform = 'translateY(' + (-input.scrollTop) + 'px)';
+            }
+        });
+
+        /* Tab indents rather than leaving the field — in a box where the
+           indentation is the readability, losing it to focus traversal is the
+           surprising behaviour. Shift+Tab still leaves, so nothing is trapped:
+           it takes back one level only when there is one to take back. */
+        input.addEventListener('keydown', function (e) {
+            if (e.key !== 'Tab' || e.ctrlKey || e.altKey || e.metaKey) { return; }
+            var start = input.selectionStart;
+            var value = input.value;
+            var lineStart = value.lastIndexOf('\n', start - 1) + 1;
+
+            if (e.shiftKey) {
+                var indent = /^ {1,4}/.exec(value.slice(lineStart, start));
+                if (!indent) { return; }
+                e.preventDefault();
+                input.value = value.slice(0, lineStart)
+                    + value.slice(lineStart + indent[0].length);
+                input.setSelectionRange(start - indent[0].length, start - indent[0].length);
+            } else {
+                e.preventDefault();
+                var end = input.selectionEnd;
+                input.value = value.slice(0, start) + '    ' + value.slice(end);
+                input.setSelectionRange(start + 4, start + 4);
+            }
+            refresh();
+        });
+
+        var formatBtn = wrap.querySelector('[data-json-format]');
+        if (formatBtn) {
+            /* Only when it parses: re-indenting a broken document would mean
+               guessing at it, and it is what has to be read to be fixed. */
+            formatBtn.addEventListener('click', function () {
+                try {
+                    input.value = JSON.stringify(JSON.parse(input.value), null, 4);
+                } catch (e) { /* refresh() reports it */ }
+                refresh();
+                input.focus();
+            });
+        }
+
+        var resetBtn = wrap.querySelector('[data-json-reset]');
+        if (resetBtn) {
+            resetBtn.addEventListener('click', function () {
+                input.value = resetBtn.dataset.jsonReset || '';
+                refresh();
+            });
+        }
+
+        installJsonSubmitGuard();
+
+        var api = {
+            input: input,
+            refresh: refresh,
+            isValid: function () { return state.valid; },
+            isEmpty: function () { return state.empty; },
+            isXml: function () { return state.xml; },
+            get: function () { return state.parsed; },
+            setStatus: setStatus,
+            setError: setError,
+            setProblem: setProblem,
+            setPreview: setPreview,
+            /* True when the value may go out: a filled field has to parse, and
+               a required one has to be filled. */
+            check: function () {
+                if (state.empty) {
+                    if (!required) { return true; }
+                    setStatus('danger', L.invalid);
+                    setError(L.required);
+                    return false;
+                }
+                return state.valid || state.xml;
+            }
+        };
+        input.jsonField = api;
+        wrap.jsonField = api;
+
+        refresh();
+    });
+}
+window.initJsonFields = initJsonFields;
+
+document.addEventListener('DOMContentLoaded', function () {
+    initJsonFields(document);
+});
+
+/*******************************
+ * initDateFields
+ * Binds every date picker inside `container` — the markup of
+ * Elements/genericElementsBS5/Forms/date_field.ctp. The user types or picks
+ * DD/MM/YYYY [HH:MM:SS]; the hidden text input posts ISO. All in UTC.
+ *
+ * Each field exposes `wrap.ovDateField` (also on the posted input):
+ * get(), set(iso), clear(), open(), close(), validate(show), focus().
+ * The posted input fires `input` + `change` whenever its value moves, which is
+ * what a host script listens to.
+ *
+ * Idempotent, like initJsonFields.
+ * @param {Element|Document} [container]  defaults to the whole document
+ *******************************/
+var dateSubmitGuardInstalled = false;
+
+function initDateFields(container) {
+    var scope = container || document;
+    installDateSubmitGuard();
+
+    scope.querySelectorAll('[data-date-field]').forEach(function (wrap) {
+        if (wrap.dataset.dateBound) { return; }
+        wrap.dataset.dateBound = '1';
+        bindDateField(wrap);
+    });
+}
+window.initDateFields = initDateFields;
+
+document.addEventListener('DOMContentLoaded', function () {
+    initDateFields(document);
+});
+
+/* One capture-phase listener for every form, like the JSON guard: it decides
+ * before a form's own handler, which can read event.defaultPrevented. */
+function installDateSubmitGuard() {
+    if (dateSubmitGuardInstalled) { return; }
+    dateSubmitGuardInstalled = true;
+
+    document.addEventListener('submit', function (e) {
+        var form = e.target;
+        if (!form || !form.querySelectorAll) { return; }
+        var first = null;
+        form.querySelectorAll('[data-date-field]').forEach(function (wrap) {
+            var api = wrap.ovDateField;
+            if (api && api.validate(true) && !first) { first = api; }
+        });
+        if (first) {
+            e.preventDefault();
+            first.focus();
+        }
+    }, true);
+}
+
+var ovDate = (function () {
+    function pad(n) { return (n < 10 ? '0' : '') + n; }
+    function num(s) { return s === undefined || s === '' ? 0 : parseInt(s, 10); }
+
+    function fromTime(t) {
+        var d = new Date(t);
+        return {
+            y: d.getUTCFullYear(), m: d.getUTCMonth() + 1, d: d.getUTCDate(),
+            h: d.getUTCHours(), i: d.getUTCMinutes(), s: d.getUTCSeconds()
+        };
+    }
+
+    function toTime(p) {
+        return Date.UTC(p.y, p.m - 1, p.d, p.h, p.i, p.s);
+    }
+
+    function dayOf(p) {
+        return Date.UTC(p.y, p.m - 1, p.d);
+    }
+
+    /* Date() rolls 31/02 over into March, so compare the parts back: that is
+     * what rejects a day the month does not have. */
+    function make(y, m, d, h, i, s) {
+        if (y < 1000 || h > 23 || i > 59 || s > 59) { return null; }
+        var p = fromTime(Date.UTC(y, m - 1, d, h, i, s));
+        return (p.y === y && p.m === m && p.d === d) ? p : null;
+    }
+
+    /* DD/MM/YYYY [HH:MM[:SS]], or ISO as MISP stores it — offset and
+     * fractional seconds included, so pasting a value out of MISP works. */
+    function parse(text) {
+        var v = String(text || '').trim();
+        if (!v) { return null; }
+        var r = v.match(/^(\d{1,2})[\/.\-](\d{1,2})[\/.\-](\d{4})(?:[\sT,]+(\d{1,2}):(\d{2})(?::(\d{2}))?)?$/);
+        if (r) {
+            return make(num(r[3]), num(r[2]), num(r[1]), num(r[4]), num(r[5]), num(r[6]));
+        }
+        r = v.match(/^(\d{4})-(\d{1,2})-(\d{1,2})(?:[\sT](\d{1,2}):(\d{2})(?::(\d{2}))?(?:[.,]\d+)?\s*(Z|[+-]\d{2}:?\d{2})?)?$/i);
+        if (!r) { return null; }
+        var p = make(num(r[1]), num(r[2]), num(r[3]), num(r[4]), num(r[5]), num(r[6]));
+        if (p && r[7] && r[7].toUpperCase() !== 'Z') {
+            var digits = r[7].slice(1).replace(':', '');
+            var minutes = num(digits.slice(0, 2)) * 60 + num(digits.slice(2));
+            p = fromTime(toTime(p) - (r[7][0] === '-' ? -1 : 1) * minutes * 60000);
+        }
+        return p;
+    }
+
+    function display(p, withTime) {
+        var out = pad(p.d) + '/' + pad(p.m) + '/' + p.y;
+        return withTime ? out + ' ' + pad(p.h) + ':' + pad(p.i) + ':' + pad(p.s) : out;
+    }
+
+    function iso(p, withTime) {
+        var out = p.y + '-' + pad(p.m) + '-' + pad(p.d);
+        return withTime ? out + ' ' + pad(p.h) + ':' + pad(p.i) + ':' + pad(p.s) : out;
+    }
+
+    return {
+        pad: pad, parse: parse, display: display, iso: iso,
+        fromTime: fromTime, toTime: toTime, dayOf: dayOf
+    };
+})();
+
+function bindDateField(wrap) {
+    var input = wrap.querySelector('[data-date-display]');
+    var posted = wrap.querySelector('[data-date-value]');
+    var box = wrap.querySelector('[data-date-box]');
+    if (!input || !posted || !box) { return; }
+
+    var toggleBtn = wrap.querySelector('[data-date-toggle]');
+    var clearBtn = wrap.querySelector('[data-date-clear]');
+    var withTime = wrap.dataset.dateMode === 'datetime';
+    var required = wrap.dataset.dateRequired === '1';
+    var labels = {};
+    try { labels = JSON.parse(wrap.dataset.dateLabels || '{}'); } catch (e) { /* keep defaults */ }
+
+    var locale = document.documentElement.lang || navigator.language || 'en';
+    function fmt(options) {
+        try {
+            return new Intl.DateTimeFormat(locale, Object.assign({ timeZone: 'UTC' }, options));
+        } catch (e) {
+            return new Intl.DateTimeFormat('en', Object.assign({ timeZone: 'UTC' }, options));
+        }
+    }
+    var monthLong = fmt({ month: 'long', year: 'numeric' });
+    var monthShort = fmt({ month: 'short' });
+    var dayLong = fmt({ weekday: 'long', day: 'numeric', month: 'long', year: 'numeric' });
+    var weekdayShort = fmt({ weekday: 'short' });
+
+    /* What came from the server: left exactly as it is unless the user picks
+     * something else, so an untouched edit never rewrites a stored value. */
+    var initialRaw = posted.value;
+    var initial = ovDate.parse(initialRaw);
+    var selected = initial;
+    var today = ovDate.fromTime(Date.now());
+    var view = { y: (selected || today).y, m: (selected || today).m };
+    var focusDay = ovDate.dayOf(selected || today);
+    var level = 'days';
+    var pop = null;
+    var parts = {};
+
+    function precise(p) {
+        return withTime ? ovDate.toTime(p) : ovDate.dayOf(p);
+    }
+
+    function referenced(selector) {
+        if (!selector) { return null; }
+        var node = (wrap.closest('form') || document).querySelector(selector)
+            || document.querySelector(selector);
+        return node ? ovDate.parse(node.value) : null;
+    }
+
+    function bounds() {
+        var min = ovDate.parse(wrap.dataset.dateMin);
+        var max = ovDate.parse(wrap.dataset.dateMax);
+        var after = referenced(wrap.dataset.dateAfter);
+        var before = referenced(wrap.dataset.dateBefore);
+        return {
+            minDay: Math.max(min ? ovDate.dayOf(min) : -Infinity, after ? ovDate.dayOf(after) : -Infinity),
+            maxDay: Math.min(max ? ovDate.dayOf(max) : Infinity, before ? ovDate.dayOf(before) : Infinity),
+            after: after,
+            before: before
+        };
+    }
+
+    function inRange(p) {
+        var b = bounds();
+        var day = ovDate.dayOf(p);
+        if (day < b.minDay || day > b.maxDay) { return false; }
+        if (b.after && precise(p) < precise(b.after)) { return false; }
+        if (b.before && precise(p) > precise(b.before)) { return false; }
+        return true;
+    }
+
+    /* ── Value ───────────────────────────────────────────────── */
+    function write(p) {
+        var value = '';
+        if (p) {
+            value = (initial && precise(initial) === precise(p))
+                ? initialRaw
+                : ovDate.iso(p, withTime);
+        }
+        if (posted.value === value) { return; }
+        posted.value = value;
+        posted.dispatchEvent(new Event('input', { bubbles: true }));
+        posted.dispatchEvent(new Event('change', { bubbles: true }));
+    }
+
+    function refreshClear() {
+        if (clearBtn) { clearBtn.classList.toggle('d-none', !input.value.trim()); }
+    }
+
+    function select(p, keepOpen) {
+        selected = p;
+        input.value = p ? ovDate.display(p, withTime) : '';
+        if (p) {
+            view = { y: p.y, m: p.m };
+            focusDay = ovDate.dayOf(p);
+        }
+        write(p);
+        refreshClear();
+        validate(!!p || required === false);
+        if (pop && !pop.classList.contains('d-none')) {
+            if (keepOpen) { render(); } else { close(true); }
+        }
+    }
+
+    /* ── Invalid state ───────────────────────────────────────── */
+    function markInvalid(message) {
+        box.classList.add('is-invalid');
+        var msg = wrap.querySelector(':scope > .ov-field-error');
+        if (!msg) {
+            msg = document.createElement('div');
+            msg.className = 'ov-field-error';
+            var icon = document.createElement('i');
+            icon.className = 'fas fa-circle-exclamation';
+            msg.appendChild(icon);
+            msg.appendChild(document.createElement('span'));
+            wrap.appendChild(msg);
+        }
+        msg.querySelector('span').textContent = message;
+    }
+
+    function markValid() {
+        box.classList.remove('is-invalid');
+        var msg = wrap.querySelector(':scope > .ov-field-error');
+        if (msg) { msg.remove(); }
+    }
+
+    /* Reads the text, writes what it means, and answers with the complaint (or
+     * null). `show` decides whether the complaint is also drawn. */
+    function validate(show) {
+        var text = input.value.trim();
+        var message = null;
+        if (!text) {
+            selected = null;
+            write(null);
+            if (required) { message = labels.required || 'This field is required.'; }
+        } else {
+            var p = ovDate.parse(text);
+            if (!p) {
+                message = labels.invalid || 'Enter a date as DD/MM/YYYY.';
+            } else {
+                selected = p;
+                write(p);
+                if (!inRange(p)) { message = labels.range || 'This date is outside the allowed range.'; }
+            }
+        }
+        if (!message) {
+            markValid();
+        } else if (show) {
+            markInvalid(message);
+        }
+        return message;
+    }
+
+    /* ── Popover ─────────────────────────────────────────────── */
+    function el(tag, className, text) {
+        var node = document.createElement(tag);
+        if (className) { node.className = className; }
+        if (text !== undefined) { node.textContent = text; }
+        return node;
+    }
+
+    function iconButton(className, icon, label) {
+        var b = el('button', className);
+        b.type = 'button';
+        b.title = label;
+        b.setAttribute('aria-label', label);
+        b.appendChild(el('i', icon));
+        return b;
+    }
+
+    function build() {
+        pop = el('div', 'ov-date-pop d-none');
+        pop.setAttribute('role', 'dialog');
+
+        var head = el('div', 'ov-date-head');
+        var prev = iconButton('ov-date-nav', 'fas fa-chevron-left', labels.prev || 'Previous');
+        var title = el('button', 'ov-date-title');
+        title.type = 'button';
+        title.dataset.dateTitle = '1';
+        var next = iconButton('ov-date-nav', 'fas fa-chevron-right', labels.next || 'Next');
+        prev.addEventListener('click', function () { step(-1); });
+        next.addEventListener('click', function () { step(1); });
+        title.addEventListener('click', function () {
+            level = level === 'days' ? 'months' : 'years';
+            render();
+        });
+        head.appendChild(prev);
+        head.appendChild(title);
+        head.appendChild(next);
+        pop.appendChild(head);
+
+        var body = el('div', 'ov-date-body');
+        body.dataset.dateBody = '1';
+        body.addEventListener('keydown', onGridKey);
+        pop.appendChild(body);
+
+        if (withTime) {
+            var time = el('div', 'ov-date-time');
+            time.appendChild(el('span', 'ov-date-time-label', labels.time || 'Time (UTC)'));
+            var fields = el('div', 'ov-date-time-fields');
+            [['h', 23], ['i', 59], ['s', 59]].forEach(function (spec, index) {
+                if (index) { fields.appendChild(el('span', 'ov-date-time-sep', ':')); }
+                var part = el('input', 'ov-date-time-part');
+                part.type = 'text';
+                part.inputMode = 'numeric';
+                part.maxLength = 2;
+                part.autocomplete = 'off';
+                part.dataset.part = spec[0];
+                part.dataset.max = spec[1];
+                part.addEventListener('input', onTimeInput);
+                part.addEventListener('keydown', onTimeKey);
+                part.addEventListener('blur', function () { part.value = ovDate.pad(num(part.value)); });
+                parts[spec[0]] = part;
+                fields.appendChild(part);
+            });
+            time.appendChild(fields);
+            pop.appendChild(time);
+        }
+
+        var foot = el('div', 'ov-date-foot');
+        var todayBtn = el('button', 'ov-date-link', labels.today || 'Today');
+        todayBtn.type = 'button';
+        todayBtn.addEventListener('click', function () {
+            select(ovDate.fromTime(withTime ? Math.floor(Date.now() / 1000) * 1000 : Date.now()), withTime);
+        });
+        foot.appendChild(todayBtn);
+        foot.appendChild(el('span', 'flex-grow-1'));
+        if (clearBtn) {
+            var clear = el('button', 'ov-date-link', labels.clear || 'Clear');
+            clear.type = 'button';
+            clear.addEventListener('click', function () { select(null); input.focus(); });
+            foot.appendChild(clear);
+        }
+        if (withTime) {
+            var done = el('button', 'ov-date-done', labels.done || 'Done');
+            done.type = 'button';
+            done.addEventListener('click', function () { close(true); });
+            foot.appendChild(done);
+        }
+        pop.appendChild(foot);
+
+        /* Keep focus where it is when a button is pressed, so a click inside
+           the popover never reads as leaving the field. */
+        pop.addEventListener('mousedown', function (e) {
+            if (!e.target.closest('input')) { e.preventDefault(); }
+        });
+        wrap.appendChild(pop);
+    }
+
+    function num(v) { var n = parseInt(v, 10); return isNaN(n) ? 0 : n; }
+
+    function currentTime() {
+        return selected || { h: 0, i: 0, s: 0 };
+    }
+
+    function onTimeInput() {
+        var base = selected || ovDate.fromTime(ovDate.dayOf(today));
+        var p = Object.assign({}, base, {
+            h: Math.min(num(parts.h.value), 23),
+            i: Math.min(num(parts.i.value), 59),
+            s: Math.min(num(parts.s.value), 59)
+        });
+        selected = p;
+        input.value = ovDate.display(p, true);
+        write(p);
+        refreshClear();
+        validate(true);
+        if (level === 'days') { renderGrid(); }
+    }
+
+    function onTimeKey(e) {
+        if (e.key !== 'ArrowUp' && e.key !== 'ArrowDown') { return; }
+        e.preventDefault();
+        var part = e.currentTarget;
+        var max = num(part.dataset.max);
+        var v = num(part.value) + (e.key === 'ArrowUp' ? 1 : -1);
+        part.value = ovDate.pad(v > max ? 0 : (v < 0 ? max : v));
+        onTimeInput();
+    }
+
+    function step(dir) {
+        if (level === 'days') {
+            var m = view.m + dir;
+            view = { y: view.y + Math.floor((m - 1) / 12), m: ((m - 1) % 12 + 12) % 12 + 1 };
+        } else {
+            view = { y: view.y + dir * (level === 'years' ? 12 : 1), m: view.m };
+        }
+        render();
+    }
+
+    function cell(className, text, onPick) {
+        var b = el('button', className, text);
+        b.type = 'button';
+        b.tabIndex = -1;
+        b.addEventListener('click', onPick);
+        return b;
+    }
+
+    function renderGrid() {
+        var body = pop.querySelector('[data-date-body]');
+        var title = pop.querySelector('[data-date-title]');
+        body.textContent = '';
+        body.className = 'ov-date-body is-' + level;
+        var b = bounds();
+        var todayDay = ovDate.dayOf(today);
+        var selectedDay = selected ? ovDate.dayOf(selected) : null;
+
+        if (level === 'days') {
+            title.textContent = monthLong.format(new Date(Date.UTC(view.y, view.m - 1, 1)));
+            /* 1 Jan 2024 was a Monday. */
+            for (var w = 0; w < 7; w++) {
+                body.appendChild(el('span', 'ov-date-weekday',
+                    weekdayShort.format(new Date(Date.UTC(2024, 0, 1 + w)))));
+            }
+            var first = new Date(Date.UTC(view.y, view.m - 1, 1));
+            var start = ovDate.dayOf({ y: view.y, m: view.m, d: 1 })
+                - ((first.getUTCDay() + 6) % 7) * 86400000;
+            for (var k = 0; k < 42; k++) {
+                var day = start + k * 86400000;
+                var p = ovDate.fromTime(day);
+                var c = cell('ov-date-day', String(p.d), pickDay.bind(null, day));
+                c.dataset.day = day;
+                c.setAttribute('aria-label', dayLong.format(new Date(day)));
+                if (p.m !== view.m) { c.classList.add('is-other'); }
+                if (day === todayDay) { c.classList.add('is-today'); c.setAttribute('aria-current', 'date'); }
+                if (day === selectedDay) { c.classList.add('is-selected'); c.setAttribute('aria-pressed', 'true'); }
+                if (day < b.minDay || day > b.maxDay) { c.disabled = true; }
+                if (day === focusDay) { c.tabIndex = 0; }
+                body.appendChild(c);
+            }
+            if (!body.querySelector('[tabindex="0"]')) {
+                var fallback = body.querySelector('.ov-date-day:not(.is-other)');
+                if (fallback) { fallback.tabIndex = 0; }
+            }
+        } else if (level === 'months') {
+            title.textContent = String(view.y);
+            for (var m = 1; m <= 12; m++) {
+                var mc = cell('ov-date-cell', monthShort.format(new Date(Date.UTC(2024, m - 1, 1))),
+                    pickMonth.bind(null, m));
+                if (selected && selected.y === view.y && selected.m === m) { mc.classList.add('is-selected'); }
+                if (today.y === view.y && today.m === m) { mc.classList.add('is-today'); }
+                if (m === view.m) { mc.tabIndex = 0; }
+                body.appendChild(mc);
+            }
+        } else {
+            var from = Math.floor(view.y / 12) * 12;
+            title.textContent = from + ' – ' + (from + 11);
+            for (var y = from; y < from + 12; y++) {
+                var yc = cell('ov-date-cell', String(y), pickYear.bind(null, y));
+                if (selected && selected.y === y) { yc.classList.add('is-selected'); }
+                if (today.y === y) { yc.classList.add('is-today'); }
+                if (y === view.y) { yc.tabIndex = 0; }
+                body.appendChild(yc);
+            }
+        }
+    }
+
+    function render() {
+        if (!pop) { return; }
+        renderGrid();
+        if (withTime) {
+            var t = currentTime();
+            ['h', 'i', 's'].forEach(function (k) {
+                if (document.activeElement !== parts[k]) { parts[k].value = ovDate.pad(t[k]); }
+            });
+        }
+        place();
+    }
+
+    function pickDay(day) {
+        var p = ovDate.fromTime(day);
+        var t = currentTime();
+        select(Object.assign(p, { h: t.h, i: t.i, s: t.s }), withTime);
+        if (!withTime) { input.focus(); }
+    }
+
+    function pickMonth(m) {
+        view = { y: view.y, m: m };
+        level = 'days';
+        render();
+        focusCell();
+    }
+
+    function pickYear(y) {
+        view = { y: y, m: view.m };
+        level = 'months';
+        render();
+        focusCell();
+    }
+
+    function focusCell() {
+        var target = pop.querySelector('[data-date-body] [tabindex="0"]');
+        if (target) { target.focus(); }
+    }
+
+    /* Arrows walk the grid (a day grid crosses into the next month), PageUp/
+     * PageDown turn the page, Home/End go to the ends of the week. */
+    function onGridKey(e) {
+        var key = e.key;
+        if (level !== 'days') {
+            var cells = Array.prototype.slice.call(pop.querySelectorAll('[data-date-body] button'));
+            var at = cells.indexOf(document.activeElement);
+            var move = { ArrowLeft: -1, ArrowRight: 1, ArrowUp: -3, ArrowDown: 3 }[key];
+            if (move === undefined || at < 0) { return; }
+            e.preventDefault();
+            var to = cells[Math.max(0, Math.min(cells.length - 1, at + move))];
+            cells.forEach(function (c) { c.tabIndex = -1; });
+            to.tabIndex = 0;
+            to.focus();
+            return;
+        }
+        var d = ovDate.fromTime(focusDay);
+        var next = null;
+        var DAY = 86400000;
+        if (key === 'ArrowLeft') { next = focusDay - DAY; }
+        else if (key === 'ArrowRight') { next = focusDay + DAY; }
+        else if (key === 'ArrowUp') { next = focusDay - 7 * DAY; }
+        else if (key === 'ArrowDown') { next = focusDay + 7 * DAY; }
+        else if (key === 'Home') { next = focusDay - ((new Date(focusDay).getUTCDay() + 6) % 7) * DAY; }
+        else if (key === 'End') { next = focusDay + (6 - (new Date(focusDay).getUTCDay() + 6) % 7) * DAY; }
+        else if (key === 'PageUp' || key === 'PageDown') {
+            var shift = (key === 'PageUp' ? -1 : 1) * (e.shiftKey ? 12 : 1);
+            var m = d.m - 1 + shift;
+            var y = d.y + Math.floor(m / 12);
+            m = (m % 12 + 12) % 12;
+            var last = new Date(Date.UTC(y, m + 1, 0)).getUTCDate();
+            next = Date.UTC(y, m, Math.min(d.d, last));
+        }
+        if (next === null) { return; }
+        e.preventDefault();
+        focusDay = next;
+        var p = ovDate.fromTime(next);
+        view = { y: p.y, m: p.m };
+        render();
+        focusCell();
+    }
+
+    function place() {
+        if (!pop || pop.classList.contains('d-none')) { return; }
+        var r = box.getBoundingClientRect();
+        var w = pop.offsetWidth;
+        var h = pop.offsetHeight;
+        var gap = 6;
+        var top = r.bottom + gap;
+        if (top + h > window.innerHeight - 8 && r.top - gap - h > 8) {
+            top = r.top - gap - h;
+        }
+        var left = Math.max(8, Math.min(r.left, window.innerWidth - w - 8));
+        pop.style.top = top + 'px';
+        pop.style.left = left + 'px';
+        /* A transformed ancestor becomes the containing block of a fixed
+           element: measure where it landed and correct by the difference. */
+        var got = pop.getBoundingClientRect();
+        if (Math.abs(got.top - top) > 0.5 || Math.abs(got.left - left) > 0.5) {
+            pop.style.top = (2 * top - got.top) + 'px';
+            pop.style.left = (2 * left - got.left) + 'px';
+        }
+    }
+
+    function onOutside(e) {
+        if (!wrap.contains(e.target)) { close(false); }
+    }
+
+    function open(focusGrid) {
+        if (!pop) { build(); }
+        if (!pop.classList.contains('d-none')) {
+            if (focusGrid) { focusCell(); }
+            return;
+        }
+        today = ovDate.fromTime(Date.now());
+        var anchor = selected || today;
+        view = { y: anchor.y, m: anchor.m };
+        focusDay = ovDate.dayOf(anchor);
+        level = 'days';
+        pop.classList.remove('d-none');
+        wrap.classList.add('is-open');
+        input.setAttribute('aria-expanded', 'true');
+        render();
+        document.addEventListener('mousedown', onOutside, true);
+        window.addEventListener('resize', place);
+        document.addEventListener('scroll', place, true);
+        if (focusGrid) { focusCell(); }
+    }
+
+    function close(refocus) {
+        if (!pop || pop.classList.contains('d-none')) { return; }
+        pop.classList.add('d-none');
+        wrap.classList.remove('is-open');
+        input.setAttribute('aria-expanded', 'false');
+        document.removeEventListener('mousedown', onOutside, true);
+        window.removeEventListener('resize', place);
+        document.removeEventListener('scroll', place, true);
+        if (refocus) { input.focus(); }
+    }
+
+    function isOpen() {
+        return !!pop && !pop.classList.contains('d-none');
+    }
+
+    /* Normalise on the way out: 3/9/2026 leaves as 03/09/2026, and only here
+     * does a half-typed date get called wrong. */
+    function commit() {
+        var message = validate(true);
+        if (!message && selected) { input.value = ovDate.display(selected, withTime); }
+        refreshClear();
+    }
+
+    /* ── Wiring ──────────────────────────────────────────────── */
+    input.addEventListener('input', function () {
+        var p = ovDate.parse(input.value);
+        refreshClear();
+        if (p) {
+            validate(false);
+            view = { y: p.y, m: p.m };
+            focusDay = ovDate.dayOf(p);
+            if (isOpen()) { render(); }
+        } else if (!input.value.trim()) {
+            validate(false);
+        }
+    });
+
+    input.addEventListener('click', function () { open(false); });
+
+    input.addEventListener('keydown', function (e) {
+        if (e.key === 'ArrowDown' && (e.altKey || !isOpen())) {
+            e.preventDefault();
+            open(true);
+        } else if (e.key === 'ArrowDown' && isOpen()) {
+            e.preventDefault();
+            focusCell();
+        } else if (e.key === 'Enter' && isOpen()) {
+            e.preventDefault();
+            commit();
+            close(false);
+        }
+    });
+
+    /* Escape closes the popover, not the modal around it. */
+    wrap.addEventListener('keydown', function (e) {
+        if (e.key === 'Escape' && isOpen()) {
+            e.preventDefault();
+            e.stopPropagation();
+            close(true);
+        }
+    });
+
+    wrap.addEventListener('focusout', function (e) {
+        if (e.relatedTarget && wrap.contains(e.relatedTarget)) { return; }
+        if (e.target === input) { commit(); }
+        if (e.relatedTarget) { close(false); }
+    });
+
+    [toggleBtn, clearBtn].forEach(function (b) {
+        if (b) { b.addEventListener('mousedown', function (e) { e.preventDefault(); }); }
+    });
+    if (toggleBtn) {
+        toggleBtn.addEventListener('click', function () {
+            if (isOpen()) { close(true); } else { input.focus(); open(true); }
+        });
+    }
+    if (clearBtn) {
+        clearBtn.addEventListener('click', function () {
+            select(null);
+            input.focus();
+        });
+    }
+
+    /* A range bound moved: say at once if this value no longer fits. */
+    [wrap.dataset.dateAfter, wrap.dataset.dateBefore].forEach(function (selector) {
+        if (!selector) { return; }
+        var ref = (wrap.closest('form') || document).querySelector(selector);
+        if (!ref) { return; }
+        ref.addEventListener('change', function () {
+            if (input.value.trim()) { validate(true); }
+            if (isOpen()) { render(); }
+        });
+    });
+
+    if (selected) { input.value = ovDate.display(selected, withTime); }
+    else if (initialRaw) { input.value = initialRaw; }
+    refreshClear();
+
+    var api = {
+        get: function () { return posted.value; },
+        set: function (value) { select(ovDate.parse(value)); },
+        clear: function () { select(null); },
+        open: function () { open(false); },
+        close: function () { close(false); },
+        validate: function (show) { return validate(show !== false); },
+        focus: function () { input.focus(); }
+    };
+    wrap.ovDateField = api;
+    posted.ovDateField = api;
+}
+
+function initDistributionSelect(elOrId, onChange, settings) {
+    var el = typeof elOrId === 'string' ? document.getElementById(elOrId) : elOrId;
+    if (!el || el.tomselect || typeof TomSelect === 'undefined') { return null; }
+    return new TomSelect(el, Object.assign({
+        create:   false,
+        onChange: onChange || null,
+        render: {
+            option: renderDistOption,
+            item:   renderDistSelected
+        }
+    }, settings || {}));
+}
+
+function formTypeChanged(idPrefix) {
+    var typeEl = document.getElementById(idPrefix + 'Type');
+    if (!typeEl) { return; }
+    var isNonCorr = (typeof non_correlating_types !== 'undefined')
+        && non_correlating_types.indexOf(typeEl.value) !== -1;
+    var corrEl = document.getElementById(idPrefix + 'DisableCorrelation');
+    if (corrEl) { corrEl.disabled = isNonCorr; }
+}
+
+function checkNoticeList(type) {
+    var fieldsToCheck = { attribute: ['category', 'type'] };
+    var fields = fieldsToCheck[type];
+    if (!fields) { return; }
+
+    var triggers = (typeof notice_list_triggers !== 'undefined')
+        ? notice_list_triggers : {};
+    var base = (typeof baseurl !== 'undefined') ? baseurl : '';
+
+    fields.forEach(function (fieldName) {
+        var box = document.getElementById('notice_' + fieldName);
+        if (!box) { return; }
+        box.innerHTML = '';
+        box.style.display = 'none';
+
+        if (!(fieldName in triggers)) { return; }
+        var elId = type.charAt(0).toUpperCase() + type.slice(1)
+                 + fieldName.charAt(0).toUpperCase() + fieldName.slice(1);
+        var el = document.getElementById(elId);
+        if (!el || !(el.value in triggers[fieldName])) { return; }
+
+        triggers[fieldName][el.value].forEach(function (notice) {
+            var msg = (notice.message && notice.message.en)
+                ? notice.message.en : '';
+
+            var wrap = document.createElement('div');
+            wrap.className = 'd-flex align-items-start gap-2 rounded-2 p-2 mt-1';
+            wrap.style.cssText = 'background:rgba(13,110,253,.06);'
+                + 'border:1px solid rgba(13,110,253,.25);font-size:.8rem;';
+
+            /* innerHTML for static structure; textContent set below to avoid XSS */
+            wrap.innerHTML =
+                '<i class="fas fa-circle-info flex-shrink-0"'
+                + ' style="color:var(--primary);margin-top:.15rem;"></i>'
+                + '<div class="flex-fill" style="min-width:0;overflow:hidden;">'
+                    + '<div class="d-flex align-items-center gap-1"'
+                    + ' style="min-width:0;overflow:hidden;">'
+                        + '<a class="fw-semibold text-decoration-none flex-shrink-0"'
+                        + ' style="color:var(--primary);"></a>'
+                        + '<span class="notice-preview" style="flex:1;min-width:0;'
+                        + 'overflow:hidden;white-space:nowrap;'
+                        + 'text-overflow:ellipsis;color:#666;"></span>'
+                        + '<button type="button" style="background:none;border:none;'
+                        + 'padding:0;color:var(--primary);cursor:pointer;'
+                        + 'flex-shrink:0;">'
+                        + '<i class="fas fa-chevron-down"'
+                        + ' style="font-size:.7rem;"></i></button>'
+                    + '</div>'
+                    + '<div class="notice-full"'
+                    + ' style="display:none;color:#666;margin-top:.2rem;"></div>'
+                + '</div>';
+
+            var link    = wrap.querySelector('a');
+            var preview = wrap.querySelector('.notice-preview');
+            var full    = wrap.querySelector('.notice-full');
+            var btn     = wrap.querySelector('button');
+            var chevron = btn.querySelector('i');
+
+            link.href         = base + '/noticelists/view/' + notice.list_id;
+            link.textContent  = notice.list_name;
+            preview.textContent = msg;
+            full.textContent    = msg;
+
+            btn.addEventListener('click', function () {
+                var expanded = btn.getAttribute('aria-expanded') === 'true';
+                preview.style.display = expanded ? '' : 'none';
+                full.style.display    = expanded ? 'none' : '';
+                chevron.className     = expanded
+                    ? 'fas fa-chevron-down' : 'fas fa-chevron-up';
+                btn.setAttribute('aria-expanded', String(!expanded));
+            });
+
+            box.appendChild(wrap);
+            box.style.display = '';
+        });
+    });
+}
+
+function parseSeenDisplay(val) {
+    if (!val) { return ''; }
+    var m = val.trim().match(
+        /^(\d{1,2})\/(\d{1,2})\/(\d{4})(?:\s+(\d{1,2}):(\d{1,2}))?$/
+    );
+    if (!m) { return ''; }
+    return m[3]
+        + '-'  + m[2].padStart(2, '0')
+        + '-'  + m[1].padStart(2, '0')
+        + 'T'  + (m[4] || '00').padStart(2, '0')
+        + ':'  + (m[5] || '00').padStart(2, '0');
+}
+/*******************************
+ * renderPaginator
+ * Renders a pagination nav inside `el`.
+ * Hides `el` (d-none) when pageCount <= 1.
+ * @param {Element}  el         Container element
+ * @param {number}   page       Current page (1-based)
+ * @param {number}   pageCount  Total pages
+ * @param {function} onPage     Callback(n) on page button click
+ *******************************/
+function renderPaginator(el, page, pageCount, onPage) {
+    if (!el) { return; }
+    if (pageCount <= 1) { el.classList.add('d-none'); return; }
+    el.classList.remove('d-none');
+
+    var maxShow = 5, half = Math.floor(maxShow / 2);
+    var start = Math.max(1, page - half);
+    var end   = Math.min(pageCount, start + maxShow - 1);
+    if (end - start + 1 < maxShow) { start = Math.max(1, end - maxShow + 1); }
+
+    function li(content, disabled, active, n) {
+        var cls = 'page-item' + (disabled ? ' disabled' : '') + (active ? ' active' : '');
+        if (disabled || active) {
+            return '<li class="' + cls + '"><span class="page-link">' + content + '</span></li>';
+        }
+        return '<li class="' + cls + '">'
+            + '<button type="button" class="page-link" data-pn="' + n + '">'
+            + content + '</button></li>';
+    }
+
+    var items = li('<i class="fas fa-chevron-left"></i>', page <= 1, false, page - 1);
+    if (start > 1) {
+        items += li('1', false, false, 1);
+        if (start > 2) { items += '<li class="page-item disabled"><span class="page-link">&hellip;</span></li>'; }
+    }
+    for (var i = start; i <= end; i++) { items += li(i, false, i === page, i); }
+    if (end < pageCount) {
+        if (end < pageCount - 1) { items += '<li class="page-item disabled"><span class="page-link">&hellip;</span></li>'; }
+        items += li(pageCount, false, false, pageCount);
+    }
+    items += li('<i class="fas fa-chevron-right"></i>', page >= pageCount, false, page + 1);
+
+    el.innerHTML = '<nav><ul class="pagination pagination-sm mb-0">' + items + '</ul></nav>';
+    el.querySelectorAll('[data-pn]').forEach(function (btn) {
+        btn.addEventListener('click', function () { onPage(parseInt(btn.dataset.pn, 10)); });
+    });
+}
+
+/*******************************
+ * toggleCollapsible
+ * Toggles visibility of a target element via d-none.
+ * Updates the button icon (chevron) and last text node.
+ * @param {Element} btn        The trigger button
+ * @param {string}  targetId   ID of element to show/hide
+ * @param {string}  showLabel  Label shown when element is hidden
+ * @param {string}  hideLabel  Label shown when element is visible
+ *******************************/
+function toggleCollapsible(btn, targetId, showLabel, hideLabel) {
+    var el   = document.getElementById(targetId);
+    var icon = btn.querySelector('i');
+    if (!el) { return; }
+    var isHidden = el.classList.contains('d-none');
+    el.classList.toggle('d-none', !isHidden);
+    if (icon) { icon.className = isHidden ? 'fas fa-chevron-up me-1' : 'fas fa-chevron-down me-1'; }
+    var last = btn.lastChild;
+    if (last && last.nodeType === 3) { last.textContent = ' ' + (isHidden ? hideLabel : showLabel); }
+}
+
+/*******************************
+ * initAttributeForm
+ * Bootstraps all interactive behaviour for Attributes/add and Attributes/edit.
+ * Call once the DOM is ready: initAttributeForm(currentDist, isEdit)
+ * @param {number}  currentDist  Initial distribution value (0–5)
+ * @param {boolean} isEdit       True when editing an existing attribute
+ *******************************/
+function initAttributeForm(currentDist, isEdit) {
+
+    /* Show/hide the sharing-group select */
+    function toggleSg(val) {
+        var sg = document.getElementById('attr-sg-container');
+        if (sg) { sg.style.display = parseInt(val, 10) === 4 ? '' : 'none'; }
+    }
+
+    /* Checkbox-card colours for Batch / IDS / Correlation */
+    var CARD_CFG = {
+        AttributeBatchImport: {
+            card: 'card-batch', icon: 'icon-batch',
+            on:  { border: '#0d6efd', color: '#0d6efd', iconClass: null },
+            off: { border: '#dee2e6', color: '#adb5bd', iconClass: null }
+        },
+        AttributeToIds: {
+            card: 'card-ids', icon: 'icon-ids',
+            on:  { border: '#ffc107', color: '#ffc107', iconClass: null },
+            off: { border: '#dee2e6', color: '#adb5bd', iconClass: null }
+        },
+        AttributeDisableCorrelation: {
+            card: 'card-correl', icon: 'icon-correl',
+            on:  { border: '#dee2e6', color: '#adb5bd', iconClass: 'fas fa-link-slash' },
+            off: { border: '#198754', color: '#198754', iconClass: 'fas fa-link' }
+        }
+    };
+
+    function applyCardStyle(checkboxId) {
+        var cfg  = CARD_CFG[checkboxId];
+        if (!cfg) { return; }
+        var cb   = document.getElementById(checkboxId);
+        var card = document.getElementById(cfg.card);
+        var icon = document.getElementById(cfg.icon);
+        if (!cb || !card) { return; }
+        var theme = cb.checked ? cfg.on : cfg.off;
+        card.style.borderColor = theme.border;
+        if (icon) {
+            icon.style.color   = theme.color;
+            icon.style.opacity = '1';
+            if (theme.iconClass) { icon.className = theme.iconClass; }
+        }
+    }
+
+    function setupCardListeners() {
+        Object.keys(CARD_CFG).forEach(function (id) {
+            var cb = document.getElementById(id);
+            if (!cb) { return; }
+            applyCardStyle(id);
+            cb.addEventListener('change', function () { applyCardStyle(id); });
+        });
+    }
+
+    /* Filter the Type TomSelect to the types allowed for the selected category */
+    function applyTypeFilter(selectedCategory, preserveValue) {
+        var typeEl  = document.getElementById('AttributeType');
+        if (!typeEl) { return; }
+
+        /* Capture current value before clearing options */
+        var previousType = typeEl.value;
+
+        var mapping = (typeof category_type_mapping !== 'undefined')
+            ? category_type_mapping : {};
+        var allowed = [];
+
+        if (!selectedCategory || !mapping[selectedCategory]) {
+            var seen = {};
+            Object.keys(mapping).forEach(function (cat) {
+                mapping[cat].forEach(function (t) {
+                    if (!seen[t]) { seen[t] = true; allowed.push(t); }
+                });
+            });
+        } else {
+            allowed = mapping[selectedCategory].slice();
+        }
+
+        /* Value to select: keep previous on init, reset to empty on user change */
+        var nextVal = (preserveValue && allowed.indexOf(previousType) !== -1)
+            ? previousType : '';
+
+        while (typeEl.options.length) { typeEl.remove(0); }
+        typeEl.add(new Option('', ''));
+        allowed.forEach(function (t) { typeEl.add(new Option(t, t)); });
+        typeEl.value = nextVal;
+        /* An attribute inside an object has its type fixed by the template, so
+         * refilling the list must not hand it back. */
+        var locked = typeEl.dataset.locked === '1';
+        typeEl.disabled = locked;
+
+        if (typeEl.tomselect) {
+            var ts = typeEl.tomselect;
+            ts.clear(true);
+            ts.clearOptions();
+            ts.addOption({ value: '', text: '' });
+            ts.addOptions(allowed.map(function (t) { return { value: t, text: t }; }));
+            ts.setValue(nextVal, true);
+            ts.refreshItems();
+            if (locked) { ts.disable(); }
+        }
+
+        formTypeChanged('Attribute');
+    }
+
+    /* TomSelect: Category */
+    function initCategorySelect() {
+        var el = document.getElementById('AttributeCategory');
+        if (!el || el.tomselect) { return; }
+        new TomSelect(el, {
+            create: false,
+            onChange: function (val) {
+                applyTypeFilter(val);
+                if (val === 'Internal reference') {
+                    var distEl = document.getElementById('AttributeDistribution');
+                    if (distEl && distEl.tomselect) {
+                        distEl.tomselect.setValue('0');
+                    } else {
+                        toggleSg(0);
+                    }
+                }
+                checkNoticeList('attribute');
+            }
+        });
+    }
+
+    /* TomSelect: Type */
+    function initTypeSelect() {
+        var el = document.getElementById('AttributeType');
+        if (!el || el.tomselect) { return; }
+        new TomSelect(el, {
+            create: false,
+            onChange: function () {
+                formTypeChanged('Attribute');
+                checkNoticeList('attribute');
+            }
+        });
+    }
+
+    /* Live format validation of the Value field against the selected Type.
+     * Reuses the server-side AttributeValidationTool via an AJAX endpoint so
+     * the rules stay in sync with what MISP will actually accept. */
+    function setupValueValidation() {
+        var valueEl = document.getElementById('AttributeValue');
+        var typeEl  = document.getElementById('AttributeType');
+        if (!valueEl || !typeEl) { return; }
+
+        var batchEl = document.getElementById('AttributeBatchImport');
+        var form    = valueEl.form || (valueEl.closest && valueEl.closest('form'));
+        var base    = (typeof baseurl !== 'undefined') ? baseurl : '';
+        var errorId = 'AttributeValueError';
+        var lastValid = true;   // best-effort submit guard
+        var seq = 0;            // ignore out-of-order responses
+
+        function showError(message) {
+            lastValid = false;
+            valueEl.style.borderColor = '#dc3545';
+            var msg = document.getElementById(errorId);
+            if (!msg) {
+                msg = document.createElement('div');
+                msg.id        = errorId;
+                msg.className  = 'text-danger d-flex align-items-start gap-1 mt-1';
+                msg.style.fontSize = '.75rem';
+                var icon = document.createElement('i');
+                icon.className = 'fas fa-circle-exclamation';
+                icon.style.marginTop = '.15rem';
+                msg.appendChild(icon);
+                msg.appendChild(document.createElement('span'));
+                valueEl.parentNode.appendChild(msg);
+            }
+            msg.querySelector('span').textContent = message;
+        }
+
+        function clearError() {
+            lastValid = true;
+            valueEl.style.borderColor = '#d8dde3';
+            var msg = document.getElementById(errorId);
+            if (msg) { msg.remove(); }
+        }
+
+        function validate() {
+            var value = valueEl.value;
+            var type  = typeEl.value;
+            if (!type || !value.trim()) { clearError(); return; }
+
+            var mySeq = ++seq;
+            var params = new URLSearchParams();
+            params.append('type', type);
+            params.append('value', value);
+            if (batchEl && batchEl.checked) { params.append('batch', '1'); }
+
+            fetch(base + '/attributes/validateValue', {
+                method: 'POST',
+                credentials: 'same-origin',
+                headers: {
+                    'Content-Type': 'application/x-www-form-urlencoded',
+                    'X-Requested-With': 'XMLHttpRequest',
+                    'Accept': 'application/json'
+                },
+                body: params.toString()
+            })
+                .then(function (r) { return r.json(); })
+                .then(function (res) {
+                    if (mySeq !== seq) { return; } // a newer check superseded this
+                    if (res && res.valid === false) {
+                        showError(res.message
+                            || 'The value does not match the expected format.');
+                    } else {
+                        clearError();
+                    }
+                })
+                .catch(function () { /* network issue: don't block the user */ });
+        }
+
+        valueEl.addEventListener('blur', validate);
+        valueEl.addEventListener('input', function () {
+            /* remove stale error while the user is fixing the value */
+            if (!lastValid) { clearError(); }
+        });
+        typeEl.addEventListener('change', validate);
+        if (batchEl) { batchEl.addEventListener('change', validate); }
+
+        /* Block submission only when we already know the value is invalid. */
+        if (form) {
+            form.addEventListener('submit', function (e) {
+                if (!lastValid && valueEl.value.trim() && typeEl.value) {
+                    e.preventDefault();
+                    e.stopPropagation();
+                    valueEl.focus();
+                }
+            });
+        }
+    }
+
+    initCategorySelect();
+    initTypeSelect();
+    initDistributionSelect('AttributeDistribution', function (val) { toggleSg(val); });
+    setupCardListeners();
+    setupValueValidation();
+    if (typeof initCollectionForm === 'function') { initCollectionForm(document); }
+
+    toggleSg(currentDist);
+    var initCat = document.getElementById('AttributeCategory');
+    applyTypeFilter(initCat ? initCat.value : '', true);
+    if (isEdit) { checkNoticeList('attribute'); }
+}
+
+/*******************************
+ * Events/add and Events/edit
+ *
+ * initEventForm(container) wires the event form inside `container` (default:
+ * the document) and binds nothing outside it, so it is safe on a modal body,
+ * on a full page, and twice on either.
+ *
+ * What it owns:
+ *   - the three choice_cards groups (distribution, analysis, threat level)
+ *   - the extends-event preview
+ *   - required-field validation, and a submit that cannot fire twice
+ *
+ * The field look — the underline, the box, the invalid state — lives in
+ * mainOvermind.css under `.ov-form-*`; nothing here writes a style.
+ *******************************/
+function initEventForm(container) {
+    /* Takes the form itself, any container holding it, or nothing at all. */
+    var scope = (container && container.querySelector) ? container : document;
+    var form = (scope.matches && scope.matches('#EventForm'))
+        ? scope
+        : scope.querySelector('#EventForm');
+    if (!form || form.dataset.eventFormBound) { return; }
+    form.dataset.eventFormBound = '1';
+
+    var base = (typeof baseurl === 'string') ? baseurl : '';
+
+    /* ── Invalid state ───────────────────────────────────────────
+     * One place decides what a rejected field looks like: the class on the
+     * field (or on the box around it) and one message under its group. */
+    function fieldGroup(el) {
+        return el.closest('.ov-form-group') || el.parentNode;
+    }
+
+    function markInvalid(el, message) {
+        (el.closest('.ov-form-box') || el).classList.add('is-invalid-field');
+        var group = fieldGroup(el);
+        var msg = group.querySelector('.ov-field-error');
+        if (!msg) {
+            msg = document.createElement('div');
+            msg.className = 'ov-field-error';
+            var icon = document.createElement('i');
+            icon.className = 'fas fa-circle-exclamation';
+            var text = document.createElement('span');
+            msg.appendChild(icon);
+            msg.appendChild(text);
+            group.appendChild(msg);
+        }
+        msg.querySelector('span').textContent = message;
+    }
+
+    function markValid(el) {
+        (el.closest('.ov-form-box') || el).classList.remove('is-invalid-field');
+        var msg = fieldGroup(el).querySelector('.ov-field-error');
+        if (msg) { msg.remove(); }
+    }
+
+    /* A validator returns the element to focus when the field is wrong, and
+     * null when it is fine; the submit handler collects them all. */
+    var validators = [];
+
+    /* ── Event info ──────────────────────────────────────────── */
+    function bindInfo() {
+        var info = form.querySelector('#EventInfo');
+        if (!info) { return; }
+        var message = info.dataset.requiredMsg
+            || 'Please provide a name for the event.';
+        var maxBytes = parseInt(info.dataset.maxBytes, 10) || 0;
+        var tooLongMessage = info.dataset.maxBytesMsg || 'Event info is too long.';
+
+        /* The column limit is in bytes, so count what UTF-8 will store. */
+        function tooLong() {
+            return maxBytes > 0
+                && new TextEncoder().encode(info.value).length > maxBytes;
+        }
+
+        function validate(quiet) {
+            if (!info.value.trim()) {
+                if (!quiet) { markInvalid(info, message); }
+                return info;
+            }
+            if (tooLong()) {
+                if (!quiet) { markInvalid(info, tooLongMessage); }
+                return info;
+            }
+            markValid(info);
+            return null;
+        }
+
+        /* An empty field only clears while typing (the submit check nags about
+         * it); an oversized one is said at once, since it usually comes from a
+         * paste the user cannot see the end of. */
+        info.addEventListener('input', function () {
+            if (tooLong()) {
+                markInvalid(info, tooLongMessage);
+            } else if (info.value.trim()) {
+                markValid(info);
+            }
+        });
+        validators.push(validate);
+    }
+
+    /* ── Extends-event preview ───────────────────────────────────
+     * The field takes an id or a UUID; the endpoint answers with a card for
+     * the matched event, or a note saying nothing matched. */
+    function bindExtendsPreview() {
+        var input = form.querySelector('#EventExtendsUuid');
+        var preview = form.querySelector('#event_preview');
+        if (!input || !preview) { return; }
+
+        var IS_ID = /^[0-9]+$/;
+        var IS_UUID =
+            /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+        var timer = null;
+        var pending = null;
+
+        function hide() {
+            preview.classList.add('d-none');
+            preview.innerHTML = '';
+        }
+
+        function request(value) {
+            /* One lookup at a time: the answers are rendered HTML, so a slow
+             * early request must not land on top of a later one. */
+            if (pending) { pending.abort(); }
+            pending = new AbortController();
+            preview.setAttribute('aria-busy', 'true');
+            fetch(base + '/events/getEventInfoById/' + encodeURIComponent(value), {
+                credentials: 'same-origin',
+                headers: { 'X-Requested-With': 'XMLHttpRequest' },
+                signal: pending.signal
+            })
+                .then(function (r) { return r.ok ? r.text() : ''; })
+                .then(function (html) {
+                    preview.removeAttribute('aria-busy');
+                    if (!html.trim()) { hide(); return; }
+                    preview.innerHTML = html;
+                    preview.classList.remove('d-none');
+                })
+                .catch(function (err) {
+                    if (err.name === 'AbortError') { return; }
+                    preview.removeAttribute('aria-busy');
+                    hide();
+                });
+        }
+
+        function schedule() {
+            clearTimeout(timer);
+            var value = input.value.trim();
+            /* Nothing but a whole id or a whole UUID can match, and a UUID
+             * typed by hand would otherwise cost 36 lookups on its way in. */
+            if (!IS_ID.test(value) && !IS_UUID.test(value)) {
+                if (pending) { pending.abort(); pending = null; }
+                hide();
+                return;
+            }
+            timer = setTimeout(function () { request(value); }, 250);
+        }
+
+        input.addEventListener('input', schedule);
+
+        /* Delegated, so the card stays clickable through every re-render:
+         * clicking it swaps the id the user typed for the event's UUID. */
+        preview.addEventListener('click', function (e) {
+            var card = e.target.closest('.js-extends-event-card');
+            if (!card || !card.dataset.extendsUuid) { return; }
+            input.value = card.dataset.extendsUuid;
+        });
+
+        schedule();
+    }
+
+    /* ── Submit ──────────────────────────────────────────────── */
+    function bindSubmit() {
+        var button = form.querySelector('#EventSubmitButton');
+
+        form.addEventListener('submit', function (e) {
+            if (e.defaultPrevented) { return; }
+            var wrong = validators
+                .map(function (validate) { return validate(false); })
+                .filter(Boolean);
+
+            if (wrong.length) {
+                /* preventDefault alone: a listener elsewhere may still want to
+                 * know the form was submitted and turned down. */
+                e.preventDefault();
+                wrong[0].focus();
+                return;
+            }
+
+            /* The form navigates away on success, so the only thing a second
+             * click can do is create the event twice. */
+            if (button) {
+                button.disabled = true;
+                var icon = button.querySelector('i');
+                if (icon) { icon.className = 'fas fa-circle-notch fa-spin me-1'; }
+            }
+        });
+    }
+
+    initChoiceFields(form);
+    bindInfo();
+    bindExtendsPreview();
+    bindSubmit();
+}
+window.initEventForm = initEventForm;
+
+/*******************************
+ * updateActiveFilterBadge
+ * Injects a dismissible "Active filters" row below the filter bar for AJAX
+ * tab indexes. Removes any existing badge when searchTerm is empty.
+ * @param {Element}  container     Tab container element
+ * @param {string}   searchTerm    Current search value; '' removes the badge
+ * @param {function} clearCb       Called when the user clicks the Clear button
+ * @param {string}   [labelActive] "Active filters" label (default: English)
+ * @param {string}   [labelClear]  Clear button label (default: English)
+ *******************************/
+function updateActiveFilterBadge(container, searchTerm, clearCb, labelActive, labelClear) {
+    var existing = container.querySelector('#overmind-active-filter');
+    if (existing) existing.remove();
+    if (!searchTerm) return;
+
+    var filterBar = container.querySelector('[id^="filter-bar-"]');
+    if (!filterBar) return;
+
+    var wrap = document.createElement('div');
+    wrap.id = 'overmind-active-filter';
+    wrap.className = 'mt-2 d-flex align-items-center flex-wrap gap-2';
+
+    var lbl = document.createElement('strong');
+    lbl.className = 'me-1';
+    lbl.textContent = (labelActive || 'Active filters') + ':';
+
+    var chip = document.createElement('span');
+    chip.className = 'badge bg-primary';
+    chip.textContent = 'search: ' + searchTerm;
+
+    var clearBtn = document.createElement('button');
+    clearBtn.type = 'button';
+    clearBtn.className = 'btn btn-sm btn-outline-danger ms-auto';
+    clearBtn.innerHTML = '<i class="fas fa-times me-1"></i>';
+    clearBtn.appendChild(document.createTextNode(labelClear || 'Clear'));
+    clearBtn.addEventListener('click', clearCb);
+
+    wrap.appendChild(lbl);
+    wrap.appendChild(chip);
+    wrap.appendChild(clearBtn);
+    filterBar.insertAdjacentElement('afterend', wrap);
+}
+
+
+/**
+ * Auto-dismiss the flash messages after 5s.
+ *
+ */
+function initFlashAutoDismiss() {
+    const flash = document.getElementById('flashContainer');
+    if (!flash || flash.children.length === 0) return;
+
+    setTimeout(function () {
+        flash.classList.add('fade-out');
+        setTimeout(function () {
+            flash.innerHTML = '';
+            flash.classList.remove('fade-out');
+        }, 600);
+    }, 5000);
+}
+
+/* ==========================================================================
+ * Debug strip
+ * ==========================================================================
+ *
+ * With debug > 0 the layout draws a strip under the navbar, and everything
+ * Cake prints (`.cake-error` notices, `debug()` dumps, the SQL log) is moved
+ * into it, wherever it lands and whenever it arrives:
+ *
+ *  - in the page, at load;
+ *  - in anything inserted later (modal bodies, lazy tabs, index swaps), via a
+ *    MutationObserver;
+ *  - in a fetch() response the page never inserts (JSON, a 500, a DOMParser'd
+ *    form), via a fetch wrapper that reads a clone before the caller does;
+ *  - inside a <script>, <textarea>, <select> or an attribute, where the parser
+ *    builds no element at all, via an XPath sweep that reports where it leaked.
+ *
+ * A block seen in a response is remembered by signature, so when the caller
+ * then inserts it, the DOM copy is dropped rather than listed twice.
+ */
+const DEBUG_BLOCK_SELECTOR = '.cake-error, .cake-debug-output';
+const DEBUG_BLOCK_TAGS = new Set(['A', 'B', 'BR', 'CODE', 'DIV', 'EM', 'I', 'LI', 'OL', 'P', 'PRE', 'SMALL', 'SPAN', 'STRONG', 'UL']);
+const DEBUG_BLOCK_TOGGLE = /(?:getElementById\(|traceToggle\(event,\s*)'([^']+)'/;
+
+const debugStrip = {
+    root: null,
+    entries: null,
+    errors: 0,
+    dumps: 0,
+    swept: false,
+    pending: new Map(),
+
+    init() {
+        if (this.root !== null) return Boolean(this.root);
+        this.root = document.getElementById('debugAccordionWrapper') || false;
+        if (!this.root) return false;
+        this.entries = document.getElementById('debugEntries');
+        const clear = document.getElementById('debugClear');
+        if (clear) clear.addEventListener('click', () => this.clear());
+        this.entries.addEventListener('click', e => this.toggle(e));
+        return true;
+    },
+
+    /**
+     * A copy of a block that came from a response or a string, rebuilt from its
+     * tags and text: a stored value shaped like debug output must not become
+     * live markup. Cake's Trace/Code/Context links work through toggle().
+     */
+    inert(node) {
+        if (node.nodeType === Node.TEXT_NODE) return document.createTextNode(node.data);
+        if (node.nodeType !== Node.ELEMENT_NODE) return document.createTextNode('');
+        if (!DEBUG_BLOCK_TAGS.has(node.tagName)) return document.createTextNode(node.textContent);
+        const el = document.createElement(node.tagName.toLowerCase());
+        node.classList.forEach(name => {
+            if (/^(cake-[\w-]+|code-highlight)$/.test(name)) el.classList.add(name);
+        });
+        ['display', 'color'].forEach(prop => {
+            if (node.style[prop]) el.style[prop] = node.style[prop];
+        });
+        if (node.id) el.dataset.ovDebugId = node.id;
+        const target = DEBUG_BLOCK_TOGGLE.exec(node.getAttribute('onclick') || '');
+        if (node.tagName === 'A' && target) {
+            el.href = '#';
+            el.dataset.ovDebugToggle = target[1];
+        }
+        node.childNodes.forEach(child => el.appendChild(this.inert(child)));
+        return el;
+    },
+
+    toggle(e) {
+        const link = e.target.closest('[data-ov-debug-toggle]');
+        if (!link) return;
+        e.preventDefault();
+        const entry = link.closest('.ov-debug-entry');
+        const target = entry && Array.from(entry.querySelectorAll('[data-ov-debug-id]'))
+            .find(el => el.dataset.ovDebugId === link.dataset.ovDebugToggle);
+        if (target) target.style.display = target.style.display === 'none' ? '' : 'none';
+    },
+
+    clear() {
+        this.entries.querySelectorAll('.ov-debug-entry').forEach(el => el.remove());
+        this.errors = 0;
+        this.dumps = 0;
+        this.refresh(false);
+    },
+
+    /** Top-level debug blocks under root, root included. */
+    blocksIn(root) {
+        const found = [];
+        if (root.matches && root.matches(DEBUG_BLOCK_SELECTOR)) found.push(root);
+        if (root.querySelectorAll) {
+            root.querySelectorAll(DEBUG_BLOCK_SELECTOR).forEach(el => {
+                const parent = el.parentElement;
+                if (!parent || !parent.closest(DEBUG_BLOCK_SELECTOR)) found.push(el);
+            });
+        }
+        return found;
+    },
+
+    signature(block) {
+        const trace = block.querySelector('[id$="-trace"]');
+        if (trace) return trace.id;
+        return block.textContent.replace(/\s+/g, ' ').trim().slice(0, 500);
+    },
+
+    severity(block) {
+        if (!block.classList.contains('cake-error')) return 'info';
+        const label = (block.querySelector('b') || block).textContent;
+        return /notice|deprecated|strict/i.test(label) ? 'warning' : 'danger';
+    },
+
+    /** A block found in the live DOM: move it in, unless a response already listed it. */
+    adoptNode(block) {
+        const sig = this.signature(block);
+        const seen = this.pending.get(sig);
+        if (seen) {
+            if (seen > 1) this.pending.set(sig, seen - 1); else this.pending.delete(sig);
+            block.remove();
+            return;
+        }
+        this.add(block, this.originOf(block));
+    },
+
+    /** A block parsed out of a response body, not (yet) in the page. */
+    adoptParsed(block, origin) {
+        const sig = this.signature(block);
+        this.pending.set(sig, (this.pending.get(sig) || 0) + 1);
+        this.add(this.inert(block), origin);
+    },
+
+    originOf(node) {
+        const tab = node.closest('.ajax-tab-content[data-url]');
+        if (tab) return 'Tab · ' + this.path(tab.dataset.url);
+        if (node.closest('.modal')) return 'Modal';
+        return 'Page';
+    },
+
+    path(url) {
+        try {
+            const u = new URL(url, window.location.href);
+            return u.pathname + u.search;
+        } catch (e) {
+            return String(url);
+        }
+    },
+
+    /**
+     * @param {Node} content  what to show
+     * @param {string} origin where it came from
+     * @param {string} [severity] danger|warning|info, read off content otherwise
+     * @param {string} [note] one line shown above the content
+     */
+    add(content, origin, severity, note) {
+        severity = severity || (content.classList ? this.severity(content) : 'danger');
+        if (severity === 'info') this.dumps++; else this.errors++;
+
+        const entry = document.createElement('div');
+        entry.className = 'ov-debug-entry border-start border-3 ps-2 py-1 mb-2 border-' + severity;
+        const head = document.createElement('div');
+        head.className = 'ov-debug-origin opacity-75';
+        head.textContent = origin + (note ? ' — ' + note : '');
+        entry.append(head, content);
+        this.entries.appendChild(entry);
+        this.refresh(this.swept);
+    },
+
+    refresh(notify) {
+        const empty = document.getElementById('debugEmpty');
+        if (empty) empty.classList.toggle('d-none', this.errors + this.dumps > 0);
+
+        const badge = document.getElementById('debugErrorBadge');
+        if (badge) {
+            badge.textContent = this.errors + ' error' + (this.errors === 1 ? '' : 's');
+            badge.classList.toggle('bg-danger', this.errors > 0);
+            badge.classList.toggle('bg-success', this.errors === 0);
+        }
+        const info = document.getElementById('debugInfoBadge');
+        if (info) {
+            info.textContent = this.dumps + ' debug()';
+            info.classList.toggle('d-none', this.dumps === 0);
+        }
+        if (notify) {
+            const button = this.root.querySelector('.accordion-button');
+            button.classList.remove('ov-debug-pulse');
+            void button.offsetWidth;
+            button.classList.add('ov-debug-pulse');
+        }
+    },
+
+    /**
+     * Debug output the parser could not turn into elements: inside a raw-text
+     * element, an <option>, or an attribute (whose quotes it also broke).
+     */
+    reportLeaks(doc, origin) {
+        // Markup, not the bare word: a script may well mention the selector.
+        const markup = '(contains(., \'class="cake-error\') or contains(., \'class="cake-debug-output\')'
+            + ' or contains(., \'class=\\"cake-error\') or contains(., \'class=\\"cake-debug-output\'))';
+        const hits = doc.evaluate(
+            '//script[' + markup + '] | //textarea[' + markup + '] | //title[' + markup + ']'
+            + ' | //select//text()[contains(., ", line ")]'
+            + ' | //@*[contains(name(), "cake-") or (' + markup + ' and name() != "class")]',
+            doc, null, XPathResult.ORDERED_NODE_SNAPSHOT_TYPE, null
+        );
+        // One broken tag yields many hits (each word of the error becomes an attribute).
+        const reported = new Set();
+        for (let i = 0; i < hits.snapshotLength; i++) {
+            const node = hits.snapshotItem(i);
+            const owner = node.nodeType === Node.ATTRIBUTE_NODE ? node.ownerElement
+                : node.nodeType === Node.TEXT_NODE ? node.parentElement : node;
+            if (!owner || reported.has(owner)) continue;
+            if (owner.closest('#debugAccordionWrapper, ' + DEBUG_BLOCK_SELECTOR)) continue;
+
+            let where = '<' + owner.tagName.toLowerCase() + (owner.id ? '#' + owner.id : '')
+                + (owner.getAttribute('name') ? ' name="' + owner.getAttribute('name') + '"' : '') + '>';
+            if (node.nodeType === Node.ATTRIBUTE_NODE) where = 'an attribute of ' + where;
+            if (node.nodeType === Node.TEXT_NODE && !/\b\w+ \(\d+\)\s*:/.test(node.data)) continue;
+            reported.add(owner);
+
+            const raw = (node.nodeType === Node.ATTRIBUTE_NODE ? node.value : node.textContent)
+                .replace(/\\(["'\/])/g, '$1');
+            const tpl = document.createElement('template');
+            tpl.innerHTML = raw;
+            const blocks = this.blocksIn(tpl.content);
+            const salvaged = node.nodeType === Node.ATTRIBUTE_NODE ? this.salvageAfter(owner) : null;
+            if (salvaged) {
+                this.add(this.inert(salvaged), origin, null, 'leaked inside ' + where);
+            } else if (blocks.length) {
+                blocks.forEach(b => this.add(this.inert(b), origin, null, 'leaked inside ' + where));
+            } else {
+                const pre = document.createElement('pre');
+                pre.className = 'mb-0';
+                pre.textContent = raw.trim().slice(0, 2000)
+                    || '(the output broke the markup here, see the page source)';
+                this.add(pre, origin, 'danger', 'leaked inside ' + where);
+            }
+        }
+    },
+
+    /**
+     * The quote that ends a broken attribute also ends its tag, so the rest of
+     * the error is parsed as loose siblings: the toggle link through the trace.
+     */
+    salvageAfter(owner) {
+        let node = owner.nextSibling;
+        if (!node || node.nodeType !== Node.ELEMENT_NODE || !node.matches('a[onclick*="cakeErr"]')) {
+            return null;
+        }
+        const pre = document.createElement('pre');
+        pre.className = 'cake-error';
+        for (let i = 0; node && i < 50; i++) {
+            const next = node.nextSibling;
+            pre.appendChild(node);
+            if (node.nodeType === Node.ELEMENT_NODE && node.matches('.cake-stack-trace')) break;
+            node = next;
+        }
+        return pre;
+    },
+
+    /** Everything in a response body that is not the page's to see. */
+    scanResponse(text, response, origin) {
+        const type = response.headers.get('Content-Type') || '';
+        const html = /html/.test(type) || /^\s*</.test(text);
+
+        if (!response.ok && response.status >= 500) {
+            this.reportHttpError(text, response, origin, html);
+        }
+        if (text.indexOf('cake-') === -1) return;
+
+        if (/json/.test(type)) {
+            try {
+                this.scanJsonStrings(JSON.parse(text), origin);
+                return;
+            } catch (e) {
+                // A notice printed before the JSON: parse it as HTML below.
+            }
+        }
+        const doc = new DOMParser().parseFromString(text, 'text/html');
+        this.blocksIn(doc.body).forEach(b => this.adoptParsed(b, origin));
+        this.reportLeaks(doc, origin);
+    },
+
+    scanJsonStrings(value, origin) {
+        if (typeof value === 'string') {
+            if (value.indexOf('cake-') === -1) return;
+            const tpl = document.createElement('template');
+            tpl.innerHTML = value;
+            this.blocksIn(tpl.content).forEach(b => this.adoptParsed(b, origin));
+        } else if (value && typeof value === 'object') {
+            Object.values(value).forEach(v => this.scanJsonStrings(v, origin));
+        }
+    },
+
+    reportHttpError(text, response, origin, html) {
+        const box = document.createElement('div');
+        let message = '';
+        if (html) {
+            const doc = new DOMParser().parseFromString(text, 'text/html');
+            const heading = Array.from(doc.querySelectorAll('h2'))
+                .find(h => !h.closest('#debugAccordionWrapper'));
+            message = [heading, doc.querySelector('p.error')]
+                .filter(Boolean).map(el => el.textContent.trim()).join(' — ');
+            const trace = doc.querySelector('ul.cake-stack-trace');
+            if (trace) {
+                const details = document.createElement('details');
+                const summary = document.createElement('summary');
+                summary.textContent = 'Stack trace';
+                details.append(summary, this.inert(trace));
+                box.appendChild(details);
+            }
+        } else {
+            try {
+                const json = JSON.parse(text);
+                message = json.message || json.name || JSON.stringify(json.errors || json);
+            } catch (e) {
+                message = text;
+            }
+        }
+        const line = document.createElement('div');
+        line.className = 'fw-semibold';
+        line.textContent = (message || response.statusText || '').trim().slice(0, 500);
+        box.prepend(line);
+        this.add(box, origin, 'danger', 'HTTP ' + response.status);
+    },
+
+    observe() {
+        new MutationObserver(records => {
+            records.forEach(record => {
+                record.addedNodes.forEach(node => {
+                    if (node.nodeType !== Node.ELEMENT_NODE || this.root.contains(node)) return;
+                    this.guard(() => this.blocksIn(node).forEach(b => this.adoptNode(b)));
+                });
+            });
+        }).observe(document.body, { childList: true, subtree: true });
+    },
+
+    /** The strip must never be what breaks the page it is debugging. */
+    guard(fn) {
+        try {
+            fn();
+        } catch (e) {
+            console.warn('[debug strip]', e);
+        }
+    },
+
+    collectSqlLog() {
+        const tables = document.querySelectorAll('table.cake-sql-log');
+        const box = document.getElementById('debugSqlLog');
+        if (!tables.length || !box) return;
+
+        let queries = 0, took = 0;
+        tables.forEach(table => {
+            const m = /(\d+) quer(?:y|ies) took (\d+) ms/.exec(table.caption ? table.caption.textContent : '');
+            if (m) { queries += +m[1]; took += +m[2]; }
+            table.classList.add('table', 'table-sm', 'mb-0');
+            const details = document.createElement('details');
+            const summary = document.createElement('summary');
+            summary.className = 'fw-semibold py-1';
+            summary.textContent = table.caption ? table.caption.textContent : 'SQL log';
+            details.append(summary, table);
+            box.appendChild(details);
+        });
+        box.classList.remove('d-none');
+
+        const badge = document.getElementById('debugSqlBadge');
+        if (badge) {
+            badge.textContent = queries + ' SQL · ' + took + ' ms';
+            badge.classList.remove('d-none');
+        }
+    },
+};
+
+/*
+ * Installed as soon as this file runs rather than on DOMContentLoaded: a view's
+ * inline script may already be fetching by then. Responses are read in full
+ * before the caller gets them, so the strip has seen a block before the caller
+ * can insert it. Binary bodies (downloads) are passed through untouched.
+ */
+(function watchFetchForDebugOutput() {
+    if (!debugStrip.init() || typeof window.fetch !== 'function') return;
+    const nativeFetch = window.fetch;
+    window.fetch = function (input, init) {
+        const method = ((init && init.method) || (input && input.method) || 'GET').toUpperCase();
+        const url = typeof input === 'string' || input instanceof URL ? String(input) : input.url;
+        return nativeFetch.apply(this, arguments).then(response => {
+            const type = response.headers.get('Content-Type') || '';
+            const textual = type === '' || /text|json|xml|javascript/.test(type);
+            if (!textual || response.type === 'opaque' || response.status === 204) return response;
+            return response.clone().text().then(text => {
+                debugStrip.guard(() => debugStrip.scanResponse(text, response, method + ' ' + debugStrip.path(url)));
+                return response;
+            }, () => response);
+        });
+    };
+})();
+
+function initDebugStrip() {
+    if (!debugStrip.init()) return;
+    debugStrip.observe();
+    debugStrip.guard(() => debugStrip.blocksIn(document.body).forEach(b => {
+        if (!debugStrip.root.contains(b)) debugStrip.adoptNode(b);
+    }));
+    debugStrip.guard(() => debugStrip.reportLeaks(document, 'Page'));
+    debugStrip.guard(() => debugStrip.collectSqlLog());
+    debugStrip.swept = true;
+}
+
+/**
+ * Turn the filter-bar selects into TomSelect widgets.
+ *
+ * Scoped so that fragments injected after page load (an .ajax-tab-content
+ * index, a modal body) can initialise their own selects, and idempotent so a
+ * second pass over the same scope is a no-op.
+ *
+ * Both guards are needed. TomSelect copies the original element's classes
+ * onto the .ts-wrapper <div> it builds, so a bare `.topbar-filter` query
+ * matches that wrapper too on a second pass — and the wrapper carries no
+ * `.tomselect` back-reference, so it would be handed to TomSelect as if it
+ * were a fresh control (which throws). Hence: select elements only, and skip
+ * the ones TomSelect already owns.
+ *
+ * @param {ParentNode} scope defaults to the whole document
+ */
+function initTopbarFilterSelects(scope) {
+    if (typeof TomSelect === 'undefined') return;
+
+    const selects = (scope || document).querySelectorAll('select.topbar-filter');
+    selects.forEach(function (el) {
+        if (el.tomselect) return;
+        new TomSelect(el, {
+            create: false,
+            sortField: { field: 'text', direction: 'asc' }
+        });
+    });
+}
+
+/**
+ * Fetch an ajax container's URL into it, once, and run the scripts it brings.
+ *
+ * @param {Element} container carries data-url, gains data-loaded
+ */
+function loadAjaxContainer(container) {
+    if (!container) return;
+
+    bindAjaxTabIndexNav(container);
+
+    if (container.dataset.loaded) return;
+
+    const url = container.dataset.url;
+    if (!url) return;
+
+    fetch(url, { headers: { 'X-Requested-With': 'XMLHttpRequest' } })
+        .then(res => {
+            if (!res.ok) throw new Error('HTTP ' + res.status);
+            return res.text();
+        })
+        .then(html => {
+            container.innerHTML = html;
+            container.dataset.loaded = '1';
+
+            // innerHTML does not execute <script>, so re-create each one.
+            container.querySelectorAll('script').forEach(function (oldScript) {
+                const newScript = document.createElement('script');
+                if (oldScript.src) {
+                    newScript.src = oldScript.src;
+                } else {
+                    newScript.textContent = oldScript.textContent;
+                }
+                document.head.appendChild(newScript);
+                document.head.removeChild(newScript);
+            });
+
+            initTopbarFilterSelects(container);
+            if (typeof initJsonFields === 'function') {
+                initJsonFields(container);
+            }
+            if (typeof initDateFields === 'function') {
+                initDateFields(container);
+            }
+        })
+        .catch(() => {
+            container.innerHTML =
+                '<div class="text-danger">Error loading content</div>';
+        });
+}
+
+/**
+ * Drop the paging/sorting segments from an index URL.
+ *
+ * @param {string} url
+ * @param {string[]} keys named segments to remove ('page', 'sort', ...)
+ * @returns {string} the URL without its query string or a trailing slash
+ */
+function stripIndexSegments(url, keys) {
+    let path = String(url || '').split('?')[0];
+    keys.forEach(function (key) {
+        path = path.replace(new RegExp('/' + key + ':[^/]+'), '');
+    });
+    return path.replace(/\/+$/, '');
+}
+
+/**
+ * An index URL's query string, kept as-is: a bar using `transport => 'query'`
+ * carries its filters there, and a named segment appended after them would
+ * take the whole lot with it into the query.
+ *
+ * @param {string} url
+ * @returns {string} '?...' or an empty string
+ */
+function indexUrlQuery(url) {
+    const query = String(url || '').split('?')[1];
+    return query ? '?' + query : '';
+}
+
+/**
+ * Keep an ajax tab's paging and sorting inside the tab.
+ *
+ * The Paginator draws ordinary links, so a page number or a column header
+ * rendered inside a lazily-loaded fragment is a full navigation to the
+ * fragment's own action — and that action answers with `layout = false`,
+ * i.e. a bare style-less table with no chrome and no way back to the tab it
+ * came from. This intercepts both and reloads the fragment instead.
+ *
+ * The new URL is rebuilt from the container's own URL rather than from the
+ * link, because the container carries the scope the fragment was opened with
+ * (an object template id, an event id, a `searchorg:`) while CakePHP renders
+ * the page-1 link without even a `/page:` segment. A sort link is only taken
+ * when it points back at that same action: a fragment is free to list links
+ * to other indexes, and those must navigate.
+ *
+ * Delegated on the container, which outlives every reload, and registered
+ * once — this used to live in IndexTable/filter_bar.ctp, where it reached
+ * only the fragments that happen to draw a filter bar and only recognised a
+ * tab whose URL was `<item_url>/index`.
+ *
+ * @param {Element} container an .ajax-tab-content carrying data-url
+ */
+function bindAjaxTabIndexNav(container) {
+    if (container.dataset.indexNavWired) return;
+    container.dataset.indexNavWired = '1';
+
+    container.addEventListener('click', function (event) {
+        // initIndexFilterDraft() binds the very same links directly, so it
+        // has already had its say by the time the click reaches us.
+        if (event.defaultPrevented) return;
+
+        const link = event.target.closest ? event.target.closest('a[href]') : null;
+        if (!link || !container.contains(link)) return;
+
+        const href = link.getAttribute('href') || '';
+        const current = container.dataset.url || '';
+        if (!current) return;
+
+        if (link.classList.contains('page-link')) {
+            const page = href.match(/[/?&]page[:=](\d+)/);
+            event.preventDefault();
+            reloadAjaxTabIndex(
+                container,
+                stripIndexSegments(current, ['page'])
+                    + '/page:' + (page ? page[1] : '1')
+                    + indexUrlQuery(current)
+            );
+            return;
+        }
+
+        const sort = href.match(/\/sort:([^/]+)/);
+        if (!sort) return;
+
+        const keys = ['page', 'sort', 'direction'];
+        const base = stripIndexSegments(current, keys);
+        // One of the two may carry the webroot prefix and the other not,
+        // hence the tail comparison rather than an equality.
+        const target = stripIndexSegments(href, keys);
+        if (!base || !target || (!target.endsWith(base) && !base.endsWith(target))) return;
+
+        event.preventDefault();
+        const direction = href.match(/\/direction:([^/]+)/);
+        reloadAjaxTabIndex(
+            container,
+            base + '/sort:' + sort[1]
+                + (direction ? '/direction:' + direction[1] : '')
+                + indexUrlQuery(current)
+        );
+    });
+}
+
+/**
+ * Reload an already-loaded ajax index container against a new (filtered,
+ * sorted or paginated) URL, keeping the user inside the current tab instead
+ * of navigating the whole page. Called by bindAjaxTabIndexNav() above and by
+ * IndexTable/filter_bar.
+ *
+ * @param {Element} container
+ * @param {string} url
+ */
+window.reloadAjaxTabIndex = function (container, url) {
+    if (!container || !url) return;
+    container.dataset.url = url;
+    delete container.dataset.loaded;
+    container.innerHTML =
+        '<div class="text-center p-4"><div class="spinner-border"></div></div>';
+    loadAjaxContainer(container);
+};
+
+// Lazy-load a tab's ajax content the first time it is shown, and drop the
+// selection state of the tab being left so its checkboxes don't bleed into
+// the newly active tab's mass-select toolbar.
+document.addEventListener('shown.bs.tab', function (event) {
+    const target = event.target.getAttribute('data-bs-target')
+        || event.target.getAttribute('href');
+    const tabPane = target ? document.querySelector(target) : null;
+    if (!tabPane) return;
+
+    const prevTarget = event.relatedTarget
+        ? (event.relatedTarget.getAttribute('data-bs-target')
+            || event.relatedTarget.getAttribute('href'))
+        : null;
+    const prevPane = prevTarget ? document.querySelector(prevTarget) : null;
+    if (prevPane) {
+        prevPane.querySelectorAll('.item-checkbox:checked').forEach(function (cb) {
+            cb.checked = false;
+        });
+    }
+    if (typeof selectedItems !== 'undefined') {
+        selectedItems.clear();
+    }
+    if (typeof updateMultiSelectToolbar === 'function') {
+        updateMultiSelectToolbar();
+    }
+
+    tabPane.querySelectorAll('.ajax-tab-content').forEach(loadAjaxContainer);
+});
+
+/**
+ * Session watchdog — send the user to the login page once their session is
+ * gone, instead of leaving them on a page whose every action will bounce.
+ *
+ * Enabled by the layout (window.mispAutoLogout) when MISP.disable_auto_logout
+ * is off and someone is logged in.
+ *
+ */
+function initSessionWatchdog() {
+    if (!window.mispAutoLogout || typeof baseurl === 'undefined') return;
+
+    const MIN_INTERVAL = 10000; // don't re-check on every focus flicker
+    let lastCheck = 0;
+    let inFlight = false;
+
+    function check() {
+        if (document.hidden || inFlight) return;
+
+        const now = Date.now();
+        if (now - lastCheck < MIN_INTERVAL) return;
+        lastCheck = now;
+        inFlight = true;
+
+        // Measured against the endpoint (session cookie, X-Requested-With):
+        //   authenticated -> 200
+        //   session gone  -> 401 (the ajax pre-auth branch)
+        // The `.json` form answers 200/403 instead, but routes through
+        // AppController's REST branch, which authenticates by Authorization
+        // header rather than by session — so the plain URL is the narrower
+        // question to ask. 403 and a follow-through to /users/login are
+        // accepted too, since both mean the same thing.
+        fetch(baseurl + '/users/checkIfLoggedIn', {
+            headers: { 'X-Requested-With': 'XMLHttpRequest' },
+            cache: 'no-store'
+        })
+            .then(res => {
+                const loggedOut = res.status === 401
+                    || res.status === 403
+                    || (res.redirected && /\/users\/login/.test(res.url));
+                if (loggedOut) {
+                    window.location.replace(baseurl + '/users/login');
+                }
+            })
+            // A network blip must not throw the user out.
+            .catch(() => {})
+            .finally(() => { inFlight = false; });
+    }
+
+    document.addEventListener('visibilitychange', function () {
+        if (!document.hidden) check();
+    });
+    window.addEventListener('focus', check);
+}
+
+document.addEventListener('DOMContentLoaded', function () {
+    initFlashAutoDismiss();
+    initDebugStrip();
+    initTopbarFilterSelects();
+    initSessionWatchdog();
+    // The tab that is already active gets no shown.bs.tab event.
+    document.querySelectorAll('.tab-pane.active .ajax-tab-content')
+        .forEach(loadAjaxContainer);
+});
+
+
+
+/* ==========================================================================
+ * Index URLs
+ * ==========================================================================
+ *
+ * MISP indexes carry their state in CakePHP named URL segments
+ * (`/events/index/sort:date/searchpublished:1`), sometimes next to positional
+ * scope arguments (`/authKeys/index/<userId>`) and sometimes in the query
+ * string instead (a value holding a '/' cannot survive a named segment).
+ * Five places used to split that apart by hand with the same
+ * `split('/')` / `indexOf(':')` dance; this is that dance, once.
+ */
+
+/**
+ * @param {string} url       absolute or root-relative, query string included
+ * @param {string} itemPath  the index path the segments follow, e.g. '/events/index'
+ * @returns {{positional: string[], named: Object, query: URLSearchParams, path: string}}
+ */
+function parseIndexUrl(url, itemPath) {
+    // One side is often absolute (a config's baseurl) and the other not (what
+    // popstate hands over), so compare paths, never whole URLs.
+    const stripOrigin = function (u) { return (u || '').replace(/^[a-z]+:\/\/[^/]+/i, ''); };
+    url = stripOrigin(url);
+    itemPath = stripOrigin(itemPath);
+
+    const cut = url.indexOf('?');
+    const path = cut === -1 ? url : url.slice(0, cut);
+    const query = new URLSearchParams(cut === -1 ? '' : url.slice(cut + 1));
+    const positional = [];
+    const named = {};
+
+    const at = itemPath ? path.indexOf(itemPath) : -1;
+    const after = at !== -1 ? path.slice(at + itemPath.length) : '';
+    after.split('/').filter(Boolean).forEach(function (segment) {
+        const colon = segment.indexOf(':');
+        if (colon < 0) {
+            positional.push(segment);
+        } else {
+            named[segment.slice(0, colon)] = decodeURIComponent(segment.slice(colon + 1));
+        }
+    });
+    return { positional: positional, named: named, query: query, path: path };
+}
+
+/**
+ * The inverse. Named values are encoded here, so callers hand over raw ones.
+ *
+ * @param {string} base                 index URL with no state on it
+ * @param {Object} parts                { positional, named, query }
+ * @returns {string}
+ */
+function formatIndexUrl(base, parts) {
+    let url = base;
+    (parts.positional || []).forEach(function (segment) { url += '/' + segment; });
+    const named = parts.named || {};
+    Object.keys(named).forEach(function (key) {
+        url += '/' + key + ':' + encodeURIComponent(named[key]);
+    });
+    const query = parts.query ? parts.query.toString() : '';
+    return url + (query ? '?' + query : '');
+}
+
+/* ==========================================================================
+ * Index filter bars — deferred apply
+ * ==========================================================================
+ *
+ * The code snippets provided here create a *draft* using pills: \
+ * his will be executed via a single button using Ajax, refreshing the container 
+ *
+ * Two bars share this engine — Elements/Logs/filter_card.ctp (the log
+ * indexes) and genericElementsBS5/IndexTable/filter_bar.ctp (a scaffolded
+ * index that declares a `more_filters` control). They agree on the
+ * interaction and disagree on everything around it: where a filter lives in
+ * the URL, what counts as a scope worth keeping, whether an ajax tab wraps
+ * the whole thing. So every URL decision is the caller's, handed in as
+ * `buildUrl` / `clearAll` / `reload`.
+ */
+
+/**
+ * @param {Element} root  element owning the controls; marked as wired
+ * @param {Object}  opts
+ *   Required:
+ *     inputs()       -> Element[]     the controls the draft is read from
+ *     nameOf(el)     -> string        that control's filter name
+ *     buildUrl()     -> string        URL for the current draft
+ *     summaryEl      Element          where the chips and buttons are drawn
+ *   Optional:
+ *     labelOf(name)          -> string   chip label      (default: the name)
+ *     displayOf(name, value) -> string   chip value      (default: the value)
+ *     quickEl                Element     free-text box outside the draft grid
+ *     quickLabel             string      its chip label
+ *     applied / appliedQuick             what the page currently shows
+ *     countEl                Element     badge showing how many filters are set
+ *     results                string      selector of the container to swap
+ *     swap                   string[]    other nodes to refresh from the response
+ *     rootLinks / resultLinks string[]   links to keep inside the ajax loop
+ *     syncFromUrl(url)                   read a URL back into the controls
+ *     clearAll()                         reset the controls ("Clear all")
+ *     reload(url)            -> bool     take over the reload (ajax tabs)
+ *     onApplied()                        after a successful swap
+ *     strings                object      see S below
+ * @returns {Object|null} { refresh } so a caller can redraw the chips
+ */
+function initIndexFilterDraft(root, opts) {
+    if (!root || root.dataset.filterDraftReady || !opts || !opts.summaryEl) { return null; }
+    root.dataset.filterDraftReady = '1';
+
+    const S = opts.strings || {};
+    const summaryEl = opts.summaryEl;
+    const results = opts.results ? document.querySelector(opts.results) : null;
+
+    // What the page currently shows. Replaced on every successful apply, so
+    // the chips can tell an applied filter from one still being typed.
+    let applied = Object.assign({}, opts.applied || {});
+    let appliedQuick = opts.appliedQuick || '';
+    let inFlight = null;
+
+    /* ── draft state ─────────────────────────────────────────────────── */
+
+    function inputs() { return opts.inputs(); }
+
+    function draft() {
+        const out = {};
+        inputs().forEach(function (el) {
+            const name = opts.nameOf(el);
+            const value = (el.value || '').trim();
+            if (name && value !== '') { out[name] = value; }
+        });
+        return out;
+    }
+
+    function draftQuick() {
+        return opts.quickEl ? (opts.quickEl.value || '').trim() : '';
+    }
+
+    function labelFor(name) {
+        return opts.labelOf ? opts.labelOf(name) : name;
+    }
+
+    // A select stores `remove_tag` but the user picked "Remove tag".
+    function displayFor(name, value) {
+        return opts.displayOf ? opts.displayOf(name, value) : value;
+    }
+
+    // TomSelect keeps its own DOM, so the underlying <select> alone is not enough.
+    function setValue(el, value) {
+        if (el.tomselect) {
+            el.tomselect.setValue(value, true);
+        } else {
+            el.value = value;
+        }
+    }
+
+    /* ── chips ───────────────────────────────────────────────────────── */
+
+    function chip(label, value, state) {
+        const el = document.createElement('span');
+        el.className = 'badge d-inline-flex align-items-center gap-1 '
+            + (state === 'removed'
+                ? 'text-bg-light border border-danger text-danger text-decoration-line-through'
+                : state === 'pending'
+                    ? 'text-bg-warning border border-warning-subtle'
+                    : 'bg-primary');
+        if (state === 'pending') {
+            el.title = S.notApplied || '';
+            el.insertAdjacentHTML('beforeend', '<i class="fas fa-clock"></i>');
+        } else if (state === 'removed') {
+            el.title = S.willBeRemoved || '';
+        }
+        el.insertAdjacentText('beforeend', label + ': ' + value);
+        return el;
+    }
+
+    function removeButton(chipEl, onClick) {
+        const btn = document.createElement('button');
+        btn.type = 'button';
+        btn.className = 'btn-close btn-close-sm ms-1';
+        btn.style.fontSize = '.5rem';
+        btn.title = S.remove || '';
+        btn.addEventListener('click', onClick);
+        chipEl.appendChild(btn);
+    }
+
+    function renderSummary() {
+        const current = draft();
+        const quick = draftQuick();
+        let pending = 0;
+
+        summaryEl.textContent = '';
+
+        const chips = document.createElement('div');
+        chips.className = 'd-flex align-items-center flex-wrap gap-2 flex-grow-1';
+
+        if (opts.quickEl) {
+            if (quick !== '') {
+                const state = quick === appliedQuick ? 'applied' : 'pending';
+                if (state === 'pending') { pending++; }
+                const c = chip(opts.quickLabel || '', quick, state);
+                removeButton(c, function () { opts.quickEl.value = ''; renderSummary(); });
+                chips.appendChild(c);
+            } else if (appliedQuick !== '') {
+                pending++;
+                chips.appendChild(chip(opts.quickLabel || '', appliedQuick, 'removed'));
+            }
+        }
+
+        Object.keys(current).forEach(function (name) {
+            const state = current[name] === applied[name] ? 'applied' : 'pending';
+            if (state === 'pending') { pending++; }
+            const c = chip(labelFor(name), displayFor(name, current[name]), state);
+            removeButton(c, function () {
+                inputs().forEach(function (el) {
+                    if (opts.nameOf(el) === name) { setValue(el, ''); }
+                });
+                renderSummary();
+            });
+            chips.appendChild(c);
+        });
+
+        Object.keys(applied).forEach(function (name) {
+            if (current[name] === undefined) {
+                pending++;
+                chips.appendChild(chip(labelFor(name), displayFor(name, applied[name]), 'removed'));
+            }
+        });
+
+        // Filters that are applied but have no control here — the scope a
+        // button like "My events" puts in the URL. Read-only, but visible:
+        // without a chip the only sign they are on is the row count.
+        const extras = opts.extraChips ? opts.extraChips() : [];
+        extras.forEach(function (extra) {
+            chips.appendChild(chip(extra.label, extra.value, 'applied'));
+        });
+
+        if (!chips.children.length) {
+            const empty = document.createElement('span');
+            empty.className = 'text-muted small filter-draft-empty';
+            empty.textContent = S.noFilter || '';
+            chips.appendChild(empty);
+        }
+
+        summaryEl.appendChild(buildBar(chips, pending, extras.length));
+
+        if (opts.countEl) {
+            // Everything that filters counts, not just the controls in the
+            // panel: with the panel folded away the badge is the only thing
+            // saying a search or a scope is still on.
+            const n = Object.keys(current).length + (quick !== '' ? 1 : 0) + extras.length;
+            opts.countEl.textContent = String(n);
+            opts.countEl.classList.toggle('d-none', n === 0);
+        }
+    }
+
+    function buildBar(chips, pending, extraCount) {
+        const bar = document.createElement('div');
+        bar.className = 'd-flex align-items-start flex-wrap gap-2';
+        bar.appendChild(chips);
+
+        const status = document.createElement('span');
+        status.className = 'small align-self-center filter-draft-status '
+            + (pending ? 'text-warning-emphasis fw-semibold' : 'text-muted');
+        status.textContent = pending
+            ? (pending === 1 ? S.pendingOne : (S.pendingMany || '').replace('%s', pending))
+            : S.applied;
+        bar.appendChild(status);
+
+        const applyBtn = document.createElement('button');
+        applyBtn.type = 'button';
+        applyBtn.className = 'btn btn-sm ' + (pending ? 'btn-primary' : 'btn-outline-primary');
+        applyBtn.innerHTML = '<i class="fas fa-filter me-1"></i>' + S.apply;
+        applyBtn.addEventListener('click', apply);
+        bar.appendChild(applyBtn);
+
+        // Extras count too: a scope set from a button outside this panel is
+        // still a filter the user has to be able to drop.
+        if (Object.keys(applied).length || appliedQuick !== '' || extraCount) {
+            const clearBtn = document.createElement('button');
+            clearBtn.type = 'button';
+            clearBtn.className = 'btn btn-sm btn-outline-danger';
+            clearBtn.innerHTML = '<i class="fas fa-times me-1"></i>' + S.clearAll;
+            clearBtn.addEventListener('click', function () {
+                if (opts.clearAll) {
+                    opts.clearAll();
+                } else {
+                    if (opts.quickEl) { opts.quickEl.value = ''; }
+                    inputs().forEach(function (el) { setValue(el, ''); });
+                }
+                apply();
+            });
+            bar.appendChild(clearBtn);
+        }
+        return bar;
+    }
+
+    /* ── applying ────────────────────────────────────────────────────── */
+
+    function apply() {
+        load(opts.buildUrl(), true);
+    }
+
+    function setBusy(busy) {
+        root.classList.toggle('filter-draft-busy', busy);
+        if (!results) { return; }
+        results.classList.toggle('is-busy', busy);
+        let overlay = results.querySelector(':scope > .index-results-overlay');
+        if (busy && !overlay) {
+            overlay = document.createElement('div');
+            overlay.className = 'index-results-overlay';
+            overlay.innerHTML = '<div class="spinner-border text-primary" role="status"></div>';
+            results.appendChild(overlay);
+        } else if (!busy && overlay) {
+            overlay.remove();
+        }
+    }
+
+    /**
+     * Fetch a filtered/sorted/paged version of this index and swap in its
+     * results. The whole page is requested rather than a fragment — the
+     * layout is cheap next to the queries these filters cost, and it keeps
+     * the views free of an ajax branch — but only the results and the nodes
+     * named in `swap` are taken out of the response, so the live filter bar
+     * (and its TomSelect instances) is never rebuilt.
+     */
+    function load(url, push) {
+        // An ajax tab reloads its own fragment, bar included, and comes back
+        // with the server's state — nothing to keep in sync here.
+        if (opts.reload && opts.reload(url)) { return; }
+        if (!results) { window.location.href = url; return; }
+        if (inFlight) { inFlight.abort(); }
+        const controller = new AbortController();
+        inFlight = controller;
+        setBusy(true);
+
+        fetch(url, { credentials: 'same-origin', signal: controller.signal })
+            .then(function (response) {
+                if (!response.ok) { throw new Error('HTTP ' + response.status); }
+                return response.text();
+            })
+            .then(function (html) {
+                const doc = new DOMParser().parseFromString(html, 'text/html');
+                const fresh = doc.querySelector(opts.results);
+                if (!fresh) { throw new Error('no results container in response'); }
+
+                results.innerHTML = fresh.innerHTML;
+                (opts.swap || []).forEach(function (selector) { swap(doc, selector); });
+
+                if (push) { history.pushState({ indexFilter: true }, '', url); }
+                if (opts.syncFromUrl) { opts.syncFromUrl(url); }
+                applied = draft();
+                appliedQuick = draftQuick();
+                renderSummary();
+                bindNavLinks();
+                // Rows the selection pointed at are gone.
+                if (window.selectedItems && typeof selectedItems.clear === 'function') {
+                    selectedItems.clear();
+                    if (typeof updateMultiSelectToolbar === 'function') { updateMultiSelectToolbar(); }
+                }
+                if (typeof initTomSelect === 'function') { initTomSelect(results); }
+                if (opts.onApplied) { opts.onApplied(); }
+                results.scrollIntoView({ block: 'nearest', behavior: 'smooth' });
+            })
+            .catch(function (error) {
+                if (error.name === 'AbortError') { return; }
+                showLoadError();
+            })
+            .finally(function () {
+                if (inFlight === controller) { inFlight = null; setBusy(false); }
+            });
+    }
+
+    function swap(doc, selector) {
+        const target = document.querySelector(selector);
+        const fresh = doc.querySelector(selector);
+        if (target && fresh) { target.innerHTML = fresh.innerHTML; }
+    }
+
+    function showLoadError() {
+        // The summary can live inside a collapse or a dropdown, so an error
+        // raised from a button outside it would land out of sight.
+        const panel = summaryEl.closest('.collapse');
+        if (panel && !panel.classList.contains('show')
+            && window.bootstrap && bootstrap.Collapse) {
+            bootstrap.Collapse.getOrCreateInstance(panel).show();
+        }
+        const alert = document.createElement('div');
+        alert.className = 'alert alert-danger alert-dismissible fade show mb-0 mt-3';
+        alert.innerHTML = '<i class="fas fa-exclamation-triangle me-1"></i>'
+            + S.loadError
+            + '<button type="button" class="btn-close" data-bs-dismiss="alert"></button>';
+        summaryEl.appendChild(alert);
+    }
+
+    /* ── paging and sorting stay inside the ajax loop ─────────────────── */
+
+    function bindNavLinks() {
+        (opts.rootLinks || []).forEach(function (selector) {
+            root.querySelectorAll(selector).forEach(bindLink);
+        });
+        if (!results) { return; }
+        (opts.resultLinks || []).forEach(function (selector) {
+            results.querySelectorAll(selector).forEach(bindLink);
+        });
+    }
+
+    function bindLink(link) {
+        if (link.dataset.filterDraftBound) { return; }
+        link.dataset.filterDraftBound = '1';
+        link.addEventListener('click', function (event) {
+            if (event.metaKey || event.ctrlKey || event.shiftKey || event.button !== 0) { return; }
+            event.preventDefault();
+            load(link.getAttribute('href'), true);
+        });
+    }
+
+    /* ── wiring ──────────────────────────────────────────────────────── */
+
+    function watch(el) {
+        el.addEventListener('change', renderSummary);
+        el.addEventListener('input', renderSummary);
+        el.addEventListener('keydown', function (event) {
+            if (event.key === 'Enter') { event.preventDefault(); apply(); }
+        });
+        // TomSelect swallows the original <select>'s change event in some
+        // versions, so listen on the instance as well.
+        if (el.tomselect) { el.tomselect.on('change', renderSummary); }
+    }
+
+    inputs().forEach(watch);
+    if (opts.quickEl) { watch(opts.quickEl); }
+
+    // `base` is an absolute URL, `location.pathname` is not — compare paths.
+    const basePath = opts.base ? opts.base.replace(/^[a-z]+:\/\/[^/]+/i, '') : null;
+    window.addEventListener('popstate', function () {
+        // Another page's history entry is none of this bar's business.
+        if (basePath && window.location.pathname.indexOf(basePath) !== 0) { return; }
+        load(window.location.pathname + window.location.search, false);
+    });
+
+    renderSummary();
+    bindNavLinks();
+
+    return { refresh: renderSummary, apply: apply };
+}
+window.initIndexFilterDraft = initIndexFilterDraft;
+
+/* --------------------------------------------------------------------------
+ * Adapter: the log indexes' filter card
+ * --------------------------------------------------------------------------
+ * Its configuration (base URL, applied filters, field labels) is rendered
+ * next to it as a JSON <script>; see Elements/Logs/filter_card.ctp.
+ */
+function initLogFilterCard(root) {
+    if (!root) { return; }
+    const configEl = root.querySelector('.log-filter-config');
+    if (!configEl) { return; }
+    const cfg = JSON.parse(configEl.textContent);
+    const quickEl = root.querySelector('.log-quick-filter');
+
+    // TomSelect copies the select's classes onto its wrapper, so
+    // `.filter-draft-input` alone matches two nodes per control.
+    function inputs() {
+        return Array.prototype.slice.call(
+            root.querySelectorAll('select.filter-draft-input, input.filter-draft-input'));
+    }
+
+    /*
+     * Filters go in the query string, paginator parameters stay named URL
+     * segments. A named segment cannot carry a '/' — `url:%2Fevents` reaches
+     * the access log controller with the value dropped — and the free-text
+     * search of a URL column is exactly where slashes turn up.
+     */
+    function buildUrl() {
+        const query = new URLSearchParams();
+        const quick = quickEl ? (quickEl.value || '').trim() : '';
+        if (quick !== '') { query.set(cfg.quickName, quick); }
+        inputs().forEach(function (el) {
+            const value = (el.value || '').trim();
+            if (value !== '') { query.set(el.getAttribute('name'), value); }
+        });
+        return formatIndexUrl(cfg.base, { named: cfg.preserved, query: query });
+    }
+
+    /**
+     * Read a URL back into the card. Applying round-trips to itself, but the
+     * back button and the pagination/sort links do not: they hand over a URL
+     * this card did not build, and its inputs, its chips and the paginator
+     * parameters it carries across all have to follow.
+     */
+    function syncFromUrl(url) {
+        const parts = parseIndexUrl(url, cfg.base);
+        // `page` is deliberately not carried across: a new filter starts over.
+        cfg.preserved = {};
+        ['sort', 'direction', 'limit'].forEach(function (key) {
+            if (parts.named[key] !== undefined) { cfg.preserved[key] = parts.named[key]; }
+        });
+
+        // A filter may still arrive as a named segment, from an older link.
+        inputs().forEach(function (el) {
+            const name = el.getAttribute('name');
+            const value = parts.query.get(name) || parts.named[name] || '';
+            if (el.tomselect) { el.tomselect.setValue(value, true); } else { el.value = value; }
+        });
+        if (quickEl) {
+            quickEl.value = parts.query.get(cfg.quickName) || parts.named[cfg.quickName] || '';
+        }
+    }
+
+    if (typeof initTomSelect === 'function') { initTomSelect(root); }
+
+    const draft = initIndexFilterDraft(root, {
+        base: cfg.base,
+        inputs: inputs,
+        nameOf: function (el) { return el.getAttribute('name'); },
+        labelOf: function (name) {
+            return (cfg.fields[name] && cfg.fields[name].label) || name;
+        },
+        displayOf: function (name, value) {
+            const options = cfg.fields[name] && cfg.fields[name].options;
+            return (options && options[value]) || value;
+        },
+        quickEl: quickEl,
+        quickLabel: cfg.strings.searchLabel,
+        applied: cfg.applied,
+        appliedQuick: cfg.appliedQuick,
+        countEl: root.querySelector('.filter-draft-count'),
+        summaryEl: root.querySelector('.filter-draft-summary'),
+        results: cfg.results,
+        swap: ['#headerCountBadge', '.log-filter-pager'],
+        rootLinks: ['.log-filter-pager a[href]'],
+        resultLinks: ['.pagination a[href]', 'thead a[href]'],
+        buildUrl: buildUrl,
+        syncFromUrl: syncFromUrl,
+        strings: cfg.strings,
+    });
+
+    // The magnifier next to the search box applies too — it is the only
+    // control left in reach when the advanced panel is folded away.
+    const quickBtn = root.querySelector('.log-quick-btn');
+    if (quickBtn && draft) { quickBtn.addEventListener('click', draft.apply); }
+}
+window.initLogFilterCard = initLogFilterCard;
+
+/* --------------------------------------------------------------------------
+ * Adapter: the scaffold's index filter bar
+ * --------------------------------------------------------------------------
+ * genericElementsBS5/IndexTable/filter_bar.ctp calls this whenever it renders
+ * a `more_filters` control. Everything here is URL work.
+ *
+ * @param {Element} bar   the filter bar element
+ * @param {Object}  cfg   scope, ajaxContainer, base, itemPath, mode,
+ *                        transport, searchField, idField, ownedKeys,
+ *                        results, swap, strings
+ * @returns {Object|null} the draft handle, so the bar's own buttons can apply
+ */
+function initScaffoldFilterDraft(bar, cfg) {
+    const scope = cfg.scope || document;
+    /*
+     * By id, never by a scoped query: a tab pane can hold two scaffolded
+     * indexes (the event view renders the attribute list twice), and only one
+     * of them may declare `more_filters`. Searching the pane hands the
+     * panel-less bar its neighbour's panel, and its config then builds the
+     * neighbour's URLs.
+     */
+    const panel = document.getElementById(cfg.advId);
+    if (!panel) { return null; }
+
+    // TomSelect copies the select's classes onto its wrapper, so
+    // `.filter-draft-input` alone matches two nodes per control.
+    const inputs = function () {
+        return Array.prototype.slice.call(panel.querySelectorAll('select.filter-draft-input'));
+    };
+    const controlFor = function (name) { return panel.querySelector('[name="' + name + '"]'); };
+    // `#filterField` is a repeated id across bars; scope it to this one.
+    const searchEl = bar.querySelector('#filterField');
+
+    // In `event` mode every filter key is prefixed in the URL.
+    const rawKey = function (name) {
+        return (cfg.mode === 'event' ? 'search' : '') + name;
+    };
+    // The URL this bar is currently showing: an ajax tab tracks its own.
+    const source = function () {
+        return (cfg.ajaxContainer && cfg.ajaxContainer.dataset.url)
+            ? cfg.ajaxContainer.dataset.url
+            : (window.location.pathname + window.location.search);
+    };
+
+    // "Clear all" on a full page used to be a plain link to the bare index,
+    // scope included; inside an ajax tab it kept the scope. One flag, read
+    // and reset by the next build, preserves both.
+    let clearScope = false;
+
+    function controlValues() {
+        const out = {};
+        const term = searchEl ? searchEl.value.trim() : '';
+        if (term !== '') {
+            // A number or a UUID means the user is after one record, not a phrase.
+            const uuidRe = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+            const key = (cfg.idField && (uuidRe.test(term) || /^[0-9]+$/.test(term)))
+                ? cfg.idField : cfg.searchField;
+            out[key] = term;
+        }
+        scope.querySelectorAll('.topbar-filter').forEach(function (el) {
+            const name = el.getAttribute('name');
+            if (!name) { return; }
+            const value = (el.value || '').trim();
+            if (value !== '') { out[name] = value; }
+        });
+        return out;
+    }
+
+    /*
+     * Filters as a query string, for an index that declares
+     * `transport => 'query'` (the global attribute index) because a named
+     * segment cannot hold a '/'. The path is left exactly as it is — it
+     * carries whatever scope the bar does not own.
+     */
+    function buildQueryDraftUrl() {
+        const parts = parseIndexUrl(source(), cfg.itemPath);
+        const query = parts.query;
+        query.delete('page');
+        if (clearScope) {
+            clearScope = false;
+            Array.prototype.slice.call(query.keys()).forEach(function (key) {
+                if (['sort', 'direction', 'limit'].indexOf(key) === -1) { query.delete(key); }
+            });
+        }
+        [cfg.searchField, cfg.idField].forEach(function (k) { if (k) { query.delete(k); } });
+        cfg.ownedKeys.forEach(function (key) {
+            if (['sort', 'direction', 'page', 'limit'].indexOf(key) === -1) { query.delete(key); }
+        });
+        const values = controlValues();
+        Object.keys(values).forEach(function (name) { query.set(name, values[name]); });
+        const qs = query.toString();
+        return parts.path + (qs ? '?' + qs : '');
+    }
+
+    /*
+     * Filters as named segments. Everything the bar does not own is kept —
+     * the positional scope arguments, the unowned named keys, and the
+     * paginator's sort/direction, because dropping those would silently reset
+     * the column the table is sorted on. Only `page` resets: a new filter
+     * starts over.
+     */
+    function buildUrl() {
+        if (cfg.transport === 'query') { return buildQueryDraftUrl(); }
+        const parts = parseIndexUrl(source(), cfg.itemPath);
+        const named = parts.named;
+        delete named['page'];
+        if (clearScope) {
+            clearScope = false;
+            parts.positional.length = 0;
+            Object.keys(named).forEach(function (key) {
+                if (['sort', 'direction', 'limit'].indexOf(key) === -1) { delete named[key]; }
+            });
+        }
+        [cfg.searchField, cfg.idField].forEach(function (k) { if (k) { delete named[rawKey(k)]; } });
+        cfg.ownedKeys.forEach(function (key) {
+            if (['sort', 'direction', 'page', 'limit'].indexOf(key) === -1) { delete named[rawKey(key)]; }
+        });
+        const values = controlValues();
+        Object.keys(values).forEach(function (name) { named[rawKey(name)] = values[name]; });
+        return formatIndexUrl(cfg.base, { positional: parts.positional, named: named });
+    }
+
+    /*
+     * Applied filters with no control in this bar — the `searchemail:` that
+     * the "My events" button puts in the URL. They used to show in the
+     * server-rendered "Active filters" row; now that the summary owns the
+     * chips, they have to be read back out of the URL or clicking "My events"
+     * leaves no trace at all.
+     */
+    function extraChips() {
+        const parts = parseIndexUrl(source(), cfg.itemPath);
+        const out = [];
+        const seen = {};
+        const add = function (key, value) {
+            if (cfg.mode === 'event' && key.indexOf('search') === 0) { key = key.slice(6); }
+            if (!key || value === '' || cfg.ownedKeys.indexOf(key) !== -1 || seen[key]) { return; }
+            seen[key] = true;
+            out.push({
+                label: key.charAt(0).toUpperCase() + key.slice(1).replace(/_/g, ' '),
+                value: value,
+            });
+        };
+        Object.keys(parts.named).forEach(function (key) { add(key, parts.named[key]); });
+        parts.query.forEach(function (value, key) { add(key, value); });
+        return out;
+    }
+
+    return initIndexFilterDraft(bar, {
+        base: cfg.base,
+        inputs: inputs,
+        nameOf: function (el) { return el.getAttribute('name'); },
+        labelOf: function (name) {
+            const field = controlFor(name) && controlFor(name).closest('.filter-draft-field');
+            const label = field && field.querySelector('label');
+            return label ? label.textContent.trim() : name;
+        },
+        displayOf: function (name, value) {
+            const el = controlFor(name);
+            if (el && el.tagName === 'SELECT') {
+                const option = Array.prototype.find.call(el.options, function (o) {
+                    return o.value === value;
+                });
+                if (option && option.text.trim() !== '') { return option.text.trim(); }
+            }
+            return value;
+        },
+        // The search term is part of the draft too, exactly as on the log
+        // indexes: one summary says everything the next run will apply.
+        quickEl: searchEl,
+        quickLabel: cfg.strings.searchLabel,
+        appliedQuick: searchEl ? searchEl.value.trim() : '',
+        // The server rendered the controls already selected, so what they
+        // hold at init is exactly what the page is showing.
+        applied: (function () {
+            const out = {};
+            inputs().forEach(function (el) {
+                const value = (el.value || '').trim();
+                if (value !== '') { out[el.getAttribute('name')] = value; }
+            });
+            return out;
+        }()),
+        // The badge rides the toggle button, which lives in the bar's flex
+        // row — outside the panel the controls are in.
+        countEl: bar.querySelector('.filter-draft-count'),
+        summaryEl: panel.querySelector('.filter-draft-summary'),
+        extraChips: extraChips,
+        results: cfg.results,
+        swap: cfg.swap,
+        rootLinks: ['.index-filter-pager a[href]'],
+        resultLinks: ['.pagination a[href]', 'thead a[href]'],
+        // A tab that drives its own URLs — the attribute list inside an event
+        // view builds `events/viewAttributes/<id>/category:x` — registers the
+        // two functions it owns on its container. Looked up per call, because
+        // it registers them after this bar has already wired itself.
+        buildUrl: function () {
+            const over = cfg.ajaxContainer && cfg.ajaxContainer.__indexFilterOverride;
+            return (over && over.buildUrl) ? over.buildUrl() : buildUrl();
+        },
+        // Drops the bar's own filters and the search term. Outside an ajax
+        // tab it drops the scope too, the way the old "Clear all" link to the
+        // bare index did; inside one the scope is what the tab is about.
+        clearAll: function () {
+            clearScope = !cfg.ajaxContainer;
+            if (searchEl) { searchEl.value = ''; }
+            inputs().forEach(function (el) {
+                if (el.tomselect) { el.tomselect.setValue('', true); } else { el.value = ''; }
+            });
+        },
+        // An ajax tab reloads its own fragment, this bar included, and comes
+        // back with the server's state — nothing to keep in sync here.
+        reload: function (url) {
+            const over = cfg.ajaxContainer && cfg.ajaxContainer.__indexFilterOverride;
+            if (over && over.reload) { return over.reload(url); }
+            if (cfg.ajaxContainer && typeof reloadAjaxTabIndex === 'function') {
+                reloadAjaxTabIndex(cfg.ajaxContainer, url);
+                return true;
+            }
+            return false;
+        },
+        strings: cfg.strings,
+    });
+}
+window.initScaffoldFilterDraft = initScaffoldFilterDraft;
+
+document.addEventListener('DOMContentLoaded', function () {
+    document.querySelectorAll('[data-log-filter-card]').forEach(initLogFilterCard);
+});
+
+/*******************************
+ *  Collapsed report preview   *
+ *******************************/
+
+/**
+ * Expand / collapse a clipped event report preview.
+ *
+ * Collapsed, the wrapper is clamped and hidden: no scrollbar — the fade is
+ * what says there is more. Expanded, it grows to at most a screenful and
+ * scrolls inside, which is the one state where a scrollbar belongs, and it is
+ * given a track it always draws (`.er-preview-scroll`) so a reader can see
+ * there is more below rather than having to guess.
+ *
+ * The whole box is the control, so there is no link to aim at — but it only
+ * ever opens. Closing is a click anywhere else on the page, which is what
+ * leaves an open report entirely alone: every click inside it belongs to
+ * reading it, not to putting it away. The guards are what keep the opening
+ * click from firing on something that was never a click: a link inside the
+ * report keeps its own, and a drag is a text selection.
+ *
+ * The box names its parts in data attributes:
+ *   data-er-preview           id of the clipped wrapper            (required)
+ *   data-er-preview-overlay   id of the fade's wrapper
+ *   data-er-preview-collapsed clamped height          (default 300px)
+ *   data-er-preview-expanded  ceiling once open  (default a screenful)
+ *
+ * Idempotent, so a lazily-loaded fragment can call it on its own container.
+ */
+function initErPreviews(container) {
+    var scope = container || document;
+
+    scope.querySelectorAll('[data-er-preview]').forEach(function (box) {
+        if (box.dataset.erPreviewReady === '1') { return; }
+        box.dataset.erPreviewReady = '1';
+
+        var card = document.getElementById(box.dataset.erPreview);
+        if (!card) { return; }
+        var overlay = box.dataset.erPreviewOverlay
+            ? document.getElementById(box.dataset.erPreviewOverlay)
+            : null;
+
+        var collapsedMaxH = box.dataset.erPreviewCollapsed || '300px';
+        var expandedMaxH = box.dataset.erPreviewExpanded || 'calc(100vh - 5rem)';
+
+        var downX = 0;
+        var downY = 0;
+        box.addEventListener('mousedown', function (event) {
+            downX = event.clientX;
+            downY = event.clientY;
+        });
+
+        box.addEventListener('click', function (event) {
+            /* Open already: the click is the reader's, not ours. */
+            if (card.dataset.erExpanded === '1') { return; }
+
+            /* Anything that already does something on click keeps its click —
+               a link in the report body above all. */
+            if (event.target.closest(
+                'a, button, input, textarea, select, label, summary, [data-md-pop]'
+            )) { return; }
+
+            /* A pointer that travelled was dragging out a text selection. */
+            if (Math.abs(event.clientX - downX) > 4 ||
+                Math.abs(event.clientY - downY) > 4) { return; }
+
+            var selection = window.getSelection();
+            if (selection && selection.toString() !== '') { return; }
+
+            setExpanded(true);
+        });
+
+        /* Closing lives on the document rather than being armed when the box
+           opens: a listener added mid-dispatch still runs for the very click
+           that added it, so arming it on open would shut the report again
+           before the pointer came back up. Reading the state here instead
+           costs nothing and cannot race. */
+        document.addEventListener('click', function (event) {
+            if (card.dataset.erExpanded !== '1') { return; }
+            if (box.contains(event.target)) { return; }
+            setExpanded(false);
+        });
+
+        function setExpanded(expand) {
+            if (expand) {
+                card.style.maxHeight = expandedMaxH;
+                card.style.overflowY = 'auto';
+                card.classList.add('er-preview-scroll');
+            } else {
+                card.style.maxHeight = collapsedMaxH;
+                card.style.overflowY = 'hidden';
+                card.classList.remove('er-preview-scroll');
+                /* Collapsing has to come back to the top of the report: the box
+                   keeps whatever it was scrolled to, and clipping a scrolled
+                   box shows its middle. */
+                card.scrollTop = 0;
+            }
+            card.dataset.erExpanded = expand ? '1' : '0';
+            box.classList.toggle('is-expanded', expand);
+            if (overlay) { overlay.classList.toggle('is-expanded', expand); }
+        }
+    });
+}
+window.initErPreviews = initErPreviews;
+
+document.addEventListener('DOMContentLoaded', function () {
+    initErPreviews();
+});
+
+/*******************************
+ *  "Show all" for a tall card *
+ *******************************/
+
+/**
+ * Keeps a card body from running long: past a height it is clipped, a fade
+ * says there is more, and a click on the body itself expands it — a clipped
+ * body opens on its own click and closes on a click anywhere else, the same
+ * bargain the event report preview makes (see initErPreviews). Declarative —
+ * a card opts in with one attribute and writes no script of its own:
+ *
+ *   <div id="…-body" data-collapse-tall="400">
+ *
+ * The fade is inserted AFTER the box, never inside it: inside a clipped box it
+ * is laid out against the scrollport, so it drifts into the middle of the
+ * content (which is exactly what the event report preview had to be fixed for).
+ *
+ * These bodies arrive from their card's own fetch and are re-filtered by its
+ * search box, so the height is watched rather than measured once: a card that
+ * loads late, filters down to three rows or grows a picture gets the bar, or
+ * loses it, on its own.
+ */
+function initCollapsibleSections(container) {
+    (container || document)
+        .querySelectorAll('[data-collapse-tall]')
+        .forEach(initCollapsibleSection);
+}
+window.initCollapsibleSections = initCollapsibleSections;
+
+function initCollapsibleSection(box) {
+    if (box.dataset.collapseReady === '1') { return; }
+    box.dataset.collapseReady = '1';
+
+    const threshold = parseInt(box.dataset.collapseTall, 10) || 400;
+
+    const overlay = document.createElement('div');
+    overlay.className = 'er-preview-overlay d-none';
+    overlay.innerHTML = '<div class="er-preview-gradient"></div>';
+    const gradient = overlay.querySelector('.er-preview-gradient');
+    box.insertAdjacentElement('afterend', overlay);
+
+    let expanded = false;
+    let applying = false;
+    let scheduled = null;
+
+    function apply() {
+        applying = true;
+        const tall = box.scrollHeight > threshold + 8;
+
+        if (expanded || !tall) {
+            box.style.maxHeight = '';
+            box.style.overflow = '';
+        } else {
+            box.style.maxHeight = threshold + 'px';
+            box.style.overflow = 'hidden';
+            box.scrollTop = 0;
+        }
+        overlay.classList.toggle('d-none', !(expanded || tall));
+        gradient.classList.toggle('d-none', expanded);
+        /* Only a clipped body has something to give on a click, and it is the
+           only state that should offer a cursor saying so. */
+        box.classList.toggle('is-clipped', !expanded && tall);
+        applying = false;
+    }
+
+    function setExpanded(next) {
+        if (expanded === next) { return; }
+        expanded = next;
+        apply();
+    }
+
+    /* A timer rather than requestAnimationFrame: rAF is throttled to nothing
+       in a background tab, and a card that was filled while hidden would stay
+       unclamped. Reading scrollHeight forces the layout we need anyway. */
+    function schedule() {
+        if (applying || scheduled) { return; }
+        scheduled = window.setTimeout(function () {
+            scheduled = null;
+            apply();
+        }, 0);
+    }
+
+    let downX = 0;
+    let downY = 0;
+    box.addEventListener('mousedown', function (event) {
+        downX = event.clientX;
+        downY = event.clientY;
+    });
+
+    /* Opening: only while the body is actually clipped, so a card that fits
+       never swallows a click. These bodies are lists of tags, clusters and
+       files whose every row does something, hence the wider net than the
+       report preview casts — `[onclick]` above all, which is how the rows
+       arriving from the card's own fetch are wired. */
+    box.addEventListener('click', function (event) {
+        if (expanded || !box.classList.contains('is-clipped')) { return; }
+        if (event.target.closest(
+            'a, button, input, textarea, select, label, summary,'
+            /* A tooltip is not an action — excluding it would make whole rows
+               of these cards dead to the opening click. */
+            + ' [onclick], [data-bs-toggle]:not([data-bs-toggle="tooltip"]),'
+            + ' [data-md-pop]'
+        )) { return; }
+        if (Math.abs(event.clientX - downX) > 4 ||
+            Math.abs(event.clientY - downY) > 4) { return; }
+        const selection = window.getSelection();
+        if (selection && selection.toString() !== '') { return; }
+        setExpanded(true);
+    });
+
+    /* Closing: a click anywhere but the body and its fade. Registered once
+       rather than armed on opening — a listener added mid-dispatch still runs
+       for the very click that added it, which would shut the card again before
+       the pointer came back up. */
+    document.addEventListener('click', function (event) {
+        if (!expanded) { return; }
+        if (box.contains(event.target) || overlay.contains(event.target)) {
+            return;
+        }
+        setExpanded(false);
+    });
+
+    /* Content arriving, a search hiding rows, a class flipping — anything but
+       our own clamp, which is a style attribute on the box itself. */
+    const observer = new MutationObserver(function (records) {
+        for (const record of records) {
+            if (record.type === 'attributes' && record.target === box) { continue; }
+            schedule();
+            return;
+        }
+    });
+    observer.observe(box, {
+        childList: true,
+        subtree: true,
+        attributes: true,
+        attributeFilter: ['class', 'style', 'hidden']
+    });
+
+    /* A picture that finishes loading changes the height without touching the
+       DOM; its load event does not bubble, so it is caught on the way down. */
+    box.addEventListener('load', schedule, true);
+    window.addEventListener('resize', schedule);
+    window.addEventListener('load', schedule);
+
+    apply();
+}
+
+document.addEventListener('DOMContentLoaded', function () {
+    initCollapsibleSections();
+});
+
+/*******************************
+ *  Click a card to centre it  *
+ *******************************/
+
+/**
+ * Brings an element into view, centred in the band the fixed navbar leaves
+ * usable. Centring in the whole viewport instead would slide the first
+ * ~16 pixels of a full-height card under the navbar; an element taller than
+ * the band lands right under it rather than half above the fold.
+ */
+function centerElementInView(el) {
+    const NAV_HEIGHT = 56;
+    const rect = el.getBoundingClientRect();
+    const usable = window.innerHeight - NAV_HEIGHT;
+    const offset = Math.max(0, (usable - rect.height) / 2);
+    const top = rect.top + window.pageYOffset - NAV_HEIGHT - offset;
+    window.scrollTo({ top: Math.max(0, top), behavior: 'smooth' });
+}
+window.centerElementInView = centerElementInView;
+
+
+function initCenterOnClick(container) {
+    (container || document)
+        .querySelectorAll('[data-center-on-click]')
+        .forEach(function (el) {
+            if (el.dataset.centerReady === '1') { return; }
+            el.dataset.centerReady = '1';
+            el.addEventListener('click', function (event) {
+                if (event.target.closest(
+                    'a, button, input, textarea, select, label, summary, [data-md-pop]'
+                )) { return; }
+                const selection = window.getSelection();
+                if (selection && selection.toString() !== '') { return; }
+                centerElementInView(el);
+            });
+        });
+}
+window.initCenterOnClick = initCenterOnClick;
+
+document.addEventListener('DOMContentLoaded', function () {
+    initCenterOnClick();
+});
+
+/*******************************
+ * Object add / edit form
+ *
+ * Two screens share this entry point, told apart by which JSON payload the
+ * fragment carries: the template picker (#objectPickerData) and the form
+ * itself (#objectFormData). The picker's list is never sent with the form, so
+ * choosing a template is a navigation between the two rather than a reload of
+ * one big fragment.
+ *******************************/
+
+function initObjectForm(container) {
+    if (!container) { return; }
+    var pickerData = container.querySelector('#objectPickerData');
+    if (pickerData) { initObjectTemplatePicker(container, pickerData); }
+    var formData = container.querySelector('#objectFormData');
+    if (formData) { initObjectAddForm(container, formData); }
+}
+
+function readJsonPayload(el) {
+    try {
+        return JSON.parse(el.textContent);
+    } catch (e) {
+        return null;
+    }
+}
+
+/* -- step 1: the template picker ---------------------------------------- */
+
+function initObjectTemplatePicker(container, payloadEl) {
+    var data = readJsonPayload(payloadEl);
+    if (!data) { return; }
+
+    var select  = container.querySelector('#objectTemplateSelect');
+    var nextBtn = container.querySelector('#objNextBtn');
+    var preview = container.querySelector('#templateDescPreview');
+    if (!select) { return; }
+
+    var byId = {};
+    data.templates.forEach(function (t) { byId[t.id] = t; });
+
+    function describe(value) {
+        var t = value ? byId[value] : null;
+        if (nextBtn) { nextBtn.disabled = !t; }
+        if (!preview) { return; }
+        if (!t) {
+            preview.classList.add('d-none');
+            return;
+        }
+        preview.classList.remove('d-none');
+        preview.innerHTML = '<strong>' + escapeHtml(t.name) + '</strong>'
+            + ' <span class="badge bg-secondary ms-1">v' + escapeHtml(t.version) + '</span>'
+            + ' <span class="badge rounded-pill text-bg-light border text-secondary fw-normal ms-1">'
+            + escapeHtml(t.meta) + '</span>'
+            + '<br><small class="text-muted">' + escapeHtml(t.desc) + '</small>';
+    }
+
+    function go(value) {
+        if (!value) { return; }
+        var url = data.formUrl + '/' + encodeURIComponent(value);
+        if (typeof openModal === 'function') {
+            openModal(url);
+        } else {
+            window.location.href = url;
+        }
+    }
+
+    if (typeof TomSelect === 'undefined') {
+        /* No TomSelect: a plain grouped <select> still gets the job done. */
+        var groups = {};
+        data.templates.forEach(function (t) {
+            (groups[t.meta] = groups[t.meta] || []).push(t);
+        });
+        select.add(new Option('', ''));
+        Object.keys(groups).sort().forEach(function (meta) {
+            var og = document.createElement('optgroup');
+            og.label = meta;
+            groups[meta].forEach(function (t) { og.appendChild(new Option(t.name, t.id)); });
+            select.appendChild(og);
+        });
+        select.addEventListener('change', function () { describe(select.value); });
+        bindMetaButtons(container, function (meta) {
+            select.querySelectorAll('optgroup').forEach(function (og) {
+                og.hidden = meta !== '' && og.label !== meta;
+            });
+        });
+        if (nextBtn) {
+            nextBtn.addEventListener('click', function () { go(select.value); });
+        }
+        describe('');
+        return;
+    }
+
+    /* The meta-category is an optgroup rather than a row of filter buttons:
+     * the buttons used to rebuild all 378 options on every click and drop the
+     * current selection while doing it. Searching covers the description too,
+     * which is the only way to find `x509-fingerprint` by typing "certificate". */
+    var metas = [];
+    data.templates.forEach(function (t) {
+        if (metas.indexOf(t.meta) === -1) { metas.push(t.meta); }
+    });
+    metas.sort();
+
+    var ts = new TomSelect(select, {
+        options: data.templates,
+        optgroups: metas.map(function (m) { return { value: m, label: m }; }),
+        optgroupField: 'meta',
+        optgroupOrder: metas,
+        valueField: 'id',
+        labelField: 'name',
+        searchField: ['name', 'desc'],
+        /* Insertion order stops mattering, so re-adding options on the way back
+         * to "All" cannot scramble the list. */
+        sortField: [{ field: '$score', direction: 'desc' }, { field: 'name', direction: 'asc' }],
+        score: function (query) {
+            var anyField = this.getScoreFunction(query);
+            var nameOnly = this.sifter.getScoreFunction(
+                query, Object.assign(this.getSearchOptions(), { fields: ['name'] })
+            );
+            this.settings.optgroupField = query.trim() ? '' : 'meta';
+            return function (t) {
+                if (anyField(t) <= 0) { return 0; }
+                var byName = nameOnly(t);
+                return byName > 0 ? 10 + byName : 1;
+            };
+        },
+        maxOptions: null,
+        create: false,
+        placeholder: select.dataset.placeholder || '-- Select a template --',
+        render: {
+            option: function (t, escape) {
+                return '<div class="py-1">'
+                    + '<span class="fw-semibold">' + escape(t.name) + '</span>'
+                    + ' <span class="badge bg-secondary fw-normal">v' + escape(t.version) + '</span>'
+                    + '<div class="text-muted small text-truncate">' + escape(t.desc) + '</div>'
+                    + '</div>';
+            },
+            item: function (t, escape) { return '<div>' + escape(t.name) + '</div>'; }
+        },
+        onChange: describe
+    });
+
+    /* A meta-category narrows the option set for real. Scoring the others out
+     * is not enough: sifter skips the score function entirely when the search
+     * box is empty, so the unfiltered list would come back whole. What stays is
+     * the part that used to be wrong - the pick survives, because the selected
+     * template is never one of the options taken away. */
+    bindMetaButtons(container, function (meta) {
+        var selected = ts.getValue();
+        var wanted = {};
+        data.templates.forEach(function (t) {
+            if (!meta || t.meta === meta || t.id === selected) { wanted[t.id] = t; }
+        });
+
+        Object.keys(ts.options).forEach(function (id) {
+            if (!wanted[id]) { ts.removeOption(id, true); }
+        });
+        var missing = Object.keys(wanted)
+            .filter(function (id) { return !ts.options[id]; })
+            .map(function (id) { return wanted[id]; });
+        if (missing.length) { ts.addOptions(missing); }
+
+        ts.refreshOptions(ts.isOpen);
+    });
+
+    if (nextBtn) {
+        nextBtn.addEventListener('click', function () { go(ts.getValue()); });
+    }
+    describe('');
+}
+
+/* The row of meta-category buttons above the picker. "All" is the one that
+ * starts pressed; the caller decides what narrowing actually means. */
+function bindMetaButtons(container, onChange) {
+    var buttons = container.querySelectorAll('.meta-cat-btn');
+    buttons.forEach(function (btn) {
+        btn.addEventListener('click', function () {
+            buttons.forEach(function (other) {
+                var pressed = other === btn;
+                other.classList.toggle('active', pressed);
+                other.setAttribute('aria-pressed', pressed ? 'true' : 'false');
+                /* The count sits on the accent the pressed button is filled
+                 * with, so it has to invert with it or it reads as a blank. */
+                var count = other.querySelector('.ov-obj-step-badge');
+                if (count) { count.classList.toggle('is-on', pressed); }
+            });
+            onChange(btn.dataset.meta || '');
+        });
+    });
+}
+
+/* -- step 2/3: the form -------------------------------------------------- */
+
+function initObjectAddForm(container, payloadEl) {
+    var data = readJsonPayload(payloadEl);
+    if (!data) { return; }
+
+    var form = container.querySelector('#objectAddForm');
+    if (!form) { return; }
+
+    var errorBox = container.querySelector('#objFormError');
+
+    function showError(message) {
+        if (!errorBox) {
+            showToast(message, 'danger');
+            return;
+        }
+        errorBox.textContent = message;
+        errorBox.classList.remove('d-none');
+        errorBox.scrollIntoView({ block: 'nearest' });
+    }
+
+    function clearError() {
+        if (errorBox) { errorBox.classList.add('d-none'); }
+    }
+
+    /* ---- one row ------------------------------------------------------- */
+
+    function rowParts(row) {
+        return {
+            card:   row,
+            save:   row.querySelector('input[type="hidden"][id$="Save"]'),
+            value:  row.querySelector('.Attribute_value'),
+            select: row.querySelector('.Attribute_value_select'),
+            file:   row.querySelector('.Attribute_attachment')
+        };
+    }
+
+    function rowValue(row) {
+        var p = rowParts(row);
+        if (p.select && p.select.value && p.select.value !== 'Enter value manually') {
+            return p.select.value;
+        }
+        if (p.file) { return p.file.value; }
+        return p.value ? p.value.value.trim() : '';
+    }
+
+    function bindRow(row) {
+        var p = rowParts(row);
+
+        /* A card the user left empty is dropped server-side rather than failing
+         * validation; nothing about that shows in the card itself. */
+        function syncSave() {
+            if (!p.save) { return; }
+            p.save.value = rowValue(row) !== '' ? '1' : '0';
+            syncOneOfFrame();
+        }
+
+        /* One value per line: a pasted list becomes one card per entry, the first
+         * staying in the card being typed into. Only a repeatable relation can do
+         * this — a single-occurrence one has nowhere to put the rest, so its text
+         * is left exactly as it was pasted. A card driven by a <select> has no
+         * free-text field to split. */
+        var SPLIT_LIMIT = 100;
+
+        function splitPastedLines() {
+            if (!p.value || row.dataset.multiple !== '1' || p.select) { return; }
+            var raw = p.value.value;
+            if (raw.indexOf('\n') === -1 && raw.indexOf('\r') === -1) { return; }
+
+            var lines = raw.split(/\r?\n/)
+                .map(function (line) { return line.trim(); })
+                .filter(function (line) { return line !== ''; });
+
+            p.value.value = lines.length ? lines[0] : '';
+            if (lines.length < 2) { return; }
+
+            var rest = lines.slice(1);
+            var dropped = 0;
+            if (rest.length > SPLIT_LIMIT) {
+                dropped = rest.length - SPLIT_LIMIT;
+                rest = rest.slice(0, SPLIT_LIMIT);
+            }
+
+            var relation = row.dataset.objectRelation;
+            var group = groupOfCard(row);
+            var anchor = row;
+            var last = null;
+
+            rest.forEach(function (line) {
+                var card = addCard(relation, group, anchor);
+                if (!card) { return; }
+                var field = card.querySelector('.Attribute_value');
+                if (field) {
+                    field.value = line;
+                    field.dispatchEvent(new Event('input'));
+                }
+                anchor = card;
+                last = card;
+            });
+
+            if (dropped) {
+                showError(dropped + ' further line'
+                    + (dropped === 1 ? ' was' : 's were')
+                    + ' not added: ' + SPLIT_LIMIT + ' is the most one paste creates at once.');
+            }
+            if (last) {
+                var lastField = last.querySelector('.Attribute_value');
+                if (lastField) {
+                    lastField.focus();
+                    lastField.setSelectionRange(lastField.value.length, lastField.value.length);
+                }
+            }
+        }
+
+        if (p.value) {
+            p.value.addEventListener('input', function () {
+                clearRowError(row);
+                splitPastedLines();
+                syncSave();
+            });
+        }
+        if (p.file)   { p.file.addEventListener('change', syncSave); }
+        if (p.select) {
+            p.select.addEventListener('change', function () {
+                if (p.value) {
+                    p.value.classList.toggle('d-none', p.select.value !== 'Enter value manually');
+                }
+                syncSave();
+            });
+            if (p.value) {
+                p.value.classList.toggle('d-none', p.select.value !== 'Enter value manually');
+            }
+        }
+        syncSave();
+
+        /* IDS / Correlate tiles: the colours are CSS, this only names the state. */
+        row.querySelectorAll('.ov-obj-toggle').forEach(function (tile) {
+            var box = tile.querySelector('.ov-obj-toggle-input');
+            if (!box) { return; }
+            var lit = tile.classList.contains('ov-obj-toggle-corr')
+                ? function () { return !box.checked; }
+                : function () { return box.checked; };
+            box.addEventListener('change', function () {
+                tile.classList.toggle('is-on', lit());
+            });
+        });
+
+        /* The three selects get the same treatment as the rest of the theme:
+         * the distribution one through the shared renderers, so a level looks the
+         * same here as in the event form, and the other two searchable. */
+        var dist = row.querySelector('.Attribute_distribution_select');
+        var sgWrap = row.querySelector('.ov-obj-sg-wrap');
+
+        function revealSg() {
+            if (sgWrap) {
+                sgWrap.classList.toggle('d-none', parseInt(dist.value, 10) !== 4);
+            }
+        }
+
+        if (dist) {
+            initDistributionSelect(dist, revealSg, { controlInput: null });
+            if (!dist.tomselect) { dist.addEventListener('change', revealSg); }
+            revealSg();
+        }
+
+        if (typeof TomSelect !== 'undefined') {
+            row.querySelectorAll(
+                '.Attribute_category_select, .Attribute_sharing_group_id_select'
+            ).forEach(function (sel) {
+                if (sel.tomselect) { return; }
+                new TomSelect(sel, {
+                    create: false,
+                    allowEmptyOption: true,
+                    maxOptions: null,
+                    placeholder: sel.dataset.placeholder || ''
+                });
+            });
+        }
+    }
+
+    /* TomSelect keeps a reference of its own, so a card being thrown away has to
+     * hand its instances back before it leaves the document. */
+    function destroyRow(row) {
+        row.querySelectorAll('select').forEach(function (sel) {
+            if (sel.tomselect) { sel.tomselect.destroy(); }
+        });
+    }
+
+    form.querySelectorAll('.attribute_row').forEach(bindRow);
+
+    /* ---- "Add another …" ----------------------------------------------- */
+
+    /* The row is a clone of the template's own row with a bumped index, so the
+     * adder costs nothing rather than a round trip to get_row per click. */
+    function reindexValue(value, from, to) {
+        return value
+            .replace('[Attribute][' + from + ']', '[Attribute][' + to + ']')
+            .replace(new RegExp('^Attribute' + from + '(?=[A-Z]|$)'), 'Attribute' + to)
+            .replace(new RegExp('^row_' + from + '$'), 'row_' + to)
+            .replace(new RegExp('^card-(ids|corr)-' + from + '$'), 'card-$1-' + to);
+    }
+
+    function reindexRow(node, from, to) {
+        var attrs = ['id', 'name', 'for', 'aria-controls', 'aria-labelledby'];
+        var visit = function (el) {
+            attrs.forEach(function (a) {
+                if (el.hasAttribute(a)) {
+                    el.setAttribute(a, reindexValue(el.getAttribute(a), from, to));
+                }
+            });
+            Array.prototype.forEach.call(el.children, visit);
+        };
+        visit(node);
+        node.dataset.rowIndex = to;
+    }
+
+    function blankRow(node) {
+        node.querySelectorAll('input[type="hidden"]').forEach(function (h) {
+            h.value = h.defaultValue;
+        });
+        node.querySelectorAll('textarea').forEach(function (t) { t.value = ''; });
+        node.querySelectorAll('input[type="file"]').forEach(function (f) { f.value = ''; });
+        node.querySelectorAll('select').forEach(function (s) {
+            Array.prototype.forEach.call(s.options, function (o) { o.selected = o.defaultSelected; });
+        });
+        node.querySelectorAll('input[type="checkbox"]').forEach(function (c) {
+            c.checked = c.defaultChecked;
+        });
+        node.querySelectorAll('.Attribute_value').forEach(function (v) {
+            var sel = node.querySelector('.Attribute_value_select');
+            v.classList.toggle('d-none', !!sel);
+        });
+    }
+
+    /* ---- the attribute palettes -------------------------------------- */
+
+    /* The requiredOneOf frame is dashed while the requirement is open and solid
+     * once it is met. It follows the values, not the cards: a card added and left
+     * empty satisfies nothing, so a solid border there would be a lie. */
+    function syncOneOfFrame() {
+        var frame = form.querySelector('.ov-obj-palette[data-palette="oneof"]');
+        var cards = form.querySelector('.ov-obj-cards[data-group="oneof"]');
+        if (!frame || !cards) { return; }
+        var met = Array.prototype.some.call(
+            cards.querySelectorAll('.attribute_row'),
+            function (row) { return rowValue(row) !== ''; }
+        );
+        frame.classList.toggle('is-satisfied', met);
+    }
+
+    function nextRowIndex() {
+        var lastRow = form.querySelector('#last-row');
+        if (!lastRow) { return null; }
+        var next = parseInt(lastRow.dataset.lastRow, 10) + 1;
+        lastRow.dataset.lastRow = next;
+        return next;
+    }
+
+    /* A relation's palette button, if it has one. */
+    function pickButton(relation) {
+        return form.querySelector('.ov-obj-pick[data-add-relation="' + CSS.escape(relation) + '"]');
+    }
+
+    /* A single-occurrence relation is spent once a card for it exists. */
+    function syncPickButton(relation) {
+        var btn = pickButton(relation);
+        if (!btn || btn.dataset.multiple === '1') { return; }
+        btn.disabled = !!form.querySelector(
+            '.ov-obj-cards .attribute_row[data-object-relation="' + CSS.escape(relation) + '"]'
+        );
+    }
+
+    /* `after` places the new card straight below an existing one instead of at
+     * the end of the group, which is what keeps a pasted list in order. */
+    function addCard(relation, group, after) {
+        var source = form.querySelector(
+            '.ov-obj-row-source[data-relation="' + CSS.escape(relation) + '"]'
+        );
+        var target = form.querySelector('.ov-obj-cards[data-group="' + CSS.escape(group) + '"]');
+        var next = nextRowIndex();
+        if (!source || (!target && !after) || next === null) { return null; }
+
+        var card = source.content.firstElementChild.cloneNode(true);
+        reindexRow(card, card.dataset.rowIndex, next);
+        blankRow(card);
+        if (after) {
+            after.insertAdjacentElement('afterend', card);
+        } else {
+            target.appendChild(card);
+        }
+        bindRow(card);
+        syncPickButton(relation);
+        return card;
+    }
+
+    function groupOfCard(row) {
+        var host = row.closest('.ov-obj-cards');
+        return host ? host.dataset.group : 'other';
+    }
+
+    form.querySelectorAll('.ov-obj-pick').forEach(function (btn) {
+        btn.addEventListener('click', function () {
+            var card = addCard(btn.dataset.addRelation, btn.dataset.target);
+            if (!card) { return; }
+            card.scrollIntoView({ block: 'nearest' });
+            var first = card.querySelector(
+                '.Attribute_value_select, .Attribute_value, .Attribute_attachment'
+            );
+            if (first) { first.focus(); }
+        });
+    });
+
+    /* Removing a card hands its slot back to the palette. */
+    form.addEventListener('click', function (event) {
+        var remove = event.target.closest('.ov-obj-row-remove');
+        if (!remove || !form.contains(remove)) { return; }
+        var card = remove.closest('.attribute_row');
+        if (!card) { return; }
+        var relation = card.dataset.objectRelation;
+        destroyRow(card);
+        card.remove();
+        syncPickButton(relation);
+        syncOneOfFrame();
+        clearError();
+    });
+
+    form.querySelectorAll('.ov-obj-pick').forEach(function (btn) {
+        syncPickButton(btn.dataset.addRelation);
+    });
+    syncOneOfFrame();
+
+    /* ---- change template ------------------------------------------------ */
+
+    var changeBtn = container.querySelector('#objChangeTemplateBtn');
+    if (changeBtn && typeof openModal === 'function') {
+        changeBtn.addEventListener('click', function () {
+            openModal(changeBtn.dataset.pickerUrl);
+        });
+    }
+
+    /* ---- collected state ------------------------------------------------ */
+
+    function savedRows() {
+        var rows = [];
+        form.querySelectorAll('.attribute_row').forEach(function (row) {
+            var save = row.querySelector('input[type="hidden"][id$="Save"]');
+            if (!save || save.value !== '1') { return; }
+            rows.push(row);
+        });
+        return rows;
+    }
+
+    function describeRow(row) {
+        var category = row.querySelector('select[id$="Category"]');
+        var dist = row.querySelector('.Attribute_distribution_select');
+        var ids = row.querySelector('input[id$="ToIds"]');
+        var corr = row.querySelector('input[id$="DisableCorrelation"]');
+        var comment = row.querySelector('.ov-obj-row-comment');
+        var type = row.querySelector('input[id$="Type"]');
+        return {
+            relation: row.dataset.objectRelation || '',
+            value: rowValue(row),
+            type: type ? type.value : '',
+            category: category ? category.value : '',
+            distribution: dist ? parseInt(dist.value, 10) : 0,
+            to_ids: ids ? ids.checked : false,
+            correlate: corr ? !corr.checked : true,
+            comment: comment ? comment.value.trim() : ''
+        };
+    }
+
+    /* ---- what is wrong with the form ------------------------------------- */
+
+    function clearRowError(row) {
+        row.classList.remove('ov-obj-row-invalid');
+        var line = row.querySelector('.ov-obj-row-error');
+        if (line) { line.remove(); }
+    }
+
+    function clearRowErrors() {
+        form.querySelectorAll('.attribute_row').forEach(clearRowError);
+    }
+
+    function markRowError(row, message) {
+        clearRowError(row);
+        row.classList.add('ov-obj-row-invalid');
+        var body = row.querySelector('.card-body');
+        if (!body) { return; }
+        var line = document.createElement('div');
+        line.className = 'ov-obj-row-error';
+        line.textContent = message;
+        body.appendChild(line);
+    }
+
+    /* The format of a value is the server's to judge — the same endpoint the
+     * attribute form checks against, one call per filled card. */
+    function validateValues() {
+        var rows = savedRows().filter(function (row) { return rowValue(row) !== ''; });
+        if (!rows.length || typeof baseurl === 'undefined') {
+            return Promise.resolve([]);
+        }
+        return Promise.all(rows.map(function (row) {
+            var params = new URLSearchParams();
+            params.set('type', describeRow(row).type);
+            params.set('value', rowValue(row));
+            return fetch(baseurl + '/attributes/validateValue', {
+                method: 'POST',
+                credentials: 'same-origin',
+                headers: {
+                    'Content-Type': 'application/x-www-form-urlencoded',
+                    'X-Requested-With': 'XMLHttpRequest',
+                    'Accept': 'application/json'
+                },
+                body: params.toString()
+            })
+                .then(function (r) { return r.json(); })
+                .then(function (res) {
+                    return (res && res.valid === false)
+                        ? { row: row, message: res.message || 'Invalid value.' }
+                        : null;
+                })
+                /* A check that cannot run must not block a save the server would
+                 * have accepted; it will have the last word anyway. */
+                .catch(function () { return null; });
+        })).then(function (list) {
+            return list.filter(Boolean);
+        });
+    }
+
+    /* Requirements first — they are instant and tell the user what is missing —
+     * then the value formats. Resolves to whether the form is good to go. */
+    function runChecks() {
+        clearError();
+        clearRowErrors();
+
+        var problem = requirementMessage();
+        if (problem) {
+            showError(problem);
+            return Promise.resolve(false);
+        }
+        return validateValues().then(function (bad) {
+            if (!bad.length) { return true; }
+            bad.forEach(function (item) { markRowError(item.row, item.message); });
+            var names = bad.map(function (item) {
+                return item.row.dataset.objectRelation;
+            });
+            showError(bad.length === 1
+                ? names[0] + ': ' + bad[0].message
+                : bad.length + ' attributes have an invalid value: ' + names.join(', '));
+            bad[0].row.scrollIntoView({ block: 'nearest' });
+            return false;
+        });
+    }
+
+    /* ---- required fields ------------------------------------------------ */
+
+    function missingRequirements() {
+        var present = {};
+        savedRows().forEach(function (row) {
+            if (rowValue(row) !== '') { present[row.dataset.objectRelation] = true; }
+        });
+        var problems = [];
+        (data.template.required || []).forEach(function (relation) {
+            if (!present[relation]) { problems.push(relation); }
+        });
+        var oneOf = data.template.requiredOneOf || [];
+        var satisfied = oneOf.length === 0 || oneOf.some(function (r) { return present[r]; });
+        return { missing: problems, oneOfUnmet: satisfied ? [] : oneOf };
+    }
+
+    /* The precise complaints come first: with the palette layout an empty form is
+     * the normal starting point, so "nothing is filled in" is the least useful
+     * thing to say about it. */
+    function requirementMessage() {
+        var check = missingRequirements();
+        if (check.missing.length) {
+            return 'This template requires a value for: ' + check.missing.join(', ') + '.';
+        }
+        if (check.oneOfUnmet.length) {
+            var shown = check.oneOfUnmet.slice(0, 6).join(', ');
+            if (check.oneOfUnmet.length > 6) {
+                shown += ' … (' + (check.oneOfUnmet.length - 6) + ' more)';
+            }
+            return 'This template requires a value for at least one of: ' + shown + '.';
+        }
+        if (savedRows().length === 0) {
+            return 'Add an attribute and give it a value before saving.';
+        }
+        return '';
+    }
+
+    /* ---- review --------------------------------------------------------- */
+
+    /* Deliberately a compact digest, not a copy of the object index's markup -
+     * the two used to be kept in step by hand and drifted. */
+    function buildReview() {
+        var rows = savedRows().map(describeRow);
+        var distEl = container.querySelector('#ObjectDistribution');
+        var dist = distEl ? parseInt(distEl.value, 10) : 0;
+
+        var warn = container.querySelector('#objWarningMessage');
+        if (warn) { warn.classList.toggle('d-none', dist < 3); }
+
+        var body = container.querySelector('#objReviewBody');
+        if (!body) { return rows; }
+
+        if (!rows.length) {
+            body.innerHTML = '<p class="text-muted fst-italic mb-3">'
+                + '<i class="fas fa-circle-info me-1"></i>'
+                + 'No attributes will be saved.</p>';
+            return rows;
+        }
+
+        /* Same markup as Elements/Objects/object_header.ctp, so the summary reads
+         * like the card the object will become rather than like a second design. */
+        var distCfg = DIST_MAP[dist] || DIST_MAP[0];
+        var html = '<div class="ov-obj-head mb-2">'
+            + '<span class="ov-obj-dist" style="--ov-dist-bg:' + distCfg.bg
+            + ';--ov-dist-ink:' + distCfg.color + ';">'
+            + '<i class="' + distCfg.icon + '"></i></span>'
+            + '<span class="ov-obj-title">'
+            + '<span class="ov-obj-name">'
+            + '<span class="text-truncate">' + escapeHtml(data.template.name) + '</span>'
+            + '<span class="ov-obj-meta">' + escapeHtml(data.template.meta)
+            + '<span class="ov-obj-meta-version">v' + escapeHtml(data.template.version)
+            + '</span></span>'
+            + '</span></span>'
+            + '<span class="ov-obj-aside">'
+            + '<span class="ov-obj-count">'
+            + '<span class="misp-icon misp-icon-attribute misp-simple"></span> '
+            + rows.length + '</span>'
+            + '</span>'
+            + '</div>';
+
+        html += '<div class="table-responsive"><table class="table table-sm align-middle mb-3">'
+            + '<thead class="table-light"><tr>'
+            + '<th>Value</th><th>Type</th><th>Category</th>'
+            + '<th class="text-center">IDS</th><th class="text-center">Correlate</th>'
+            + '</tr></thead><tbody>';
+
+        rows.forEach(function (a) {
+            var value = distBadgeHtml(a.distribution, false)
+                + ' ' + escapeHtml(a.value || '—')
+                + (a.comment
+                    ? '<div class="text-muted fst-italic small"><i class="fa fa-comment me-1"></i>'
+                        + escapeHtml(a.comment) + '</div>'
+                    : '');
+
+            html += '<tr>'
+                + '<td class="text-break">' + value + '</td>'
+                + '<td class="text-nowrap">' + escapeHtml(a.type) + '</td>'
+                + '<td class="text-nowrap">' + escapeHtml(a.category) + '</td>'
+                + '<td class="text-center"><i class="fas fa-shield-halved '
+                + (a.to_ids ? 'text-warning' : 'text-secondary opacity-50') + '"></i></td>'
+                + '<td class="text-center"><i class="fas '
+                + (a.correlate ? 'fa-link text-success' : 'fa-link-slash text-secondary opacity-50')
+                + '"></i></td>'
+                + '</tr>';
+        });
+
+        html += '</tbody></table></div>';
+
+        html += relationshipsSummary();
+
+        var problem = requirementMessage();
+        if (problem) {
+            html += '<div class="alert alert-warning py-2 mb-0">'
+                + '<i class="fas fa-triangle-exclamation me-1"></i>'
+                + escapeHtml(problem) + '</div>';
+        }
+
+        body.innerHTML = html;
+        return rows;
+    }
+
+    /* What the object will point at once saved: the ones it already has, plus
+     * the ones this form is about to create. */
+    function relationshipsSummary() {
+        var all = savedRelationships.map(function (rel) {
+            return { rel: rel, note: '' };
+        }).concat(pendingRelationships.map(function (rel) {
+            return { rel: rel, note: 'to be created' };
+        }));
+        if (!all.length) { return ''; }
+
+        var html = '<div class="ov-obj-group-label mt-3">'
+            + '<i class="fas fa-link me-1"></i>'
+            + (all.length === 1 ? '1 relationship' : all.length + ' relationships')
+            + '</div><ul class="list-group mb-3">';
+        all.forEach(function (entry) {
+            html += '<li class="list-group-item d-flex align-items-center gap-2 py-2">'
+                + '<span class="badge bg-object">' + escapeHtml(entry.rel.type) + '</span>'
+                + '<span class="text-muted small">' + escapeHtml(entry.rel.kind) + '</span>'
+                + '<span class="text-break">' + escapeHtml(entry.rel.label) + '</span>'
+                + (entry.rel.comment
+                    ? '<span class="text-muted fst-italic small">'
+                        + escapeHtml(entry.rel.comment) + '</span>'
+                    : '')
+                + (entry.note
+                    ? '<span class="badge bg-secondary-subtle text-secondary ms-auto">'
+                        + escapeHtml(entry.note) + '</span>'
+                    : '')
+                + '</li>';
+        });
+        return html + '</ul>';
+    }
+
+    /* ---- similar objects ------------------------------------------------ */
+
+    function renderSimilar(result) {
+        var box = container.querySelector('#objSimilarObjects');
+        if (!box) { return; }
+        if (!result || !result.count) {
+            box.innerHTML = '';
+            return;
+        }
+        var html = '<div class="card ov-obj-similar mb-0"><div class="card-body p-3">'
+            + '<div class="fw-semibold mb-2">'
+            + '<i class="fas fa-triangle-exclamation text-warning me-1"></i>'
+            + escapeHtml(String(result.count))
+            + (result.count === 1
+                ? ' object in this event already overlaps this one'
+                : ' objects in this event already overlap this one')
+            + '</div>'
+            + '<div class="text-muted small mb-2">'
+            + 'Saving will create another one. Edit the existing object instead if this is the same observation.'
+            + '</div>';
+
+        result.objects.forEach(function (o) {
+            html += '<div class="d-flex align-items-start gap-2 mb-1">'
+                + '<a class="text-nowrap" target="_blank" rel="noopener"'
+                + ' href="' + escapeHtml(baseurl) + '/objects/view/' + escapeHtml(String(o.id)) + '">'
+                + '#' + escapeHtml(String(o.id)) + '</a>'
+                + '<span class="ov-obj-similar-match text-muted">'
+                + o.attributes.map(function (a) {
+                    return escapeHtml(a.object_relation) + ' = ' + escapeHtml(a.value);
+                }).join(', ')
+                + '</span></div>';
+        });
+
+        box.innerHTML = html + '</div></div>';
+    }
+
+    function fetchSimilar() {
+        var box = container.querySelector('#objSimilarObjects');
+        var rows = savedRows();
+        if (!box || !rows.length || data.isEdit) { return; }
+
+        var payload = new FormData();
+        rows.forEach(function (row, i) {
+            var a = describeRow(row);
+            if (a.value === '') { return; }
+            payload.append('data[Attribute][' + i + '][object_relation]', a.relation);
+            payload.append('data[Attribute][' + i + '][type]', a.type);
+            payload.append('data[Attribute][' + i + '][value]', a.value);
+        });
+
+        box.innerHTML = '<div class="text-muted small">'
+            + '<span class="spinner-border spinner-border-sm me-2"></span>'
+            + 'Looking for objects that already carry these values…</div>';
+
+        fetch(data.similarUrl, {
+            method: 'POST',
+            body: payload,
+            headers: { 'X-Requested-With': 'XMLHttpRequest' }
+        })
+            .then(function (r) { return r.ok ? r.json() : null; })
+            .then(renderSimilar)
+            .catch(function () { box.innerHTML = ''; });
+    }
+
+    /* ---- relationships (optional step) ---------------------------------- */
+
+    /* Kept until the object exists: a reference needs something to hang off, and
+     * the object has no id until it is saved. */
+    var pendingRelationships = [];
+    /* Already on the object (edit mode). These have an id, so removing one is a
+     * request rather than a splice. */
+    var savedRelationships = (data.existingRelationships || []).slice();
+    var relationshipsLoaded = false;
+
+    var relBtn = container.querySelector('#objRelationshipBtn');
+    var relTypeEl = container.querySelector('#objRelType');
+    var relCustomEl = container.querySelector('#objRelTypeCustom');
+    var relTargetEl = container.querySelector('#objRelTarget');
+    var relCommentEl = container.querySelector('#objRelComment');
+    var relAddBtn = container.querySelector('#objRelAddBtn');
+    var relListEl = container.querySelector('#objRelList');
+
+    function relTypeValue() {
+        var picked = relTypeEl ? relTypeEl.value : '';
+        if (picked === 'custom') {
+            return relCustomEl ? relCustomEl.value.trim() : '';
+        }
+        return picked;
+    }
+
+    function syncRelAddBtn() {
+        if (!relAddBtn) { return; }
+        relAddBtn.disabled = !(relTypeValue() && relTargetEl && relTargetEl.value);
+    }
+
+    function relationshipRow(rel, attr, note) {
+        return '<li class="list-group-item d-flex align-items-center gap-2 py-2">'
+            + '<span class="badge bg-object">' + escapeHtml(rel.type) + '</span>'
+            + '<span class="text-muted small">' + escapeHtml(rel.kind) + '</span>'
+            + '<span class="text-break">' + escapeHtml(rel.label) + '</span>'
+            + (rel.comment
+                ? '<span class="text-muted fst-italic small">'
+                    + escapeHtml(rel.comment) + '</span>'
+                : '')
+            + (note
+                ? '<span class="badge bg-secondary-subtle text-secondary">'
+                    + escapeHtml(note) + '</span>'
+                : '')
+            + '<button type="button" class="btn btn-sm ov-obj-row-remove ms-auto"'
+            + ' ' + attr + ' title="Remove this relationship">'
+            + '<i class="fas fa-trash"></i></button>'
+            + '</li>';
+    }
+
+    function renderRelationships() {
+        if (!relListEl) { return; }
+        if (!savedRelationships.length && !pendingRelationships.length) {
+            relListEl.innerHTML = '';
+            return;
+        }
+        var html = '<ul class="list-group">';
+        savedRelationships.forEach(function (rel) {
+            html += relationshipRow(rel, 'data-saved-rel="' + escapeHtml(rel.id) + '"', '');
+        });
+        pendingRelationships.forEach(function (rel, i) {
+            html += relationshipRow(rel, 'data-drop-rel="' + i + '"', 'pending');
+        });
+        relListEl.innerHTML = html + '</ul>';
+    }
+
+    if (relListEl) {
+        relListEl.addEventListener('click', function (event) {
+            var drop = event.target.closest('[data-drop-rel]');
+            if (drop) {
+                pendingRelationships.splice(parseInt(drop.dataset.dropRel, 10), 1);
+                renderRelationships();
+                return;
+            }
+            /* One that already exists has to be deleted server-side. */
+            var saved = event.target.closest('[data-saved-rel]');
+            if (!saved || !data.relationshipDeleteUrl) { return; }
+            var id = saved.dataset.savedRel;
+            saved.disabled = true;
+            fetch(data.relationshipDeleteUrl + encodeURIComponent(id), {
+                method: 'POST',
+                credentials: 'same-origin',
+                headers: {
+                    'X-Requested-With': 'XMLHttpRequest',
+                    'X-CSRF-Token': typeof getCsrfToken === 'function' ? getCsrfToken() : ''
+                }
+            })
+                .then(function (r) { return r.ok ? r.json() : { saved: false }; })
+                .then(function (res) {
+                    if (!res || !res.saved) {
+                        saved.disabled = false;
+                        showError('The relationship could not be removed.');
+                        return;
+                    }
+                    savedRelationships = savedRelationships.filter(function (rel) {
+                        return String(rel.id) !== String(id);
+                    });
+                    renderRelationships();
+                })
+                .catch(function () {
+                    saved.disabled = false;
+                    showError('The relationship could not be removed.');
+                });
+        });
+    }
+    renderRelationships();
+
+    /* The choices are fetched the first time the step is opened, not with the
+     * form: an event's objects and attributes are none of the add form's
+     * business until somebody asks for a relationship. */
+    function loadRelationshipChoices() {
+        if (relationshipsLoaded || !data.relationshipTargetsUrl) {
+            return Promise.resolve();
+        }
+        relationshipsLoaded = true;
+        return fetch(data.relationshipTargetsUrl, {
+            headers: { 'X-Requested-With': 'XMLHttpRequest' }
+        })
+            .then(function (r) { return r.json(); })
+            .then(function (res) {
+                (res.relationships || []).forEach(function (name) {
+                    relTypeEl.add(new Option(name, name));
+                });
+                if (typeof TomSelect !== 'undefined') {
+                    var relTypeSelect = new TomSelect(relTypeEl, { create: false, placeholder: 'Relationship type' });
+                    relTypeSelect.clear(true);
+                    initRelationshipTargetSelect(res.targets || []);
+                } else {
+                    (res.targets || []).forEach(function (target) {
+                        relTargetEl.add(new Option(target.label, target.uuid));
+                    });
+                }
+                syncRelAddBtn();
+            })
+            .catch(function () {
+                relationshipsLoaded = false;
+                showError('Could not load the relationship choices.');
+            });
+    }
+
+    /* Typing searches the event server-side — the list is capped, so a big event
+     * is found by searching rather than by scrolling. */
+    function initRelationshipTargetSelect(initial) {
+        var ts = new TomSelect(relTargetEl, {
+            valueField: 'uuid',
+            labelField: 'label',
+            searchField: ['label', 'context', 'uuid'],
+            options: initial,
+            create: false,
+            placeholder: 'Search the event by name, value or uuid',
+            load: function (query, callback) {
+                fetch(data.relationshipTargetsUrl + '?searchTerm=' + encodeURIComponent(query), {
+                    headers: { 'X-Requested-With': 'XMLHttpRequest' }
+                })
+                    .then(function (r) { return r.json(); })
+                    .then(function (res) { callback(res.targets || []); })
+                    .catch(function () { callback(); });
+            },
+            render: {
+                /* Objects often share a name: the uuid is what tells them apart. */
+                option: function (item, escape) {
+                    return '<div class="py-1">'
+                        + '<span class="badge bg-secondary me-1">' + escape(item.kind) + '</span>'
+                        + escape(item.label)
+                        + '<div class="text-muted small">' + escape(item.context) + '</div>'
+                        + '<div class="text-muted small font-monospace text-truncate">' + escape(item.uuid) + '</div>'
+                        + '</div>';
+                },
+                item: function (item, escape) {
+                    return '<div class="d-flex align-items-center gap-2 text-truncate">'
+                        + '<span>' + escape(item.label) + '</span>'
+                        + '<span class="text-muted small font-monospace">' + escape(item.uuid) + '</span>'
+                        + '</div>';
+                }
+            },
+            onChange: syncRelAddBtn
+        });
+        relTargetEl.tomselect = ts;
+    }
+
+    if (relBtn) {
+        relBtn.addEventListener('click', function () {
+            loadRelationshipChoices();
+            var el = container.querySelector('#objCollapseRel');
+            if (el) { bootstrap.Collapse.getOrCreateInstance(el).show(); }
+        });
+    }
+
+    if (relTypeEl) {
+        relTypeEl.addEventListener('change', function () {
+            if (relCustomEl) {
+                relCustomEl.classList.toggle('d-none', relTypeEl.value !== 'custom');
+            }
+            syncRelAddBtn();
+        });
+    }
+    if (relCustomEl) { relCustomEl.addEventListener('input', syncRelAddBtn); }
+
+    if (relAddBtn) {
+        relAddBtn.addEventListener('click', function () {
+            var type = relTypeValue();
+            var uuid = relTargetEl ? relTargetEl.value : '';
+            if (!type || !uuid) { return; }
+            var option = relTargetEl.tomselect
+                ? relTargetEl.tomselect.options[uuid]
+                : null;
+            pendingRelationships.push({
+                type: type,
+                uuid: uuid,
+                kind: option ? option.kind : '',
+                label: option ? option.label : uuid,
+                comment: relCommentEl ? relCommentEl.value.trim() : ''
+            });
+            renderRelationships();
+            if (relCommentEl) { relCommentEl.value = ''; }
+            if (relTargetEl.tomselect) { relTargetEl.tomselect.clear(); }
+            syncRelAddBtn();
+        });
+    }
+
+    /* Posted one by one once the object has an id. A reference that fails is
+     * reported rather than swallowed — the object itself is already saved, so
+     * silently dropping it would leave the user believing otherwise. */
+    function createRelationships(objectId, csrfToken) {
+        if (!pendingRelationships.length || !data.relationshipAddUrl) {
+            return Promise.resolve([]);
+        }
+        if (!objectId) {
+            return Promise.resolve(pendingRelationships.map(function (rel) {
+                return { rel: rel, reason: 'the object id did not come back' };
+            }));
+        }
+        /* The token the save answered with, not the page's: csrfUseOnce means the
+         * one the layout rendered may long since have been spent or evicted. */
+        var token = csrfToken
+            || (typeof getCsrfToken === 'function' ? getCsrfToken() : '');
+        return Promise.all(pendingRelationships.map(function (rel) {
+            var body = new URLSearchParams();
+            body.set('data[ObjectReference][referenced_uuid]', rel.uuid);
+            body.set('data[ObjectReference][relationship_type]', rel.type);
+            body.set('data[ObjectReference][comment]', rel.comment);
+            return fetch(data.relationshipAddUrl + encodeURIComponent(objectId), {
+                method: 'POST',
+                credentials: 'same-origin',
+                headers: {
+                    'Content-Type': 'application/x-www-form-urlencoded',
+                    'X-Requested-With': 'XMLHttpRequest',
+                    'X-CSRF-Token': token
+                },
+                body: body.toString()
+            })
+                .then(function (r) {
+                    /* A blackholed post answers with an error page, not JSON, so
+                     * the status is what says what happened. */
+                    if (!r.ok) {
+                        return { saved: false, errors: 'HTTP ' + r.status };
+                    }
+                    return r.json().catch(function () {
+                        return { saved: false, errors: 'unreadable answer' };
+                    });
+                })
+                .then(function (res) {
+                    return (res && res.saved)
+                        ? null
+                        : { rel: rel, reason: (res && res.errors) || 'refused' };
+                })
+                .catch(function () {
+                    return { rel: rel, reason: 'request failed' };
+                });
+        })).then(function (list) {
+            return list.filter(Boolean);
+        });
+    }
+
+    /* ---- navigation between the two steps ------------------------------- */
+
+    /* There is one of these at the end of each step the user can stop on, so the
+     * handler works off the class and holds them all while the checks run. */
+    var reviewBtns = container.querySelectorAll('.ov-obj-review-btn');
+    reviewBtns.forEach(function (btn) {
+        btn.addEventListener('click', function () {
+            /* Reviewing is where problems surface: if the form is not sound the
+             * user stays on it, next to the fields to fix, rather than being sent
+             * to a summary of something that cannot be saved. */
+            reviewBtns.forEach(function (b) { b.disabled = true; });
+            runChecks()
+                .then(function (sound) {
+                    if (!sound) { return; }
+                    buildReview();
+                    fetchSimilar();
+                    var el = container.querySelector('#objCollapse3');
+                    if (el) { bootstrap.Collapse.getOrCreateInstance(el).show(); }
+                })
+                .then(function () {
+                    reviewBtns.forEach(function (b) { b.disabled = false; });
+                });
+        });
+    });
+
+    var backBtn = container.querySelector('#objPrevBtn3');
+    if (backBtn) {
+        backBtn.addEventListener('click', function () {
+            var el = container.querySelector('#objCollapse3');
+            if (el) { bootstrap.Collapse.getOrCreateInstance(el).hide(); }
+        });
+    }
+
+    var objDist = container.querySelector('#ObjectDistribution');
+    if (objDist) {
+        objDist.addEventListener('change', function () {
+            var warn = container.querySelector('#objWarningMessage');
+            if (warn) { warn.classList.toggle('d-none', parseInt(objDist.value, 10) < 3); }
+        });
+    }
+
+    /* ---- submit ---------------------------------------------------------- */
+
+    /* Land on the objects tab, the way the controller's redirect used to. Which
+     * tab was open decides how: the objects one only needs its contents
+     * refreshed, any other has to be switched to — its own shown.bs.tab is what
+     * fetches the fragment. Reloading the page instead would drop the user back
+     * on whichever tab they started from, with the new object out of sight.
+     * @return {boolean} whether the event view took care of it
+     */
+    function showObjectsTab() {
+        var btn = document.querySelector(
+            '.nav-link[data-bs-toggle="tab"][href="#tab-objects"]'
+        );
+        if (!btn) { return false; }
+        var pane = document.querySelector('#tab-objects .ajax-tab-content');
+
+        if (!btn.classList.contains('active')) {
+            /* loadAjaxContainer() serves a fragment once and then caches it on
+             * data-loaded, so a tab that had already been opened would come back
+             * exactly as it was, without the object just added. */
+            if (pane) { delete pane.dataset.loaded; }
+            bootstrap.Tab.getOrCreateInstance(btn).show();
+            return true;
+        }
+        if (reloadEventViewIndexTab()) { return true; }
+
+        if (pane && typeof loadAjaxContainer === 'function') {
+            delete pane.dataset.loaded;
+            loadAjaxContainer(pane);
+            return true;
+        }
+        return false;
+    }
+
+    /* Posting through fetch() keeps the event view standing: a rejected save
+     * leaves this form exactly as the user left it, and an accepted one reloads
+     * the objects tab rather than the whole page. */
+    var submitBtn = container.querySelector('#submitButton');
+
+    form.addEventListener('submit', function (event) {
+        if (event.defaultPrevented) { return; }
+        event.preventDefault();
+
+        if (submitBtn) { submitBtn.disabled = true; }
+        /* The same checks Review runs, because a save can be asked for without
+         * ever opening it. */
+        runChecks().then(function (sound) {
+            if (!sound) {
+                if (submitBtn) { submitBtn.disabled = false; }
+                return;
+            }
+            sendForm();
+        });
+    });
+
+    function sendForm() {
+
+        /* No `Accept: application/json` here: _isRest() reads that header, and the
+         * REST branch of add()/edit() answers in a different shape and with a
+         * 403 on a rejected save. This is the session-backed ajax branch. */
+        fetch(form.action, {
+            method: 'POST',
+            body: new FormData(form),
+            headers: { 'X-Requested-With': 'XMLHttpRequest' }
+        })
+            .then(function (r) { return r.json(); })
+            .then(function (result) {
+                if (!result || !result.saved) {
+                    if (submitBtn) { submitBtn.disabled = false; }
+                    /* csrfUseOnce spends the token this post carried, and the form
+                     * stays up, so the next attempt needs the replacement. */
+                    if (result && result.csrfToken) {
+                        var field = form.querySelector('input[name="data[_Token][key]"]');
+                        if (field) { field.value = result.csrfToken; }
+                    }
+                    showError((result && result.errors) || 'Object could not be saved.');
+                    return;
+                }
+                /* The object exists now, so its relationships can be hung off it. */
+                createRelationships(result.id, result.csrfToken).then(function (failed) {
+                    var modalEl = document.getElementById('mainModal');
+                    var modal = modalEl ? bootstrap.Modal.getInstance(modalEl) : null;
+                    if (modal) { modal.hide(); }
+
+                    showToast(result.success || 'Object saved.', 'success');
+                    /* Composed from loose attributes: those moved out of the
+                     * attributes tab, whose cached fragment would still list them. */
+                    if (form.querySelector('[name="data[Object][group_attribute_ids]"]')) {
+                        var attrsPane = document.querySelector('.ajax-tab-content[data-url*="viewAttributes"]');
+                        if (attrsPane) { delete attrsPane.dataset.loaded; }
+                    }
+                    if (failed.length) {
+                        showToast(failed.length + ' relationship'
+                            + (failed.length === 1 ? '' : 's')
+                            + ' could not be created — '
+                            + failed.map(function (f) {
+                                return f.rel.type + ': ' + f.reason;
+                            }).join('; '),
+                            'danger');
+                    }
+                    if (!showObjectsTab()) {
+                        window.location.href = baseurl + '/events/view2/'
+                            + encodeURIComponent(data.eventId) + '#tab-objects';
+                    }
+                });
+            })
+            .catch(function () {
+                if (submitBtn) { submitBtn.disabled = false; }
+                showError('Request failed — please try again.');
+            });
+    }
+}
+
+/* A full-page render of objects/add or objects/edit - a rejected save on a
+ * plain navigation, or a bookmarked URL - gets the same wiring as the modal. */
+document.addEventListener('DOMContentLoaded', function () {
+    initObjectForm(document);
+});
+
+/**
+ * A card header whose action buttons no longer fit on its first line folds
+ * them into a "⋯" dropdown instead of letting them wrap under the title.
+ *
+ * Markup contract, inside the header's flex row:
+ *   <div data-card-actions> the buttons </div>
+ *   <div class="dropdown d-none" data-card-actions-menu>
+ *       <button data-bs-toggle="dropdown">…</button>
+ *       <ul class="dropdown-menu"></ul>
+ *   </div>
+ * Elements/genericElementsBS5/Cards/actions_overflow_menu draws the second part.
+ * The menu entries are built from the buttons each time it opens, so a button
+ * enabled later (Download All) or replaced is mirrored, and a click on an entry
+ * clicks the real button.
+ */
+function initCardActionOverflow(container) {
+    (container || document).querySelectorAll('[data-card-actions]:not([data-overflow-bound])').forEach(function (actions) {
+        actions.setAttribute('data-overflow-bound', '');
+        var row = actions.parentElement;
+        var menu = row.querySelector('[data-card-actions-menu]');
+        var list = menu ? menu.querySelector('.dropdown-menu') : null;
+        var anchor = row.firstElementChild;
+        if (!menu || !list || !anchor || !actions.children.length) {
+            return;
+        }
+
+        function wrapped() {
+            var line = anchor.getBoundingClientRect().bottom - 2;
+            return Array.prototype.some.call(row.children, function (child) {
+                if (child === anchor || child.classList.contains('d-none')) {
+                    return false;
+                }
+                return child.getBoundingClientRect().top >= line;
+            });
+        }
+
+        // Laid out inline first; folded only if that pushes something down.
+        function update() {
+            actions.classList.remove('d-none');
+            menu.classList.add('d-none');
+            if (wrapped()) {
+                actions.classList.add('d-none');
+                menu.classList.remove('d-none');
+            }
+        }
+
+        menu.addEventListener('show.bs.dropdown', function () {
+            list.replaceChildren();
+            Array.prototype.forEach.call(actions.querySelectorAll('button, a'), function (source) {
+                var li = document.createElement('li');
+                var item = document.createElement('button');
+                item.type = 'button';
+                item.className = 'dropdown-item d-flex align-items-center gap-2';
+                item.innerHTML = source.innerHTML;
+                item.disabled = source.disabled || source.classList.contains('disabled');
+                if (source.title) {
+                    item.title = source.title;
+                }
+                item.addEventListener('click', function () {
+                    source.click();
+                });
+                li.appendChild(item);
+                list.appendChild(li);
+            });
+        });
+
+        var lastWidth = null;
+        if (typeof ResizeObserver === 'function') {
+            new ResizeObserver(function (entries) {
+                var width = Math.round(entries[0].contentRect.width);
+                if (width !== lastWidth) {
+                    lastWidth = width;
+                    update();
+                }
+            }).observe(row);
+        } else {
+            window.addEventListener('resize', update);
+        }
+        update();
+    });
+}
+window.initCardActionOverflow = initCardActionOverflow;
+
+document.addEventListener('DOMContentLoaded', function () {
+    initCardActionOverflow(document);
+});
+
+/**
+ * "Show on map" for geolocation / gpx / uav / geojson objects — the vanilla
+ * twin of the default theme's openMapPopover() in misp.js, which a BS5 page
+ * cannot load. A [data-geo-map] button (Elements/Objects/object_map_button)
+ * opens the shared modal; Leaflet (webroot/js/leaflet.js) is fetched on the
+ * first map only.
+ */
+var leafletLoading = null;
+function loadLeaflet() {
+    if (window.L && window.L.map) {
+        return Promise.resolve(window.L);
+    }
+    if (leafletLoading) {
+        return leafletLoading;
+    }
+    var root = (typeof baseurl !== 'undefined' ? baseurl : '');
+    /* Both, before the first map: Leaflet sizes its panes and finds its marker
+       images (css/images/) from the stylesheet. */
+    function inject(tag, attrs) {
+        return new Promise(function (resolve, reject) {
+            var el = document.createElement(tag);
+            Object.keys(attrs).forEach(function (key) { el[key] = attrs[key]; });
+            el.onload = resolve;
+            el.onerror = reject;
+            document.head.appendChild(el);
+        });
+    }
+    leafletLoading = Promise.all([
+        inject('link', { rel: 'stylesheet', href: root + '/css/leaflet.css' }),
+        inject('script', { src: root + '/js/leaflet.js' })
+    ]).then(function () {
+        return window.L;
+    }, function (error) {
+        leafletLoading = null;
+        throw error;
+    });
+    return leafletLoading;
+}
+
+function drawGpx(L, map, xmlString) {
+    var gpx = new DOMParser().parseFromString(xmlString, 'application/xml');
+    var bounds = L.latLngBounds();
+    var counts = { waypoints: 0, tracks: 0, routes: 0 };
+    function point(el) {
+        var lat = parseFloat(el.getAttribute('lat'));
+        var lon = parseFloat(el.getAttribute('lon'));
+        return (isNaN(lat) || isNaN(lon)) ? null : L.latLng(lat, lon);
+    }
+    gpx.querySelectorAll('wpt').forEach(function (wpt) {
+        var ll = point(wpt);
+        if (!ll) { return; }
+        var marker = L.marker(ll).addTo(map);
+        var name = wpt.querySelector('name');
+        if (name && name.textContent) { marker.bindPopup(escapeHtml(name.textContent)); }
+        bounds.extend(ll);
+        counts.waypoints++;
+    });
+    function line(points, colour) {
+        var latlngs = [];
+        points.forEach(function (pt) {
+            var ll = point(pt);
+            if (ll) { latlngs.push(ll); bounds.extend(ll); }
+        });
+        if (latlngs.length) { L.polyline(latlngs, { color: colour, weight: 3 }).addTo(map); }
+        return latlngs.length > 0;
+    }
+    gpx.querySelectorAll('trk').forEach(function (trk) {
+        var drawn = false;
+        trk.querySelectorAll('trkseg').forEach(function (seg) {
+            drawn = line(seg.querySelectorAll('trkpt'), '#3388ff') || drawn;
+        });
+        if (drawn) { counts.tracks++; }
+    });
+    gpx.querySelectorAll('rte').forEach(function (rte) {
+        if (line(rte.querySelectorAll('rtept'), '#ff3333')) { counts.routes++; }
+    });
+    if (bounds.isValid()) { map.fitBounds(bounds, { padding: [20, 20] }); }
+    return counts;
+}
+
+function openGeoMap(button) {
+    var modalEl = document.getElementById('mainModal');
+    var modalBody = document.getElementById('mainModalBody');
+    if (!modalEl || !modalBody) { return; }
+    var kind = button.dataset.geoMap;
+    var title = button.dataset.title || 'map';
+
+    modalBody.innerHTML =
+        '<div class="d-flex align-items-center gap-2 px-3 py-2 border-bottom">'
+        + '<i class="fas fa-map-location-dot text-primary"></i>'
+        + '<span class="fw-semibold me-auto">' + escapeHtml(title) + '</span>'
+        + '<button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>'
+        + '</div>'
+        + '<div data-geo-canvas style="height:60vh;min-height:320px;"></div>'
+        + '<div class="small text-body-secondary px-3 py-2 border-top" data-geo-info>…</div>';
+    var canvas = modalBody.querySelector('[data-geo-canvas]');
+    var info = modalBody.querySelector('[data-geo-info]');
+    setModalSize('lg', modalEl.querySelector('.modal-dialog'));
+
+    var map = null;
+    modalEl.addEventListener('hidden.bs.modal', function () {
+        if (map) { map.remove(); map = null; }
+    }, { once: true });
+    modalEl.addEventListener('shown.bs.modal', function () {
+        loadLeaflet().then(function (L) {
+            map = L.map(canvas);
+            L.tileLayer(button.dataset.tileUrl + '/hot/{z}/{x}/{y}.png', {
+                maxZoom: 21,
+                maxNativeZoom: 20,
+                attribution: '&copy; OpenStreetMap contributors'
+            }).addTo(map);
+            map.setView([0, 0], 2);
+
+            if (kind === 'point') {
+                var lat = parseFloat(button.dataset.lat);
+                var lon = parseFloat(button.dataset.lon);
+                var radiusKm = parseFloat(button.dataset.radius);
+                if (isNaN(lat) || isNaN(lon)) { info.textContent = 'Invalid coordinates'; return; }
+                map.setView([lat, lon], 14);
+                L.marker([lat, lon]).addTo(map);
+                var text = lat.toFixed(6) + ', ' + lon.toFixed(6);
+                if (!isNaN(radiusKm) && radiusKm > 0) {
+                    var circle = L.circle([lat, lon], {
+                        radius: radiusKm * 1000, color: '#3388ff', fillColor: '#3388ff', fillOpacity: 0.15, weight: 2
+                    }).addTo(map);
+                    map.fitBounds(L.latLng(lat, lon).toBounds(radiusKm * 2000), { padding: [20, 20] });
+                    text += ' · radius ' + radiusKm + ' km';
+                    var RadiusToggle = L.Control.extend({
+                        options: { position: 'topleft' },
+                        onAdd: function () {
+                            var box = L.DomUtil.create('div', 'leaflet-bar leaflet-control');
+                            var link = L.DomUtil.create('a', '', box);
+                            link.href = '#';
+                            link.title = 'Toggle radius';
+                            link.innerHTML = '<i class="fas fa-circle-dot"></i>';
+                            L.DomEvent.disableClickPropagation(box);
+                            L.DomEvent.on(link, 'click', function (e) {
+                                L.DomEvent.preventDefault(e);
+                                if (map.hasLayer(circle)) { map.removeLayer(circle); link.style.opacity = '.5'; }
+                                else { map.addLayer(circle); link.style.opacity = '1'; }
+                            });
+                            return box;
+                        }
+                    });
+                    map.addControl(new RadiusToggle());
+                }
+                info.textContent = text;
+                return;
+            }
+
+            var root = (typeof baseurl !== 'undefined' ? baseurl : '');
+            info.textContent = 'Loading…';
+            fetch(root + '/attributes/download/' + encodeURIComponent(button.dataset.attachmentId), { credentials: 'same-origin' })
+                .then(function (response) {
+                    if (!response.ok) { throw new Error(response.status); }
+                    return response.text();
+                })
+                .then(function (body) {
+                    if (!map) { return; }
+                    if (kind === 'gpx') {
+                        var counts = drawGpx(L, map, body);
+                        var parts = [];
+                        if (counts.tracks) { parts.push(counts.tracks + ' track(s)'); }
+                        if (counts.routes) { parts.push(counts.routes + ' route(s)'); }
+                        if (counts.waypoints) { parts.push(counts.waypoints + ' waypoint(s)'); }
+                        info.textContent = parts.length ? parts.join(', ') : 'No geographic data found';
+                        return;
+                    }
+                    var geojson = JSON.parse(body);
+                    var features = 0;
+                    var layer = L.geoJSON(geojson, {
+                        onEachFeature: function (feature, featureLayer) {
+                            features++;
+                            var props = feature.properties || {};
+                            var lines = Object.keys(props).filter(function (key) { return props[key] !== null; })
+                                .map(function (key) { return '<strong>' + escapeHtml(key) + '</strong>: ' + escapeHtml(String(props[key])); });
+                            if (lines.length) { featureLayer.bindPopup(lines.join('<br>')); }
+                        }
+                    }).addTo(map);
+                    if (layer.getBounds().isValid()) { map.fitBounds(layer.getBounds(), { padding: [20, 20] }); }
+                    info.textContent = features + ' feature(s)';
+                })
+                .catch(function () {
+                    info.textContent = 'Could not load the attachment.';
+                });
+        }).catch(function () {
+            info.textContent = 'Could not load the map library.';
+        });
+    }, { once: true });
+
+    bootstrap.Modal.getOrCreateInstance(modalEl).show();
+}
+window.openGeoMap = openGeoMap;
+
+document.addEventListener('click', function (event) {
+    var button = event.target.closest('[data-geo-map]');
+    if (button) {
+        event.preventDefault();
+        event.stopPropagation();
+        openGeoMap(button);
+    }
+});

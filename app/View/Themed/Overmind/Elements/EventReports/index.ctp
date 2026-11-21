@@ -1,0 +1,228 @@
+<?php
+
+// Extended / extending event view: a report can belong to any event of the
+// merged set, so a foreign one wears its origin event's accent.
+$extensionEvents = $extensionEvents ?? [];
+$inExtensionView = count($extensionEvents) > 1;
+$reportOrigin = function ($row) use ($extensionEvents) {
+    $originId = (int)Hash::get($row, 'EventReport.event_id');
+    $origin = $extensionEvents[$originId] ?? null;
+    return ($origin === null || $origin['role'] === 'self') ? null : $origin;
+};
+
+// A1 per report row: the AI module writes its summary on top of the report.
+// Offered while the AI services are on and the user may run them; the
+// action itself checks the report's edit rights.
+$aiSummarizeReport = Configure::read('Plugin.AI_services_enable')
+    && $this->Acl->canAccess('eventReports', 'aiSummarize');
+$hasActiveReport = false;
+foreach ($reports as $row) {
+    if (empty($row['EventReport']['deleted'])) {
+        $hasActiveReport = true;
+        break;
+    }
+}
+
+$fields = [
+    [
+        'element' => 'checkbox',
+        'data_path' => 'EventReport.id',
+        'card_section' => 'selector',
+    ],
+    [
+        'name' => __('ID'),
+        'sort' => 'EventReport.id',
+        'data_path' => 'EventReport.id',
+        'element' => 'id',
+        'url' => $baseurl . '/event_reports/view/%id%',
+        'card_section' => 'top',
+        'display_in' => ['table', 'card']
+    ],
+    [
+        'name' => __('Name'),
+        'sort' => 'EventReport.name',
+        'data_path' => 'EventReport.name',
+        'element' => 'report_value',
+        'card_section' => 'title',
+        'display_in' => ['table', 'card']
+    ],
+    [
+        'name' => __('Event'),
+        'sort' => 'Event.id',
+        'data_path' => 'Event.id, Event.info',
+        'element' => 'event',
+        'url' => $baseurl . '/events/view2/%event_id%',
+        'card_section' => 'links',
+        'display_in' => ['table', 'card']
+    ],
+    [
+        'name' => __('Owner Org'),
+        'sort' => 'Event.org_id',
+        'data_path' => 'Event.Org',
+        'element' => 'organisation',
+        'card_section' => 'meta',
+        'display_in' => ['table', 'card']
+    ],
+    [
+        'name' => __('Last Modified'),
+        'data_path' => 'EventReport.timestamp',
+        'element' => 'datetime',
+        'card_section' => 'meta',
+        'display_in' => ['card']
+    ],
+    [
+        'name' => __('Analyst data'),
+        'element' => 'analyst_data_badges',
+        'note_path' => 'EventReport.Note',
+        'opinion_path' => 'EventReport.Opinion',
+        'relationship_path' => 'EventReport.Relationship',
+        'relationship_inbound_path' => 'EventReport.RelationshipInbound',
+        'uuid_path' => 'EventReport.uuid',
+        'object_type' => 'EventReport',
+        'card_section' => 'meta',
+        'display_in' => ['table', 'card'],
+    ],
+    [
+        'name' => __('Actions'),
+        'element' => 'row_actions',
+        'data_path' => 'EventReport.id',
+        'card_section' => 'extra',
+        'display_in' => ['table', 'card'],
+        'actions' => [
+            [
+                'type' => 'navigate',
+                'label' => __('View'),
+                'icon' => 'eye',
+                'url' => $baseurl . '/event_reports/view/%id%',
+            ],
+            [
+                'type' => 'modal',
+                'label' => __('Edit'),
+                'icon' => 'pen-to-square',
+                'url' => $baseurl . '/event_reports/edit/%id%',
+                'requirement' => $me['Role']['perm_add']
+            ],
+            [
+                'type' => 'modal',
+                'label' => __('Summarise with AI'),
+                'icon' => 'robot',
+                'url' => $baseurl . '/event_reports/aiSummarize/%id%',
+                'requirement' => function (array $row) use ($aiSummarizeReport) {
+                    return $aiSummarizeReport && empty($row['EventReport']['deleted']);
+                },
+            ],
+            [
+                'type' => 'modal',
+                'label' => __('Delete'),
+                'icon' => 'trash',
+                'url' => $baseurl . '/event_reports/deleteSelection/%id%',
+                'class' => 'text-danger',
+                'requirement' => $me['Role']['perm_add']
+            ],
+            [
+                'type' => 'divider',
+                'requirement' => !empty($me['Role']['perm_analyst_data'])
+            ],
+            [
+                'type' => 'modal',
+                'label' => __('Add note'),
+                'icon' => 'text-primary misp-icon misp-icon-analyst-note misp-simple',
+                'url' => $baseurl . '/analystData/add/Note/%uuid%/EventReport',
+                'url_params_data_paths' => ['uuid' => 'EventReport.uuid'],
+                'requirement' => !empty($me['Role']['perm_analyst_data'])
+            ],
+            [
+                'type' => 'modal',
+                'label' => __('Add opinion'),
+                'icon' => 'text-success misp-icon misp-icon-analyst-opinion misp-simple',
+                'url' => $baseurl . '/analystData/add/Opinion/%uuid%/EventReport',
+                'url_params_data_paths' => ['uuid' => 'EventReport.uuid'],
+                'requirement' => !empty($me['Role']['perm_analyst_data'])
+            ],
+            [
+                'type' => 'modal',
+                'label' => __('Add relationship'),
+                'icon' => 'text-correlation fas fa-diagram-project',
+                'url' => $baseurl . '/analystData/add/Relationship/%uuid%/EventReport',
+                'url_params_data_paths' => ['uuid' => 'EventReport.uuid'],
+                'requirement' => !empty($me['Role']['perm_analyst_data'])
+            ]
+        ]
+    ],
+];
+
+$eventId = (int)($event['Event']['id'] ?? 0);
+$aiEnabled = $eventId
+    && Configure::read('Plugin.AI_services_enable')
+    && $this->Acl->canModifyEvent($event);
+$aiMenuItems = [];
+// The AI module writes its summary of the event into a new report.
+if ($aiEnabled && $this->Acl->canAccess('events', 'aiSummarize')) {
+    $aiMenuItems[] = [
+        'url' => $baseurl . '/events/aiSummarize/' . $eventId,
+        'onclick' => "event.preventDefault(); openModal('" . $baseurl . '/events/aiSummarize/' . $eventId . "', 'md');",
+        'icon' => 'fas fa-robot',
+        'label' => __('Summarise with AI'),
+        'title' => __('The AI module writes a summary of the event into a new report'),
+    ];
+}
+// Proposes attributes and objects from the reports, reviewed before they are
+// added — so only offered with a non-deleted report to read.
+if ($aiEnabled && $hasActiveReport
+    && $this->Acl->canAccess('events', 'aiExtractIndicators')) {
+    $aiMenuItems[] = [
+        'url' => $baseurl . '/events/aiExtractIndicators/' . $eventId,
+        'onclick' => "event.preventDefault(); openModal('" . $baseurl . '/events/aiExtractIndicators/' . $eventId . "', 'md');",
+        'icon' => 'fas fa-magnifying-glass',
+        'label' => __('Extract indicators with AI'),
+        'title' => __('The AI module reads the reports and proposes attributes and objects, reviewed before they are added'),
+    ];
+}
+
+echo $this->element('genericElementsBS5/IndexTable/scaffold', [
+    'scaffold_data' => [
+        'data' => [
+            'data' => $reports,
+            'cards_per_row' => ['' => 1, 'lg' => 2, 'xxxxl' => 3],
+            'filter_bar' => [
+                'pull' => 'right',
+                'children' => [
+                    [
+                        'type' => 'search',
+                        'button' => 'Search',
+                        'placeholder' => 'Search by name or by content',
+                        'name'        => 'value',
+                        'mode'        => 'legacy',
+                    ],
+                    [
+                        'type' => 'menu',
+                        'label' => __('AI'),
+                        'icon' => 'fas fa-robot me-1',
+                        'items' => $aiMenuItems,
+                    ],
+                ],
+                'delete' => '/deleteSelection',
+            ],
+            'fields' => $fields,
+            'primary_id_path' => 'EventReport.id',
+            'row_class_callable' => function ($row) use ($inExtensionView, $reportOrigin) {
+                return ($inExtensionView && $reportOrigin($row) !== null)
+                    ? 'evt-extension-row'
+                    : '';
+            },
+            'row_style_callable' => function ($row) use ($inExtensionView, $reportOrigin) {
+                $origin = $inExtensionView ? $reportOrigin($row) : null;
+                if ($origin === null) {
+                    return '';
+                }
+                return sprintf(
+                    '--extension-tint:%s;--extension-accent:%s;',
+                    $origin['palette']['sectionBg'],
+                    $origin['palette']['badgeBorder']
+                );
+            },
+            'row_dblclick_url' => $baseurl . '/event_reports/view/%id%',
+        ]
+    ],
+    'item_url' => '/event_reports'
+]);

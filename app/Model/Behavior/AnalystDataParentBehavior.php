@@ -67,7 +67,11 @@ class AnalystDataParentBehavior extends ModelBehavior
         $data = [];
         foreach ($types as $type) {
             $this->{$type} = ClassRegistry::init($type);
-            $this->{$type}->fetchRecursive = !empty($model->includeAnalystDataRecursive);
+            // The nested path does its own depth-5 recursion below, so afterFind() must not also
+            // recurse - it would memoise the uuids in fetchedUUIDFromRecursion and make the
+            // deeper call below short-circuit. Reset explicitly: the model is a registry
+            // singleton and may still be flagged from an earlier fetch in this request.
+            $this->{$type}->fetchRecursive = false;
             $temp = $this->{$type}->fetchForUuid($object['uuid'], $this->__currentUser);
             if (!empty($temp)) {
                 foreach ($temp as $k => $temp_element) {
@@ -82,7 +86,9 @@ class AnalystDataParentBehavior extends ModelBehavior
     }
 
     public function fetchAnalystDataBulk(Model $model, array $uuids, array $types = ['Note', 'Opinion', 'Relationship']) {
-        $uuids = array_chunk($uuids, 100000);
+        // Keep the per-query IN-list bounded so the optimizer stays on the object_uuid index
+        // and parse cost stays low. 1000 is comfortable for MySQL/MariaDB defaults.
+        $uuids = array_chunk($uuids, 1000);
         if (empty($this->__currentUser)) {
             $user_id = Configure::read('CurrentUserId');
             $this->User = ClassRegistry::init('User');
@@ -104,8 +110,9 @@ class AnalystDataParentBehavior extends ModelBehavior
 
     public function attachAnalystDataBulk(Model $model, array $objects, array $types = ['Note', 'Opinion', 'Relationship'])
     {
-        $uuids = [];
-        $objects = array_chunk($objects, 100000, true);
+        // Keep the per-query IN-list bounded so the optimizer stays on the object_uuid index
+        // and parse cost stays low. 1000 is comfortable for MySQL/MariaDB defaults.
+        $objects = array_chunk($objects, 1000, true);
         if (empty($this->__currentUser)) {
             $user_id = Configure::read('CurrentUserId');
             $this->User = ClassRegistry::init('User');
@@ -114,6 +121,9 @@ class AnalystDataParentBehavior extends ModelBehavior
             }
         }
         foreach ($objects as $chunk => $chunked_objects) {
+            // Reset per chunk — previously $uuids was declared outside the loop and accumulated
+            // across iterations, growing the IN list on every chunk.
+            $uuids = [];
             foreach ($chunked_objects as $k => $object) {
                 if (!empty($object['uuid'])) {
                     $uuids[] = $object['uuid'];
@@ -132,7 +142,8 @@ class AnalystDataParentBehavior extends ModelBehavior
                         if (!empty($temp[$object['uuid']])) {
                             foreach ($temp[$object['uuid']][$type] as $analystData) {
                                 $objects[$chunk][$k][$type][] = $analystData;
-                                $childNotesAndOpinions = $this->{$type}->fetchChildNotesAndOpinions($this->__currentUser, $analystData, $this->__isRest, 1);
+                                // Always request the flat (REST-shaped) child list: to flatten children into sibling arrays 
+                                $childNotesAndOpinions = $this->{$type}->fetchChildNotesAndOpinions($this->__currentUser, $analystData, true, 1);
                                 if (!empty($childNotesAndOpinions)) {
                                     foreach ($childNotesAndOpinions as $item) {
                                         foreach ($item as $childType => $childElement) {

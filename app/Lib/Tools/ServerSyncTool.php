@@ -16,7 +16,8 @@ class ServerSyncTool
         PERM_GALAXY_EDITOR = 'perm_galaxy_editor',
         PERM_ANALYST_DATA = 'perm_analyst_data',
         FEATURE_SIGHTING_REST_SEARCH = 'sighting_rest',
-        FEATURE_FAST_CACHING = 'fast_caching';
+        FEATURE_FAST_CACHING = 'fast_caching',
+        FEATURE_COLLECTION_SYNC = 'collection_sync';
 
     /** @var array */
     private $server;
@@ -264,14 +265,12 @@ class ServerSyncTool
             throw new RuntimeException("Remote server do not support analyst data");
         }
 
-        $params = [
-            'uuid' => $uuids,
-        ];
-
-        $url = '/analyst_data/index/' . $type;
-        $url .= $this->createParams($params);
-        $url .= '.json';
-        return $this->get($url);
+        // Send the UUID list in the POST body rather than the URL. As a GET
+        // every UUID rode in the request line as a named parameter, so a large
+        // batch overran the web server limit and the pull failed with 414. The
+        // analyst_data/index action already harvests its filters (uuid among
+        // them) from a POST body, the same shape fetchIndexMinimal() uses.
+        return $this->post('/analyst_data/index/' . $type, ['uuid' => $uuids]);
     }
 
     /**
@@ -285,6 +284,86 @@ class ServerSyncTool
     {
         $logMessage = "Pushing Analyst Data #{$analystData[$type]['uuid']} to Server #{$this->serverId()}";
         return $this->post('/analyst_data/pushAnalystData', $analystData, $logMessage);
+    }
+
+    /**
+     * @param array $rules
+     * @return HttpSocketResponseExtended
+     * @throws HttpSocketHttpException
+     * @throws HttpSocketJsonException
+     * @throws InvalidArgumentException
+     */
+    public function collectionIndexMinimal(array $rules)
+    {
+        if (!$this->isSupported(self::FEATURE_COLLECTION_SYNC)) {
+            throw new RuntimeException("Remote server does not support collection synchronisation");
+        }
+
+        return $this->post('/collections/indexMinimal', $rules);
+    }
+
+    /**
+     * @param array $uuids
+     * @return HttpSocketResponseExtended
+     * @throws HttpSocketJsonException
+     * @throws HttpSocketHttpException
+     * @throws InvalidArgumentException
+     */
+    public function fetchCollections(array $uuids)
+    {
+        if (!$this->isSupported(self::FEATURE_COLLECTION_SYNC)) {
+            throw new RuntimeException("Remote server does not support collection synchronisation");
+        }
+
+        $params = [
+            'uuid' => $uuids,
+        ];
+
+        $url = '/collections/index';
+        $url .= $this->createParams($params);
+        $url .= '.json';
+        return $this->get($url);
+    }
+
+    /**
+     * Push dedup: send the local push candidates ({uuid: modified}) to the remote, which
+     * replies with the subset of UUIDs it actually wants (missing locally or strictly older
+     * there). Mirrors filterAnalystDataForPush (no type dimension).
+     *
+     * @param array $candidates uuid => modified map of collections eligible for push.
+     * @return HttpSocketResponseExtended The UUIDs the remote wants (a flat list).
+     * @throws HttpSocketHttpException
+     * @throws HttpSocketJsonException
+     * @throws InvalidArgumentException
+     */
+    public function filterCollectionsForPush(array $candidates)
+    {
+        if (!$this->isSupported(self::FEATURE_COLLECTION_SYNC)) {
+            throw new RuntimeException("Remote server does not support collection synchronisation");
+        }
+
+        return $this->post('/collections/filterCollectionsForPush', $candidates);
+    }
+
+    /**
+     * Upload a single collection (with its Orgc / SharingGroup / CollectionElement corpus) to
+     * the remote's push-receive endpoint, which feeds it to the shared Collection::captureCollection
+     * sink. Mirrors pushAnalystData — the caller (Collection::push) loops per collection.
+     *
+     * @param array $collection A collection payload nested under the 'Collection' key.
+     * @return HttpSocketResponseExtended
+     * @throws HttpSocketHttpException
+     * @throws HttpSocketJsonException
+     * @throws InvalidArgumentException
+     */
+    public function pushCollection(array $collection)
+    {
+        if (!$this->isSupported(self::FEATURE_COLLECTION_SYNC)) {
+            throw new RuntimeException("Remote server does not support collection synchronisation");
+        }
+
+        $logMessage = "Pushing Collection #{$collection['Collection']['uuid']} to Server #{$this->serverId()}";
+        return $this->post('/collections/captureCollection', $collection, $logMessage);
     }
 
     /**
@@ -493,6 +572,23 @@ class ServerSyncTool
     }
 
     /**
+     * 2.5 and 3.x sync with each other across the major version.
+     *
+     * @param string $localVersion
+     * @param string $remoteVersion
+     * @return bool
+     */
+    public static function isCrossMajorCompatible($localVersion, $remoteVersion)
+    {
+        $local = array_map('intval', explode('.', $localVersion));
+        $remote = array_map('intval', explode('.', $remoteVersion));
+        $is25 = function (array $version) {
+            return $version[0] === 2 && isset($version[1]) && $version[1] === 5;
+        };
+        return ($is25($local) && $remote[0] === 3) || ($local[0] === 3 && $is25($remote));
+    }
+
+    /**
      * @param string $flag
      * @return bool
      * @throws HttpSocketJsonException
@@ -510,17 +606,13 @@ class ServerSyncTool
             case self::FEATURE_FILTER_SIGHTINGS:
                 return isset($info['filter_sightings']) && $info['filter_sightings'];
             case self::FEATURE_ORG_RULE:
-                $version = explode('.', $info['version']);
-                return $version[0] == 2 && (($version[1] == 4 && $version[2] > 123) || ($version[1] == 5));
+                return version_compare($info['version'], '2.4.124', '>=');
             case self::FEATURE_PROPOSALS:
-                $version = explode('.', $info['version']);
-                return $version[0] == 2 && (($version[1] == 4 && $version[2] >= 111)  || ($version[1] == 5));
+                return version_compare($info['version'], '2.4.111', '>=');
             case self::FEATURE_POST_TEST:
-                $version = explode('.', $info['version']);
-                return $version[0] == 2 && (($version[1] == 4 && $version[2] > 68) || ($version[1] == 5));
+                return version_compare($info['version'], '2.4.69', '>=');
             case self::FEATURE_PROTECTED_EVENT:
-                $version = explode('.', $info['version']);
-                return $version[0] == 2 && (($version[1] == 4 && $version[2] > 155) || ($version[1] == 5));
+                return version_compare($info['version'], '2.4.156', '>=');
             case self::FEATURE_EDIT_OF_GALAXY_CLUSTER:
                 return isset($info['perm_galaxy_editor']);
             case self::PERM_SYNC:
@@ -530,11 +622,12 @@ class ServerSyncTool
             case self::PERM_ANALYST_DATA:
                 return isset($info['perm_analyst_data']) && $info['perm_analyst_data'];
             case self::FEATURE_SIGHTING_REST_SEARCH:
-                $version = explode('.', $info['version']);
-                return $version[0] == 2 && (($version[1] == 4 && $version[2] > 164) || ($version[1] == 5));
+                return version_compare($info['version'], '2.4.165', '>=');
             case self::FEATURE_FAST_CACHING:
                 $version = explode('.', $info['version']);
                 return $version[0] > 2 || ($version[0] == 2 && $version[1] == 5 && $version[2] >= 33);
+            case self::FEATURE_COLLECTION_SYNC:
+                return isset($info['collection_sync']) && $info['collection_sync'];
             default:
                 throw new InvalidArgumentException("Invalid flag `$flag` provided");
         }

@@ -1,5 +1,6 @@
 <?php
 App::uses('AppController', 'Controller');
+App::uses('Log', 'Model');
 
 /**
  * @property Log $Log
@@ -62,6 +63,22 @@ class LogsController extends AppController
             }
         }
         $filters = array_filter($filters, fn($value) => !empty($value));
+
+        // _harvestParameters() merges every query parameter in, paramArray or
+        // not, so the search term would otherwise be read back as a column name.
+        unset($filters['quickFilter']);
+
+        // Free-text search box: one term, run against the whole index rather
+        // than against the rows of the current page. `email` and `org` are
+        // denormalised onto the log row, so they need no id lookup here.
+        $quickFilter = $this->IndexFilter->quickFilterTerm();
+        $quickFilterConditions = $this->IndexFilter->quickFilterConditions($quickFilter, 'Log', [
+            'like' => ['title', 'change', 'description', 'model', 'action', 'email', 'org'],
+            'numeric' => ['model_id'],
+            'ip_like' => Configure::read('MISP.log_client_ip') ? 'ip' : null,
+        ]);
+        $this->set('quickFilter', $quickFilter);
+
         if ($this->_isRest()) {
             if ($filters === false) {
                 return $exception;
@@ -102,6 +119,9 @@ class LogsController extends AppController
                     $conditions['Log.user_id'] = $this->Auth->user('id');
                 }
             }
+            if (!empty($quickFilterConditions)) {
+                $conditions['AND'][] = $quickFilterConditions;
+            }
             $params = array(
                 'conditions' => $conditions,
                 'recursive' => -1
@@ -135,20 +155,67 @@ class LogsController extends AppController
         if (isset($this->params['named']['filter']) && in_array($this->params['named']['filter'], array_keys($validFilters))) {
             $this->paginate['conditions']['Log.action'] = $validFilters[$this->params['named']['filter']]['values'];
         }
+        // Free-text fields use partial matching (LIKE) for the search
+        $likeFields = ['title', 'change', 'email', 'org', 'description'];
         foreach ($filters as $key => $value) {
             if ($key == 'page' || $key == 'limit' || $key == 'search_token') { // These should not be part of the condition parameter
                 continue;
             }
             if ($key === 'created') {
-                $key = 'created >=';
+                $this->paginate['conditions']['Log.created >='] = $value;
+                continue;
             }
-            if (in_array($key, $paramArray)) {
+            if (in_array($key, $likeFields, true) && is_string($value) && $value !== '') {
+                $this->paginate['conditions']["LOWER(Log.$key) LIKE"] = '%' . strtolower($value) . '%';
+            } elseif (in_array($key, $paramArray, true)) {
                 $this->paginate['conditions']["Log.$key"] = $value;
             }
         }
+        if (!empty($quickFilterConditions)) {
+            $this->paginate['conditions']['AND'][] = $quickFilterConditions;
+        }
         $this->set('validFilters', $validFilters);
         $this->set('filter', $filters);
-        $this->set('data', $this->paginate());
+
+        // Options behind the Action and Model dropdowns. Both come from the
+        // model rather than from a DISTINCT over the table: `logs` is indexed
+        // on its primary key alone, so scanning it to list a dropdown would
+        // cost more than the query the dropdown is there to build.
+        $actions = Log::ACTIONS;
+        sort($actions);
+        $this->set('actions', $actions);
+        $models = $this->Log->searchModelList;
+        sort($models);
+        $this->set('models', $models);
+
+        $data = $this->paginate();
+
+        // If no limit is set, we retrieve the total and set the headerCountApprox flag to true, so the header shows an estimated count
+        $activeFilterKeys = array_diff(array_keys($filters), ['page', 'limit', 'search_token']);
+        if (!empty($activeFilterKeys) || $quickFilter !== '' || isset($this->params['named']['filter'])) {
+            $this->set('headerCount', (int)$this->Log->find('count', [
+                'conditions' => $this->paginate['conditions'],
+                'recursive' => -1,
+            ]));
+            $this->set('headerCountApprox', false);
+        } else {
+            $this->set('headerCount', (int)$this->Log->tableRows());
+            $this->set('headerCountApprox', true);
+        }
+
+        // Light pagination (prev/next only)
+        App::uses('CustomPaginationTool', 'Tools');
+        $curPage = (int)($this->request->params['named']['page'] ?? 1);
+        $pagingOptions = ['page' => $curPage, 'limit' => (int)($this->paginate['limit'] ?? 60)];
+        $paging = (new CustomPaginationTool())->createPaginationRules($data, $pagingOptions, 'Log');
+        if (count($data) >= $pagingOptions['limit']) {
+            $paging['nextPage'] = true;
+            $paging['prevPage'] = $curPage > 1;
+            $paging['current'] = count($data);
+        }
+        $this->request->params['paging']['Log'] = $paging;
+
+        $this->set('data', $data);
         $this->set('paramArray', $paramArray);
         $this->set('passedArgsArray', $passedArgs);
         $this->set('menuData', ['menuList' => 'logs', 'menuItem' => 'index']);
@@ -349,8 +416,12 @@ class LogsController extends AppController
     public function returnDates($org = 'all')
     {
         if (!$this->Auth->user('Role')['perm_sharing_group'] && !empty(Configure::read('Security.hide_organisation_index_from_users'))) {
-            if ($org !== 'all' && $org !== $this->Auth->user('Organisation')['name']) {
-                throw new MethodNotAllowedException('Invalid organisation.');
+            if ($org !== 'all') {
+                $this->loadModel('Organisation');
+                $requested = $this->Organisation->fetchOrg($org);
+                if (empty($requested) || (int)$requested['id'] !== (int)$this->Auth->user('org_id')) {
+                    throw new MethodNotAllowedException('Invalid organisation.');
+                }
             }
         }
         $data = $this->Log->returnDates($org);
@@ -360,9 +431,7 @@ class LogsController extends AppController
 
     public function pruneUpdateLogs()
     {
-        if (!$this->request->is('post')) {
-            //throw new MethodNotAllowedException('This functionality is only accessible via POST requests');
-        }
+        $this->request->allowMethod(['post']);
         $this->Log->pruneUpdateLogsRouter($this->Auth->user());
         if (Configure::read('MISP.background_jobs')) {
             $this->Flash->success('The pruning job is queued.');

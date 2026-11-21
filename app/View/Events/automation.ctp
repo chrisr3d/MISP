@@ -8,14 +8,14 @@
     To make this functionality available for automated tools an authentication key is used.');?>
     <br /><?php echo __('You can use the <a href="' . $baseurl . '/api/rest">REST client</a> to test your API queries against your MISP and export the resulting tuned queries as curl or python scripts.');?>
     <strong><?php echo __('Make sure you keep your API key secret as it gives access to all of the data that you normally have access to in MISP.');?></strong>
-    <?php echo __('You can view the <a href="' . $baseurl . '/automation/1">old MISP automation page</a>.');?>
+    <?php echo __('You can view the <a href="' . $baseurl . '/events/automation/1">old MISP automation page</a>.');?>
     </p>
     <span>
         <?php
             if (empty(Configure::read('Security.advanced_authkeys'))) {
                 echo __(
                     'Your current key is: <code>%s</code>. You can %s this key.',
-                    $api_key,
+                    h($api_key),
                     $this->Form->postLink(
                         __('reset'),
                         array('controller' => 'users', 'action' => 'resetauthkey', 'me'),
@@ -90,7 +90,7 @@
         $headers = array(
             'Accept: application/json',
             'Content-type: application/json',
-            'Authorization: ' . $api_key
+            'Authorization: ' . h($api_key)
         );
         $headers = implode("\n", $headers);
         $body = json_encode(
@@ -358,7 +358,7 @@
     <b>URL</b>: <?php echo $baseurl.'/events/index'; ?><br />
     <b>Headers</b>:<br />
     <pre><?php
-        echo 'Authorization: ' . $api_key . PHP_EOL;
+        echo 'Authorization: ' . h($api_key) . PHP_EOL;
         echo 'Accept: application/json' . PHP_EOL;
         echo 'Content-type: application/json';
     ?></pre>

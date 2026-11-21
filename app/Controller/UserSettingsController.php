@@ -23,16 +23,35 @@ class UserSettingsController extends AppController
             'UserSetting.id' => 'DESC'
         ),
         'contain' => array(
-            'User.id',
-            'User.email'
+            'User' => array(
+                'fields' => array('id', 'email', 'org_id', 'role_id'),
+                'Organisation' => array(
+                    'fields' => array('id', 'name', 'uuid')
+                ),
+                'Role' => array(
+                    'fields' => array('id', 'name')
+                )
+            )
         )
     );
 
     public function beforeFilter()
     {
         parent::beforeFilter();
-        $this->Security->unlockedActions[] = 'eventIndexColumnToggle';
-        $this->Security->unlockedActions[] = 'setTheme';
+        // These four are only ever reached by hand-built same-origin AJAX from
+        // the menu/navbar, so they cannot produce the field hash _validatePost()
+        // wants - but they can and do carry the page's CSRF token in the
+        // X-CSRF-Token header, so keep that check rather than unlocking both.
+        // Nothing here has a hidden field worth hashing: setTheme and
+        // setEventTemplateUserFormMode take an allowlisted URL argument,
+        // eventIndexColumnToggle a column name, and setHomePage a single path
+        // the user picks anyway and which setSetting() validates server-side.
+        $this->_csrfTokenHeaderOnly([
+            'eventIndexColumnToggle',
+            'setTheme',
+            'setHomePage',
+            'setEventTemplateUserFormMode',
+        ]);
         if ($this->action === 'setSetting') {
             $this->Security->unlockedFields = array('value', 'value_select');
         }
@@ -42,7 +61,7 @@ class UserSettingsController extends AppController
     {
         $filterData = array(
             'request' => $this->request,
-            'paramArray' => array('setting', 'user_id', 'sort', 'direction', 'page', 'limit'),
+            'paramArray' => array('setting', 'quickFilter', 'user_id', 'sort', 'direction', 'page', 'limit'),
             'named_params' => $this->params['named']
         );
         $exception = false;
@@ -51,6 +70,12 @@ class UserSettingsController extends AppController
         if (!empty($filters['setting'])) {
             $conditions['AND'][] = array(
                 'setting' => $filters['setting']
+            );
+        }
+        // Filter bar for Overmind theme
+        if (!empty($filters['quickFilter'])) {
+            $conditions['AND'][] = array(
+                'UserSetting.setting LIKE' => '%' . $filters['quickFilter'] . '%',
             );
         }
         if (!empty($filters['user_id'])) {
@@ -83,12 +108,17 @@ class UserSettingsController extends AppController
         }
         if (!$this->_isSiteAdmin()) {
             if ($this->_isAdmin()) {
+                $orgUserConditions = array('User.org_id' => $this->Auth->user('org_id'));
+                // An org admin must not see a site admin's settings.
+                $siteAdminRoleIds = $this->UserSetting->User->getSiteAdminRoleIds();
+                if (!empty($siteAdminRoleIds)) {
+                    $orgUserConditions['NOT'] = array('User.role_id' => $siteAdminRoleIds);
+                }
                 $conditions['AND'][] = array(
                     'UserSetting.user_id' => $this->UserSetting->User->find(
                         'list', array(
-                            'conditions' => array(
-                                'User.org_id' => $this->Auth->user('org_id')
-                            ),
+                            'recursive' => -1,
+                            'conditions' => $orgUserConditions,
                             'fields' => array(
                                 'User.id', 'User.id'
                             )
@@ -122,15 +152,28 @@ class UserSettingsController extends AppController
         } else {
             $this->paginate['conditions'] = $conditions;
             $data = $this->paginate();
+            $authUser = $this->Auth->user();
             foreach ($data as $k => $v) {
                 if (!empty(UserSetting::VALID_SETTINGS[$v['UserSetting']['setting']])) {
                     $data[$k]['UserSetting']['restricted'] = empty(UserSetting::VALID_SETTINGS[$v['UserSetting']['setting']]['restricted']) ? '' : UserSetting::VALID_SETTINGS[$v['UserSetting']['setting']]['restricted'];
                 } else {
                     $data[$k]['UserSetting']['restricted'] = array();
                 }
+                $data[$k]['UserSetting']['_canDelete'] = (
+                    $this->UserSetting->checkAccess($authUser, $v)
+                    && $this->UserSetting->checkSettingAccess($authUser, $v['UserSetting']['setting']) === true
+                );
             }
             $this->set('data', $data);
+            $this->set('settingDescriptions', $this->UserSetting->settingDescriptions());
             $this->set('context', empty($context) ? 'null' : $context);
+            if ($this->theme === 'Overmind' && $this->request->is('ajax')) {
+                // The Settings tab of a user's profile
+                $this->layout = false;
+                if (!empty($filters['user_id']) && is_numeric($filters['user_id'])) {
+                    $this->set('scopedUserId', (int)$filters['user_id']);
+                }
+            }
         }
     }
 
@@ -178,9 +221,10 @@ class UserSettingsController extends AppController
                 'conditions' => array(
                     'UserSetting.user_id' => $user_id,
                     'UserSetting.setting' => $setting
-                )
+                ),
+                'contain' => array('User.id', 'User.org_id')
             ));
-            if (!empty($current_setting)) {
+            if (!empty($current_setting) && $this->UserSetting->checkAccess($this->Auth->user(), $current_setting)) {
                 $this->set('current_setting', $current_setting['UserSetting']['value']);
             }
         }
@@ -210,6 +254,9 @@ class UserSettingsController extends AppController
                 } else {
                     // if we are dealing with a UI request, redirect the user to the user view with the proper flash message
                     $this->Flash->success(__('Setting saved.'));
+                    if ($this->theme === 'Overmind') {
+                        return $this->redirect($this->__overmindReturnUrl());
+                    }
                     $this->redirect(array('controller' => 'user_settings', 'action' => 'index', $this->Auth->User('id')));
                 }
             } else {
@@ -250,7 +297,11 @@ class UserSettingsController extends AppController
         $this->set('setting', $setting);
         $this->set('users', $users);
         $this->set('validSettings', $this->UserSetting->settingPlaceholders($this->Auth->user()));
+        $this->set('settingDescriptions', $this->UserSetting->settingDescriptions());
         $this->set('title_for_layout', __('Set User Setting'));
+        if ($this->theme === 'Overmind' && $this->request->is('ajax')) {
+            $this->layout = false;
+        }
     }
 
     public function getSetting($userId = null, $setting = null)
@@ -364,6 +415,134 @@ class UserSettingsController extends AppController
         $this->redirect($this->referer());
     }
 
+    public function deleteSelection($id = false)
+    {
+        $authUser = $this->Auth->user();
+
+        if ($this->request->is(array('post', 'put', 'delete'))) {
+            $idList = $this->request->data['UserSetting']['id'] ?? $id;
+            if (!is_array($idList)) {
+                $idList = is_numeric($idList) ? array($idList) : json_decode($idList, true);
+            }
+            if (empty($idList)) {
+                throw new NotFoundException(__('Invalid input.'));
+            }
+
+            $deleted = 0;
+            $failed = 0;
+            $blocked = 0;
+            foreach ($idList as $settingId) {
+                if (!is_numeric($settingId)) {
+                    $failed++;
+                    continue;
+                }
+                $userSetting = $this->UserSetting->find('first', array(
+                    'recursive' => -1,
+                    'conditions' => array('UserSetting.id' => $settingId),
+                    'contain' => array('User.id', 'User.org_id')
+                ));
+                if (empty($userSetting)) {
+                    $failed++;
+                    continue;
+                }
+                if (
+                    !$this->UserSetting->checkAccess($authUser, $userSetting) ||
+                    $this->UserSetting->checkSettingAccess($authUser, $userSetting['UserSetting']['setting']) !== true
+                ) {
+                    $blocked++;
+                    continue;
+                }
+                if ($this->UserSetting->delete($userSetting['UserSetting']['id'])) {
+                    $deleted++;
+                } else {
+                    $failed++;
+                }
+            }
+
+            $messages = array();
+            if ($deleted) {
+                $messages[] = __n('%s setting deleted.', '%s settings deleted.', $deleted, $deleted);
+            }
+            if ($blocked) {
+                $messages[] = __n('%s setting was skipped (insufficient permissions).', '%s settings were skipped (insufficient permissions).', $blocked, $blocked);
+            }
+            if ($failed) {
+                $messages[] = __n('%s setting could not be deleted.', '%s settings could not be deleted.', $failed, $failed);
+            }
+            $message = trim(implode(' ', $messages));
+
+            if ($this->_isRest()) {
+                if ($deleted) {
+                    return $this->RestResponse->saveSuccessResponse('UserSettings', 'deleteSelection', $id, $this->response->type(), $message);
+                }
+                return $this->RestResponse->saveFailResponse('UserSettings', 'deleteSelection', false, $message, $this->response->type());
+            }
+
+            if ($deleted && !$blocked && !$failed) {
+                $this->Flash->success($message);
+            } elseif ($deleted) {
+                $this->Flash->warning($message);
+            } else {
+                $this->Flash->error($message ?: __('No settings were deleted.'));
+            }
+            if ($this->theme === 'Overmind') {
+                return $this->redirect($this->__overmindReturnUrl());
+            }
+            return $this->redirect(array('action' => 'index'));
+        }
+
+        // GET → build the confirmation modal.
+        $idList = is_numeric($id) ? array($id) : json_decode($id, true);
+        if (empty($idList)) {
+            throw new NotFoundException(__('Invalid input.'));
+        }
+        $userSettings = $this->UserSetting->find('all', array(
+            'recursive' => -1,
+            'conditions' => array('UserSetting.id' => $idList),
+            'contain' => array('User.id', 'User.org_id', 'User.email')
+        ));
+        $deletable = array();
+        $blocked = array();
+        foreach ($userSettings as $userSetting) {
+            $label = $userSetting['UserSetting']['setting'];
+            if (!empty($userSetting['User']['email'])) {
+                $label .= ' (' . $userSetting['User']['email'] . ')';
+            }
+            if (
+                !$this->UserSetting->checkAccess($authUser, $userSetting) ||
+                $this->UserSetting->checkSettingAccess($authUser, $userSetting['UserSetting']['setting']) !== true
+            ) {
+                $blocked[] = array('id' => $userSetting['UserSetting']['id'], 'label' => $label);
+            } else {
+                $deletable[] = array('id' => $userSetting['UserSetting']['id'], 'label' => $label);
+            }
+        }
+
+        // Only the entries the user may actually delete are submitted.
+        $deletableIds = array_map(function ($entry) {
+            return $entry['id'];
+        }, $deletable);
+        $this->request->data['UserSetting']['id'] = json_encode($deletableIds);
+        $this->set('idArray', $idList);
+        $this->set('deletable', $deletable);
+        $this->set('blocked', $blocked);
+        $this->layout = false;
+        $this->render('/UserSettings/ajax/user_setting_delete_confirmation');
+    }
+
+    /**
+     * Back to the page the modal was opened from (the index or a user's
+     * profile), unless that page was the form itself after a failed save.
+     */
+    private function __overmindReturnUrl()
+    {
+        $referer = $this->referer(array('action' => 'index'), true);
+        if (stripos($referer, '/user_settings/setSetting') !== false) {
+            return array('action' => 'index');
+        }
+        return $referer;
+    }
+
     public function setHomePage()
     {
         if ($this->request->is('post')) {
@@ -383,6 +562,10 @@ class UserSettingsController extends AppController
                     'value' => ['path' => $this->request->data['path']],
                 )
             );
+            // Always persist through setSetting() so the homepage validation (validate_homepage,
+            // which requires the path to start with '/') and the access/self-management checks run.
+            // The Overmind theme previously called setSettingInternal() directly, skipping validation
+            // and allowing an arbitrary path - e.g. an XSS payload - to be stored as the homepage.
             $result = $this->UserSetting->setSetting($this->Auth->user(), $setting);
             return $this->RestResponse->saveSuccessResponse('UserSettings', 'setHomePage', false, 'json', 'Homepage set to ' . $this->request->data['path']);
         } else {
@@ -446,5 +629,36 @@ class UserSettingsController extends AppController
             $message = __('Failed to set %s theme.', $theme);
             return $this->RestResponse->saveFailResponse('UserSettings', 'setTheme', false, $message, 'json');
         }
+    }
+
+    /**
+     * Persist the event-template instantiation form's view-mode preference.
+     * Single-page (`all`) shows every section at once; `wizard` shows one
+     * section at a time with prev/next navigation. The setting is read by
+     * EventTemplatesController on next page load.
+     */
+    public function setEventTemplateUserFormMode($mode)
+    {
+        if (!$this->request->is('post')) {
+            throw new MethodNotAllowedException(__('Expecting POST request.'));
+        }
+        $valid = array_flip($this->UserSetting::VALID_SETTINGS['event_template_user_form_mode']['options']);
+        if (!isset($valid[$mode])) {
+            throw new BadRequestException(__('Invalid view mode.'));
+        }
+        $userId = $this->Auth->user('id');
+        $result = $this->UserSetting->setSettingInternal(
+            $userId, 'event_template_user_form_mode', $mode
+        );
+        if ($result) {
+            return $this->RestResponse->saveSuccessResponse(
+                'UserSettings', 'setEventTemplateUserFormMode', false, 'json',
+                __('Form view mode set to %s.', $mode)
+            );
+        }
+        return $this->RestResponse->saveFailResponse(
+            'UserSettings', 'setEventTemplateUserFormMode', false,
+            __('Failed to persist form view mode.'), 'json'
+        );
     }
 }

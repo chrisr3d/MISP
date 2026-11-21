@@ -59,9 +59,13 @@ class WorkflowBaseModule
             $indexedParams[$id]['value'] = $param['value'] ?? ($param['default'] ?? '');
             if (!empty($param['jinja_supported']) && strlen($param['value']) > 0) {
                 $rDataWithEnv = $rData;
-                $rDataWithEnv['_env'] = [
-                    'baseurl' => Configure::read('MISP.baseurl'),
-                ];
+                if (empty($rDataWithEnv['_env'])) {
+                    $rDataWithEnv['_env'] = [
+                        'baseurl' => Configure::read('MISP.baseurl'),
+                    ];
+                } else {
+                    $rDataWithEnv['_env']['baseurl'] = Configure::read('MISP.baseurl');
+                }
                 $indexedParams[$id]['value'] = $this->render_jinja_template($param['value'], $rDataWithEnv);
             }
         }
@@ -203,6 +207,10 @@ class WorkflowBaseModule
             return is_array($data) && in_array($value, $data);
         } elseif ($operator == 'not_in') {
             return is_array($data) && !in_array($value, $data);
+        } elseif ($operator == 'str_contains') {
+            return is_string($data) && str_contains($data, $value);
+        } elseif ($operator == 'str_not_contains') {
+            return is_string($data) && !str_contains($data, $value);
         } elseif ($operator == 'equals') {
             return !is_array($data) && $data == $value;
         } elseif ($operator == 'not_equals') {
@@ -224,15 +232,12 @@ class WorkflowBaseModule
             });
             if ($operator == 'in_or') {
                 return !empty($matching);
-            } elseif ($operator == 'in_and') {
-                sort($matching);
-                sort($value);
-                return array_values($matching) == array_values($value);
             } elseif ($operator == 'not_in_or') {
                 return empty($matching);
-            } elseif ($operator == 'not_in_and') {
-                return array_values($matching) != array_values($value);
             }
+            // Set test: $data may list values in any order, and repeat them.
+            $allPresent = empty(array_diff($value, $matching));
+            return $operator == 'in_and' ? $allPresent : !$allPresent;
         }
         return false;
     }

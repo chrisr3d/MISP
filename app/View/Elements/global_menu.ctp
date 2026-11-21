@@ -119,8 +119,14 @@ if (!empty($me)) {
                     'url' => $baseurl . '/taxonomies/index'
                 ),
                 array(
-                    'text' => __('List Templates'),
-                    'url' => $baseurl . '/templates/index'
+                    'text' => __('List Event Templates'),
+                    'url' => $baseurl . '/event_templates/index',
+                    'requirement' => $this->Acl->canAccess('eventTemplates', 'index'),
+                ),
+                array(
+                    'text' => __('Add Event Template'),
+                    'url' => $baseurl . '/event_templates/add',
+                    'requirement' => $this->Acl->canAccess('eventTemplates', 'add'),
                 ),
                 array(
                     'type' => 'separator'
@@ -189,16 +195,6 @@ if (!empty($me)) {
                 array(
                     'text' => __('Import Regexp'),
                     'url' => $baseurl . '/regexp/index',
-                    'requirement' => !$isAclRegexp
-                ),
-                array(
-                    'text' => __('Signature Allowedlist'),
-                    'url' => $baseurl . '/admin/allowedlists/index',
-                    'requirement' => $isAclRegexp
-                ),
-                array(
-                    'text' => __('Signature Allowedlist'),
-                    'url' => $baseurl . '/allowedlists/index',
                     'requirement' => !$isAclRegexp
                 ),
                 array(
@@ -278,7 +274,7 @@ if (!empty($me)) {
                                 'html' => $html,
                                 'url' => '#'
                             );
-                        }, $themes);
+                        }, $themes ?? []);
                         return array_merge($children, $themeItems);
                     })()
                 ),
@@ -355,20 +351,6 @@ if (!empty($me)) {
                     'text' => __('Statistics'),
                     'url' => $baseurl . '/users/statistics'
                 ),
-                array(
-                    'type' => 'separator',
-                    'requirement' => $this->Acl->canAccess('threads', 'index'),
-                ),
-                array(
-                    'text' => __('List Discussions'),
-                    'url' => $baseurl . '/threads/index',
-                    'requirement' => $this->Acl->canAccess('threads', 'index'),
-                ),
-                array(
-                    'text' => __('Start Discussion'),
-                    'url' => $baseurl . '/posts/add',
-                    'requirement' => $this->Acl->canAccess('posts', 'add'),
-                )
             )
         ),
         array(
@@ -413,7 +395,7 @@ if (!empty($me)) {
                 ),
                 array(
                     'text' => __('Event ID translator'),
-                    'url' => '/servers/idTranslator',
+                    'url' => $baseurl . '/servers/idTranslator',
                     'requirement' => $this->Acl->canAccess('servers', 'idTranslator')
                 )
             )
@@ -726,6 +708,7 @@ $(document).ready(function() {
         $.ajax({
             type: 'POST',
             url: '<?php echo $baseurl; ?>/user_settings/setTheme/' + safeTheme,
+            headers: {'X-CSRF-Token': (window.csrfToken || '')},
             success: function(data) {
                 location.reload();
             },

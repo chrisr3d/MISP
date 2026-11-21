@@ -21,9 +21,32 @@ class Cerebrate extends AppModel
         )
     );
 
+    public $validate = [
+        'name' => [
+            'notBlank' => [
+                'rule' => 'notBlank',
+                'required' => 'create',
+                'allowEmpty' => false,
+                'message' => 'Please provide a name for the Cerebrate node.',
+            ],
+        ],
+        'url' => [
+            'notBlank' => [
+                'rule' => 'notBlank',
+                'required' => 'create',
+                'allowEmpty' => false,
+                'message' => 'Please provide the base URL of the Cerebrate node.',
+            ],
+            'scheme' => [
+                'rule' => ['custom', '/^https?:\/\/\S+$/i'],
+                'message' => 'The URL has to start with http:// or https://',
+            ],
+        ],
+    ];
+
     public function beforeSave($options = array())
     {
-        $cerebrate = &$this->data['Server'];
+        $cerebrate = &$this->data['Cerebrate'];
         // Encrypt authkey if plain key provided and encryption is enabled
         if (!empty($cerebrate['authkey']) && strlen($cerebrate['authkey']) === 40) {
             $cerebrate['authkey'] = EncryptedValue::encryptIfEnabled($cerebrate['authkey']);

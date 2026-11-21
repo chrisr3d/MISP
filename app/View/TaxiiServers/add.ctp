@@ -1,5 +1,8 @@
 <?php
 $edit = $this->request->params['action'] === 'edit' ? true : false;
+// Keep saved or submitted selections available without repeating discovery.
+$apiRoot = $this->request->data['TaxiiServer']['api_root'] ?? '';
+$collection = $this->request->data['TaxiiServer']['collection'] ?? '';
 $fields = [
     [
         'field' => 'name',
@@ -10,7 +13,7 @@ $fields = [
         'class' => 'span6'
     ],
     [
-        'field' => 'baseurl',
+        'field' => 'discovery_url',
         'class' => 'span6'
     ],
     [
@@ -20,20 +23,49 @@ $fields = [
         'default' => false
     ],
     [
+        'field' => 'enabled',
+        'label' => __('Enabled'),
+        'type' => 'checkbox',
+        'default' => !$edit
+    ],
+    [
+        'field' => 'auth_type',
+        'label' => 'Authentication Type',
+        'type' => 'select',
+        'options' => ['basic' => 'Basic', 'bearer' => 'Bearer'],
+        'default' => 'basic',
+        'class' => 'span6'
+    ],
+    [
+        'field' => 'username',
+        'label' => 'Username',
+        'type' => 'text auth-basic-field',
+        'class' => 'input span6 auth-basic-field'
+    ],
+    [
+        'field' => 'password',
+        'label' => 'Password',
+        'type' => 'password auth-basic-field',
+        'class' => 'input span6 auth-basic-field'
+    ],
+    [
         'field' => 'api_key',
-        'label' => 'API Key',
-        'type' => 'text',
-        'class' => 'input span6'
+        'label' => 'Bearer Token',
+        'type' => 'text auth-bearer-field',
+        'class' => 'input span6 auth-bearer-field'
     ],
     [
         'field' => 'api_root',
         'class' => 'span6',
         'type' => 'dropdown',
-        'options' => [],
+        'options' => $apiRoot !== '' ? [$apiRoot => $apiRoot] : [],
         'populateAction' => json_encode([
             'uri' => '/taxii_servers/getRoot',
             'body' => [
-                'baseurl' => '{{#TaxiiServerBaseurl}}',
+                'discovery_url' => '{{#TaxiiServerDiscoveryUrl}}',
+                'auth_type' => '{{#TaxiiServerAuthType}}',
+                'username' => '{{#TaxiiServerUsername}}',
+                'password' => '{{#TaxiiServerPassword}}',
                 'api_key' => '{{#TaxiiServerApiKey}}'
             ],
             'type' => 'POST'
@@ -43,11 +75,13 @@ $fields = [
         'field' => 'collection',
         'class' => 'span6',
         'type' => 'dropdown',
-        'options' => [],
+        'options' => $collection !== '' ? [$collection => $collection] : [],
         'populateAction' => json_encode([
             'uri' => '/taxii_servers/getCollections',
             'body' => [
-                'baseurl' => '{{#TaxiiServerBaseurl}}',
+                'auth_type' => '{{#TaxiiServerAuthType}}',
+                'username' => '{{#TaxiiServerUsername}}',
+                'password' => '{{#TaxiiServerPassword}}',
                 'api_key' => '{{#TaxiiServerApiKey}}',
                 'api_root' => '{{#TaxiiServerApiRoot}}'
             ],
@@ -78,7 +112,13 @@ echo $this->element('genericElements/Form/genericForm', [
         ]
     ]
 ]);
-
+?>
+<script>
+$(document).ready(function() {
+    $('#TaxiiServerAuthType').trigger('change');
+});
+</script>
+<?php
 if (!$ajax) {
     echo $this->element('/genericElements/SideMenu/side_menu', $menuData);
 }

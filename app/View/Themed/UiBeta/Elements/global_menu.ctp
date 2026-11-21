@@ -64,9 +64,21 @@ if (!empty($me)) {
                             'url' => $baseurl . '/events/index'
                         ),
                         array(
-                            'html' => '<i class="fas fa-plus fa-fw"></i> ' . __('Add'),
+                            'html' => '<i class="fas fa-plus fa-fw"></i> ' . __('Add event'),
                             'url' => $baseurl . '/events/add',
                             'requirement' => $this->Acl->canAccess('events', 'add'),
+                        ),
+                        array(
+                            'html' => '<i class="fas fa-file-import fa-fw"></i> ' . __('Add event from import'),
+                            'url' => $baseurl . '/events/add_misp_export',
+                            'requirement' => $this->Acl->canAccess('events', 'add'),
+                        ),
+                        array(
+                            'html' => '<i class="fas fa-clone fa-fw"></i> ' . __('Add event from template'),
+                            'url' => $baseurl . '/event_templates/index',
+                            'requirement' =>
+                                $this->Acl->canAccess('eventTemplates', 'index') &&
+                                $this->Acl->canAccess('eventTemplates', 'instantiate'),
                         ),
                     )
                 ),
@@ -236,12 +248,13 @@ if (!empty($me)) {
                     'html' => '<i class="fas fa-file-code fa-fw"></i> ' . __('Templates'),
                     'children' => array(
                         array(
-                            'html' => '<i class="fas fa-file-code fa-fw"></i> ' . __('List Templates'),
-                            'url' => $baseurl . '/templates/index'
-                        ),
-                        array(
                             'html' => '<i class="fas fa-cubes fa-fw"></i> ' . __('List Object Templates'),
                             'url' => $baseurl . '/objectTemplates/index'
+                        ),
+                        array(
+                            'html' => '<i class="fas fa-file-signature fa-fw"></i> ' . __('List Event Templates'),
+                            'url' => $baseurl . '/event_templates/index',
+                            'requirement' => $this->Acl->canAccess('eventTemplates', 'index'),
                         ),
                     )
                 ),
@@ -269,16 +282,6 @@ if (!empty($me)) {
                         array(
                             'html' => '<i class="fas fa-code fa-fw"></i> ' . __('Import Regexp'),
                             'url' => $baseurl . '/regexp/index',
-                            'requirement' => !$isAclRegexp
-                        ),
-                        array(
-                            'html' => '<i class="fas fa-check-circle fa-fw"></i> ' . __('Signature Allowedlist'),
-                            'url' => $baseurl . '/admin/allowedlists/index',
-                            'requirement' => $isAclRegexp
-                        ),
-                        array(
-                            'html' => '<i class="fas fa-check-circle fa-fw"></i> ' . __('Signature Allowedlist'),
-                            'url' => $baseurl . '/allowedlists/index',
                             'requirement' => !$isAclRegexp
                         ),
                         array(
@@ -631,28 +634,6 @@ if (!empty($me)) {
                     'url' => $baseurl . '/news'
                 ),
                 array(
-                    'type' => 'separator',
-                    'requirement' => $this->Acl->canAccess('threads', 'index'),
-                ),
-                // Discussions Group
-                array(
-                    'type' => 'group',
-                    'html' => '<i class="fas fa-comments fa-fw"></i> ' . __('Discussions'),
-                    'requirement' => $this->Acl->canAccess('threads', 'index'),
-                    'children' => array(
-                        array(
-                            'html' => '<i class="fas fa-comments fa-fw"></i> ' . __('List Discussions'),
-                            'url' => $baseurl . '/threads/index',
-                            'requirement' => $this->Acl->canAccess('threads', 'index'),
-                        ),
-                        array(
-                            'html' => '<i class="fas fa-comment-medical fa-fw"></i> ' . __('Start Discussion'),
-                            'url' => $baseurl . '/posts/add',
-                            'requirement' => $this->Acl->canAccess('posts', 'add'),
-                        ),
-                    )
-                ),
-                array(
                     'type' => 'separator'
                 ),
                 // Documentation Group
@@ -854,6 +835,7 @@ $(document).ready(function() {
         $.ajax({
             type: 'POST',
             url: '<?php echo $baseurl; ?>/user_settings/setTheme/' + safeTheme,
+            headers: {'X-CSRF-Token': (window.csrfToken || '')},
             success: function(data) {
                 location.reload();
             },

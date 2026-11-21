@@ -26,6 +26,13 @@ class DecayingModelMappingController extends AppController
         }
 
         if ($this->request->is('post') || $this->request->is('put')) {
+            // DPT-6: fetchModel above is VIEW-scoped; without this check a
+            // perm_decaying user could wipe + replace the attribute-type
+            // mappings of any model visible to them (e.g. another org's
+            // shared all_orgs=1 model). Mirror DecayingModel edit/enable.
+            if (!$this->DecayingModelMapping->DecayingModel->isEditableByCurrentUser($this->Auth->user(), $model)) {
+                throw new MethodNotAllowedException(__('You are not authorised to edit this model.'));
+            }
             $this->request->data['DecayingModelMapping']['model_id'] = $model_id;
             if (!isset($this->request->data['DecayingModelMapping']['org_id'])) {
                 $this->request->data['DecayingModelMapping']['org_id'] = $this->Auth->user()['org_id'];
@@ -42,9 +49,21 @@ class DecayingModelMappingController extends AppController
             }
 
             $response = $this->DecayingModelMapping->resetMappingForModel($this->request->data['DecayingModelMapping'], $this->Auth->user());
+            if ($this->theme === 'Overmind' && !$this->_isRest() && !$this->request->is('ajax')) {
+                if (empty($response)) {
+                    $this->Flash->error(__('The attribute type mapping could not be saved.'));
+                } else {
+                    $this->Flash->success(__('The attribute type mapping has been saved.'));
+                }
+                return $this->redirect(array('controller' => 'decayingModel', 'action' => 'view', $model_id));
+            }
             return $this->RestResponse->viewData($response, $this->response->type());
         } else {
             $this->set('model_id', $model_id);
+            $this->set('model', $model['DecayingModel']);
+            if ($this->theme === 'Overmind' && $this->request->is('ajax')) {
+                $this->layout = false;
+            }
         }
     }
 

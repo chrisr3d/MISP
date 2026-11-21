@@ -30,25 +30,45 @@
     $tagData = "";
     $tag_display_style = $tag_display_style ?? 1;
     $buttonData = [];
+    $renderAddButtons = empty($hide_add_buttons);
+    $popoverPlacement = $popoverPlacement ?? 'right';
 
-    if ($full) {
+    if ($renderAddButtons && $full) {
         $buttonData[] = sprintf(
-            '<button title="%s" role="button" tabindex="0" aria-label="%s" class="%s" data-popover-popup="%s">%s</button>',
+            '<button title="%s" role="button" tabindex="0" aria-label="%s" class="%s" data-popover-popup="%s" data-popover-placement="%s">%s</button>',
             __('Add a tag'),
             __('Add a tag'),
             'addTagButton addButton btn btn-inverse noPrint',
             $baseurl . '/tags/selectTaxonomy/' . h($id) . ($scope === 'event' ? '' : ('/' . $scope)),
+            h($popoverPlacement),
             '<i class="fas fa-globe-americas"></i> <i class="fas fa-plus"></i>'
         );
     }
-    if ($full || $fullLocal) {
+    if ($renderAddButtons && ($full || $fullLocal)) {
         $buttonData[] = sprintf(
-            '<button title="%s" role="button" tabindex="0" aria-label="%s" class="%s" data-popover-popup="%s">%s</button>',
+            '<button title="%s" role="button" tabindex="0" aria-label="%s" class="%s" data-popover-popup="%s" data-popover-placement="%s">%s</button>',
             __('Add a local tag'),
             __('Add a local tag'),
             'addLocalTagButton addButton btn btn-inverse noPrint',
             $baseurl . '/tags/selectTaxonomy/local:1/' . h($id) . ($scope === 'event' ? '' : ('/' . $scope)),
+            h($popoverPlacement),
             '<i class="fas fa-user"></i> <i class="fas fa-plus"></i>'
+        );
+    }
+    // AI tag recommendations (A3): anyone who may add a tag here may accept
+    // suggestions; without edit rights they land as local tags.
+    if (
+        $scope === 'event' && $renderAddButtons && ($full || $fullLocal) &&
+        Configure::read('Plugin.AI_services_enable') &&
+        $this->Acl->canAccess('events', 'aiRecommendTags')
+    ) {
+        $buttonData[] = sprintf(
+            '<button title="%s" role="button" tabindex="0" aria-label="%s" class="%s" onclick="openGenericModal(\'%s\');">%s</button>',
+            __('Recommend tags with AI'),
+            __('Recommend tags with AI'),
+            'aiRecommendTagsButton addButton btn btn-inverse noPrint',
+            h($baseurl . '/events/aiRecommendTags/' . $id),
+            '<i class="fas fa-robot"></i>'
         );
     }
 
@@ -56,13 +76,14 @@
     if (isset($highlightedTags) && $scope === 'event') {
         foreach ($highlightedTags as $hTaxonomy) {
             $hButtonData = [];
-            if ($full) {
+            if ($renderAddButtons && $full) {
                 $hButtonData[] = sprintf(
-                    '<button title="%s" role="button" tabindex="0" aria-label="%s" class="%s" data-popover-popup="%s">%s</button>',
+                    '<button title="%s" role="button" tabindex="0" aria-label="%s" class="%s" data-popover-popup="%s" data-popover-placement="%s">%s</button>',
                     __('Add a tag'),
                     __('Add a tag'),
                     'addTagButton addButton btn btn-inverse noPrint',
                     sprintf($baseurl . '/tags/selectTag/%u/%u/event', h($id), $hTaxonomy['taxonomy']['Taxonomy']['id']),
+                    h($popoverPlacement),
                     '<i class="fas fa-globe-americas"></i> <i class="fas fa-plus"></i>'
                 );
             }
@@ -134,7 +155,7 @@
                 echo sprintf('<span class="apply_css_arrow nowrap">%s</span><br>', h($tag));
             }
         }
-        echo '</div></div></span>';
+        echo '</div></div></div>';
     }
     if (!empty($tagConflicts['local'])) {
         echo '<div><div class="alert alert-error tag-conflict-notice">';
@@ -149,5 +170,5 @@
                 echo sprintf('<span class="apply_css_arrow nowrap">%s</span><br>', h($tag));
             }
         }
-        echo '</div></div></span>';
+        echo '</div></div></div>';
     }

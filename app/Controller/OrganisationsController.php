@@ -24,7 +24,11 @@ class OrganisationsController extends AppController
 
     public function index()
     {
-        $scope = isset($this->passedArgs['scope']) ? $this->passedArgs['scope'] : 'local';
+        // The default theme lists only local organisations to keep the view
+        // focused; the Overmind theme defaults to all organisations because its
+        // filter bar makes narrowing the scope trivial.
+        $defaultScope = ($this->theme === 'Overmind') ? 'all' : 'local';
+        $scope = isset($this->passedArgs['scope']) ? $this->passedArgs['scope'] : $defaultScope;
         $conditions = [];
         if ($scope !== 'all') {
             $conditions['Organisation.local'] = $scope === 'external' ? 0 : 1;
@@ -71,7 +75,7 @@ class OrganisationsController extends AppController
         $this->set('named', $this->params['named']);
         $this->set('scope', $scope);
         $this->set('orgs', $this->viewVars['data']);
-        $this->set('passedArgs', json_encode($this->passedArgs));
+        $this->set('passedArgs', JsonTool::encodeForScript($this->passedArgs));
         $this->set('viewall', isset($this->params['named']['viewall']) && $this->params['named']['viewall']);
     }
 
@@ -110,6 +114,9 @@ class OrganisationsController extends AppController
         $countries = array_merge(['' => __('Not specified')], $this->_arrayToValuesIndexArray($this->Organisation->getCountries()));
         $this->set('countries', $countries);
         $this->set('action', 'add');
+        if ($this->theme === "Overmind") {
+            $this->layout = false;
+        }
     }
 
     public function admin_edit($id)
@@ -159,6 +166,9 @@ class OrganisationsController extends AppController
         }
         $this->set('id', $id);
         $this->set('action', 'edit');
+        if ($this->theme === "Overmind") {
+            $this->layout = false;
+        }
         $this->render('admin_add');
     }
 
@@ -172,6 +182,138 @@ class OrganisationsController extends AppController
         if ($this->IndexFilter->isRest()) {
             return $this->restResponsePayload;
         }
+    }
+
+    /**
+     * Mass-delete organisations from the Overmind index (also backs the single
+     * row "Delete" action). An organisation cannot be removed while it still has
+     * users or events attached (mirrors Organisation::beforeDelete); such rows
+     * are reported as blocked and skipped rather than silently failing.
+     *
+     * GET  (opened via openModal): renders the confirmation modal.
+     * POST (from that modal): deletes the deletable selection.
+     */
+    public function admin_deleteSelection($id = null)
+    {
+        if ($this->request->is(['post', 'put', 'delete'])) {
+            $idList = $this->request->data['Organisation']['id'] ?? $id;
+            if (!is_array($idList)) {
+                $idList = (is_numeric($idList)) ? [$idList] : json_decode($idList, true);
+            }
+            if (empty($idList)) {
+                throw new NotFoundException(__('Invalid input.'));
+            }
+
+            $deleted = 0;
+            $failed = 0;
+            $blocked = [];
+            foreach ($idList as $orgId) {
+                $org = $this->Organisation->find('first', [
+                    'conditions' => ['Organisation.id' => $orgId],
+                    'recursive' => -1,
+                    'fields' => ['Organisation.id', 'Organisation.name'],
+                ]);
+                if (empty($org)) {
+                    $failed++;
+                    continue;
+                }
+                if ($this->__orgDeletionBlocker($org['Organisation']['id']) !== null) {
+                    $blocked[] = $org['Organisation']['name'];
+                    continue;
+                }
+                if ($this->Organisation->delete($org['Organisation']['id'])) {
+                    $deleted++;
+                } else {
+                    $failed++;
+                }
+            }
+
+            $messages = [];
+            if ($deleted) {
+                $messages[] = __n('%s organisation deleted.', '%s organisations deleted.', $deleted, $deleted);
+            }
+            if (!empty($blocked)) {
+                $messages[] = count($blocked) === 1
+                    ? __('Organisation "%s" was not deleted because it still has users or events attached.', $blocked[0])
+                    : __('%s organisations were not deleted because they still have users or events attached: %s', count($blocked), implode(', ', $blocked));
+            }
+            if ($failed) {
+                $messages[] = __n('%s organisation could not be deleted.', '%s organisations could not be deleted.', $failed, $failed);
+            }
+            $message = trim(implode(' ', $messages));
+
+            if ($this->IndexFilter->isRest()) {
+                if ($deleted) {
+                    return $this->RestResponse->saveSuccessResponse('Organisations', 'admin_deleteSelection', $id, $this->response->type(), $message);
+                }
+                return $this->RestResponse->saveFailResponse('Organisations', 'admin_deleteSelection', false, $message, $this->response->type());
+            }
+
+            if ($deleted && empty($blocked) && !$failed) {
+                $this->Flash->success($message);
+            } elseif ($deleted) {
+                $this->Flash->warning($message);
+            } else {
+                $this->Flash->error($message ?: __('No organisations were deleted.'));
+            }
+            return $this->redirect(['action' => 'index', 'admin' => false]);
+        }
+
+        // GET → build the confirmation modal.
+        $idList = is_numeric($id) ? [$id] : json_decode($id, true);
+        if (empty($idList)) {
+            throw new NotFoundException(__('Invalid input.'));
+        }
+        $orgs = $this->Organisation->find('all', [
+            'conditions' => ['Organisation.id' => $idList],
+            'recursive' => -1,
+            'fields' => ['Organisation.id', 'Organisation.name'],
+        ]);
+        $deletable = [];
+        $blocked = [];
+        foreach ($orgs as $org) {
+            $blocker = $this->__orgDeletionBlocker($org['Organisation']['id']);
+            if ($blocker !== null) {
+                $blocked[] = [
+                    'name' => $org['Organisation']['name'],
+                    'reason' => $blocker['reason'],
+                    'count' => $blocker['count'],
+                ];
+            } else {
+                $deletable[] = ['id' => $org['Organisation']['id'], 'name' => $org['Organisation']['name']];
+            }
+        }
+
+        $this->request->data['Organisation']['id'] = json_encode($idList);
+        $this->set('idArray', $idList);
+        $this->set('deletable', $deletable);
+        $this->set('blocked', $blocked);
+        $this->layout = false;
+        $this->render('/Organisations/ajax/orgDeleteConfirmationForm');
+    }
+
+    /**
+     * Returns null when the organisation can be deleted, otherwise the reason it
+     * is blocked ('users' or 'events') with the offending count. Mirrors the
+     * guards in Organisation::beforeDelete().
+     */
+    private function __orgDeletionBlocker($orgId)
+    {
+        $userCount = $this->Organisation->User->find('count', [
+            'conditions' => ['User.org_id' => $orgId],
+            'recursive' => -1,
+        ]);
+        if ($userCount) {
+            return ['reason' => 'users', 'count' => $userCount];
+        }
+        $eventCount = $this->Organisation->Event->find('count', [
+            'conditions' => ['OR' => ['Event.org_id' => $orgId, 'Event.orgc_id' => $orgId]],
+            'recursive' => -1,
+        ]);
+        if ($eventCount) {
+            return ['reason' => 'events', 'count' => $eventCount];
+        }
+        return null;
     }
 
     public function admin_generateuuid()
@@ -234,11 +376,114 @@ class OrganisationsController extends AppController
         }
 
         $org['Organisation']['country_code'] = $this->Organisation->getCountryCode($org['Organisation']['nationality']);
+        $orgId = (int)$org['Organisation']['id'];
+        // Same gate as the Users tab: site admins, and admins of this organisation.
+        $canViewUsers = $this->_isSiteAdmin()
+            || (!empty($this->userRole['perm_admin']) && (int)$this->Auth->user('org_id') === $orgId);
+        $this->set('orgUserSummary', $canViewUsers ? $this->__orgUserSummary($orgId) : null);
+        // Same gate as sharing_groups/index's searchorg filter.
+        $showSgOrgs = !empty($this->userRole['perm_sharing_group'])
+            || !Configure::read('Security.hide_organisations_in_sharing_groups');
+        $this->set('orgSharingGroups', $showSgOrgs ? $this->__orgSharingGroups($orgId) : null);
         $this->set('local', $org['Organisation']['local']);
         $this->set('fullAccess', $fullAccess);
         $this->set('org', $org);
         $this->set('id', $org['Organisation']['id']);
         $this->set('title_for_layout', __('Organisation %s', $org['Organisation']['name']));
+    }
+
+    /**
+     * Head count by role and state, plus the few accounts used most recently,
+     * for the organisation view's Users card. Two grouped counts and one
+     * limited query, whatever the size of the organisation.
+     *
+     * @param int $orgId
+     * @return array
+     */
+    private function __orgUserSummary($orgId)
+    {
+        $this->loadModel('User');
+        $byRole = $this->User->find('all', [
+            'recursive' => -1,
+            'fields' => ['User.role_id', 'User.disabled', 'COUNT(*) AS count'],
+            'conditions' => ['User.org_id' => $orgId],
+            'group' => ['User.role_id', 'User.disabled'],
+        ]);
+        $roleNames = $this->User->Role->find('list', ['fields' => ['Role.id', 'Role.name']]);
+        $summary = ['total' => 0, 'disabled' => 0, 'roles' => [], 'recent' => []];
+        foreach ($byRole as $row) {
+            $count = (int)$row[0]['count'];
+            $roleId = (int)$row['User']['role_id'];
+            $summary['total'] += $count;
+            if (!empty($row['User']['disabled'])) {
+                $summary['disabled'] += $count;
+            }
+            if (!isset($summary['roles'][$roleId])) {
+                $summary['roles'][$roleId] = ['name' => $roleNames[$roleId] ?? __('Unknown role'), 'count' => 0];
+            }
+            $summary['roles'][$roleId]['count'] += $count;
+        }
+        uasort($summary['roles'], function ($a, $b) {
+            return $b['count'] <=> $a['count'];
+        });
+        $recent = $this->User->find('all', [
+            'recursive' => -1,
+            'fields' => ['User.id', 'User.email', 'User.role_id', 'User.disabled', 'User.last_login'],
+            'conditions' => ['User.org_id' => $orgId],
+            'order' => ['User.last_login DESC', 'User.id DESC'],
+            'limit' => 6,
+        ]);
+        foreach ($recent as $user) {
+            $user['User']['role_name'] = $roleNames[$user['User']['role_id']] ?? '';
+            $summary['recent'][] = $user['User'];
+        }
+        return $summary;
+    }
+
+    /**
+     * The sharing groups this organisation creates or belongs to, among those
+     * the current user may see.
+     *
+     * @param int $orgId
+     * @return array
+     */
+    private function __orgSharingGroups($orgId)
+    {
+        $this->loadModel('SharingGroup');
+        $authorized = $this->SharingGroup->authorizedIds($this->Auth->user());
+        if (empty($authorized)) {
+            return [];
+        }
+        $memberships = $this->SharingGroup->SharingGroupOrg->find('list', [
+            'fields' => ['SharingGroupOrg.sharing_group_id', 'SharingGroupOrg.extend'],
+            'conditions' => [
+                'SharingGroupOrg.org_id' => $orgId,
+                'SharingGroupOrg.sharing_group_id' => $authorized,
+            ],
+        ]);
+        $owned = $this->SharingGroup->find('column', [
+            'fields' => ['SharingGroup.id'],
+            'conditions' => ['SharingGroup.org_id' => $orgId, 'SharingGroup.id' => $authorized],
+        ]);
+        $ids = array_unique(array_merge(array_keys($memberships), $owned));
+        if (empty($ids)) {
+            return [];
+        }
+        $this->SharingGroup->addCountField('org_count', $this->SharingGroup->SharingGroupOrg, ['SharingGroupOrg.sharing_group_id = SharingGroup.id']);
+        $groups = $this->SharingGroup->find('all', [
+            'recursive' => -1,
+            'fields' => ['SharingGroup.id', 'SharingGroup.name', 'SharingGroup.active', 'SharingGroup.roaming', 'SharingGroup.org_id', 'SharingGroup.org_count'],
+            'conditions' => ['SharingGroup.id' => $ids],
+            'order' => ['SharingGroup.name'],
+        ]);
+        $result = [];
+        foreach ($groups as $group) {
+            $sg = $group['SharingGroup'];
+            $sg['owner'] = (int)$sg['org_id'] === $orgId;
+            $sg['extend'] = !empty($memberships[$sg['id']]);
+            $result[] = $sg;
+        }
+        return $result;
     }
 
     public function fetchOrgsForSG($idList = '{}', $type)
@@ -296,13 +541,46 @@ class OrganisationsController extends AppController
         return new CakeResponse(array('body'=> json_encode($orgs), 'type' => 'json'));
     }
 
-    public function admin_merge($id, $target_id = false)
+    /**
+     * The legacy view is always opened for a given organisation, so the merge
+     * source comes from the URL. The Overmind modal is opened from the index
+     * header instead, where nothing is preselected: it posts both ends of the
+     * merge as plain organisation ids (sourceOrg / targetOrg), which are
+     * normalised below into the shape orgMerge() expects.
+     */
+    public function admin_merge($id = false, $target_id = false)
     {
         if (!$this->_isSiteAdmin()) {
             throw new MethodNotAllowedException(__('You are not authorised to do that.'));
         }
         if ($this->request->is('Post')) {
-            $result = $this->Organisation->orgMerge($id, $this->request->data, $this->Auth->user());
+            $data = $this->request->data;
+            $sourceId = $id ?: (isset($data['Organisation']['sourceOrg']) ? $data['Organisation']['sourceOrg'] : false);
+            if (!empty($data['Organisation']['targetOrg'])) {
+                $targetOrg = $this->Organisation->find('first', array(
+                    'recursive' => -1,
+                    'fields' => array('id', 'local'),
+                    'conditions' => array('Organisation.id' => $data['Organisation']['targetOrg'])
+                ));
+                if (empty($targetOrg)) {
+                    throw new NotFoundException(__('Invalid target organisation.'));
+                }
+                $targetIsLocal = !empty($targetOrg['Organisation']['local']);
+                $data['Organisation']['targetType'] = $targetIsLocal ? 0 : 1;
+                $data['Organisation'][$targetIsLocal ? 'orgsLocal' : 'orgsExternal'] = $targetOrg['Organisation']['id'];
+            }
+            $targetId = empty($data['Organisation']['targetType'])
+                ? (isset($data['Organisation']['orgsLocal']) ? $data['Organisation']['orgsLocal'] : false)
+                : (isset($data['Organisation']['orgsExternal']) ? $data['Organisation']['orgsExternal'] : false);
+            if (empty($sourceId) || empty($targetId)) {
+                $this->Flash->error(__('Both the organisation to be merged and the organisation to merge it into have to be selected.'));
+                $this->redirect(array('admin' => false, 'action' => 'index'));
+            }
+            if ($sourceId == $targetId) {
+                $this->Flash->error(__('An organisation cannot be merged into itself.'));
+                $this->redirect(array('admin' => false, 'action' => 'index'));
+            }
+            $result = $this->Organisation->orgMerge($sourceId, $data, $this->Auth->user());
             if ($result) {
                 $this->Flash->success(__('The organisation has been successfully merged.'));
                 $this->redirect(array('admin' => false, 'action' => 'view', $result));
@@ -310,7 +588,33 @@ class OrganisationsController extends AppController
                 $this->Flash->error(__('There was an error while merging the organisations. To find out more about what went wrong, refer to the audit logs. If you would like to revert the changes, you can find a .sql file'));
             }
             $this->redirect(array('admin' => false, 'action' => 'index'));
+        } elseif ($this->theme === 'Overmind') {
+            $this->Organisation->addCountField('user_count', $this->Organisation->User, array('User.org_id = Organisation.id'));
+            $orgs = $this->Organisation->find('all', array(
+                'recursive' => -1,
+                'fields' => array('id', 'name', 'uuid', 'local', 'user_count'),
+                'order' => 'lower(Organisation.name) ASC'
+            ));
+            $mergeOrgs = array();
+            foreach ($orgs as $org) {
+                $mergeOrgs[] = array(
+                    'id' => (int)$org['Organisation']['id'],
+                    'name' => $org['Organisation']['name'],
+                    'uuid' => $org['Organisation']['uuid'],
+                    'local' => !empty($org['Organisation']['local']),
+                    'user_count' => (int)$org['Organisation']['user_count'],
+                );
+            }
+            $this->set('mergeOrgs', $mergeOrgs);
+            $this->set('mergeSourceId', $id ? (int)$id : null);
+            $this->set('mergeTargetId', $target_id ? (int)$target_id : null);
+            $this->layout = false;
+            $this->autoRender = false;
+            $this->render('ajax/merge');
         } else {
+            if (empty($id)) {
+                throw new NotFoundException(__('Invalid organisation.'));
+            }
             $currentOrg = $this->Organisation->find('first', array('fields' => array('id', 'name', 'uuid', 'local'), 'recursive' => -1, 'conditions' => array('Organisation.id' => $id)));
             $orgs['local'] = $this->Organisation->find('all', array(
                     'fields' => array('id', 'name', 'uuid'),
@@ -359,6 +663,12 @@ class OrganisationsController extends AppController
 
         $logo = $this->request->data['Organisation']['logo'];
         if ($logo['size'] > 0 && $logo['error'] == 0) {
+            // Only a genuine PHP upload may reach the filesystem probes below.
+            // A forged tmp_name would otherwise leak file existence and image
+            // type through the distinct validation messages that follow.
+            if (empty($logo['tmp_name']) || !is_uploaded_file($logo['tmp_name'])) {
+                return false;
+            }
             $extension = pathinfo($logo['name'], PATHINFO_EXTENSION);
             $filename = $orgId . '.' . ($extension === 'svg' ? 'svg' : 'png');
 
@@ -407,26 +717,27 @@ class OrganisationsController extends AppController
             'conditions' => array('Organisation.id' => intval($id)),
             'recursive' => -1
         ));
-        if (empty($org)) {
+        if (empty($org) || !$this->Organisation->canSee($this->Auth->user(), $org['Organisation']['id'])) {
             throw new NotFoundException(__('Invalid organisation'));
         }
         $path = APP . 'files/img/orgs/';
-        $image = null;
+        $realBase = realpath($path);
         foreach (['id', 'name', 'uuid'] as $field) {
-            foreach (['png', 'svg'] as $extensions) {
-                if (file_exists($path . $org['Organisation'][$field] . '.' . $extensions)) {
-                    $this->response->file($path . $org['Organisation'][$field] . '.' . $extensions, ['download' => false, 'name' => $org['Organisation']['id'] . '.' . $extensions]);
+            foreach (['png', 'svg'] as $extension) {
+                $candidate = realpath($path . $org['Organisation'][$field] . '.' . $extension);
+                // realpath() resolves '..' and symlinks and returns false when the file does not
+                // exist; the prefix check rejects anything that escapes the orgs directory. Without
+                // it an attacker-controlled field such as the organisation name (e.g.
+                // '../../../../AI-marketing') would allow path traversal to arbitrary png/svg files.
+                if ($candidate !== false && $realBase !== false && str_starts_with($candidate, $realBase . DS)) {
+                    $this->response->file($candidate, ['download' => false, 'name' => $org['Organisation']['id'] . '.' . $extension]);
+                    // An SVG logo is a document, not a bitmap: sandbox it so
+                    // whatever it carries cannot run here when opened directly.
+                    $this->RestResponse->sandboxInlineFile($this->response, $extension);
                     return $this->response;
                 }
             }
         }
-        if ($image) {
-            $filePath = $path . $image;
-            $this->response->file($filePath, array('download' => false, 'name' => $image));
-            return $this->response;
-        } else {
-            throw new NotFoundException(__('Organisation logo not found'));
-        }
-
+        throw new NotFoundException(__('Organisation logo not found'));
     }
 }

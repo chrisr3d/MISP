@@ -53,7 +53,7 @@ class TaxonomiesController extends AppController
 
     public function view($id)
     {
-        $taxonomy = $this->Taxonomy->getTaxonomy($id, $this->_isRest());
+        $taxonomy = $this->Taxonomy->getTaxonomy($id);
         if (empty($taxonomy)) {
             throw new NotFoundException(__('Taxonomy not found.'));
         }
@@ -61,6 +61,9 @@ class TaxonomiesController extends AppController
         if ($this->_isRest()) {
             return $this->RestResponse->viewData($taxonomy, $this->response->type());
         }
+
+        $this->set('tag_count', count($taxonomy['entries']));
+        $this->set('entries', $taxonomy['entries']);
 
         $this->set('taxonomy', $taxonomy['Taxonomy']);
         $this->set('id', $taxonomy['Taxonomy']['id']);
@@ -114,11 +117,12 @@ class TaxonomiesController extends AppController
 
         $this->set('entries', $taxonomy['entries']);
         $this->set('urlparams', $urlparams);
-        $this->set('passedArgs', json_encode($this->passedArgs));
+        $this->set('passedArgs', JsonTool::encodeForScript($this->passedArgs));
         $this->set('passedArgsArray', $this->passedArgs);
         $this->set('taxonomy', $taxonomy['Taxonomy']);
         $this->set('id', $taxonomy['Taxonomy']['id']);
         $this->set('title_for_layout', __('%s Taxonomy Library', h(strtoupper($taxonomy['Taxonomy']['namespace']))));
+        $this->layout = false;
         $this->render('ajax/taxonomy_tags');
     }
 
@@ -234,6 +238,60 @@ class TaxonomiesController extends AppController
         }
     }
 
+    public function toggleEnable($id)
+    {
+        $this->request->allowMethod(['post']);
+
+        $taxonomy = $this->Taxonomy->find('first', array(
+            'recursive' => -1,
+            'conditions' => array('Taxonomy.id' => $id)
+        ));
+
+        if (empty($taxonomy)) {
+            $message = __('Invalid taxonomy.');
+            if ($this->_isRest()) {
+                return $this->RestResponse->saveFailResponse('Taxonomy', 'toggleEnable', $id, $message);
+            } else {
+                $this->Flash->error($message);
+                return $this->redirect($this->referer());
+            }
+        }
+
+        $newState = !$taxonomy['Taxonomy']['enabled'];
+        $taxonomy['Taxonomy']['enabled'] = $newState;
+
+        if (!$newState) {
+            $this->Taxonomy->disableTags($id);
+        }
+
+        $result = $this->Taxonomy->save($taxonomy);
+
+        $action = $newState ? 'enable' : 'disable';
+        $text = $newState ? 'enabled' : 'disabled';
+
+        $this->__log(
+            $action,
+            $id,
+            'Taxonomy ' . $text,
+            $taxonomy['Taxonomy']['namespace'] . ' - ' . $text
+        );
+
+        if ($this->_isRest()) {
+            if ($result) {
+                return $this->RestResponse->saveSuccessResponse('Taxonomy', 'toggleEnable', $id, $this->response->type());
+            } else {
+                return $this->RestResponse->saveFailResponse('Taxonomy', 'toggleEnable', $id, __('Could not toggle state.'), $this->response->type());
+            }
+        } else {
+            if ($result) {
+                $this->Flash->success(__('Taxonomy %s.', $text));
+            } else {
+                $this->Flash->error(__('Something went wrong.'));
+            }
+            return $this->redirect($this->referer());
+        }
+    }
+
     public function import()
     {
         $this->request->allowMethod(['post']);
@@ -295,19 +353,42 @@ class TaxonomiesController extends AppController
 
     public function addTag($taxonomy_id = false)
     {
+        if ($this->theme === 'Overmind') {
+            $this->layout=false;
+        }
         if ($this->request->is('get')) {
             if (empty($taxonomy_id) && !empty($this->request->params['named']['taxonomy_id'])) {
                 $taxonomy_id = $this->request->params['named']['taxonomy_id'];
             }
-            if (
-                empty($taxonomy_id) ||
-                empty($this->request->params['named']['name'])
-            ) {
+            if (empty($taxonomy_id)) {
                 throw new MethodNotAllowedException(__('Taxonomy ID or tag name must be provided.'));
-            } else {
-                $this->request->data['Taxonomy']['taxonomy_id'] = $taxonomy_id;
-                $this->request->data['Taxonomy']['name'] = $this->request->params['named']['name'];
             }
+            if (empty($this->request->params['named']['name'])) {
+                if ($this->theme !== 'Overmind') {
+                    throw new MethodNotAllowedException(__('Taxonomy ID or tag name must be provided.'));
+                }
+                $taxonomy = $this->Taxonomy->find('first', [
+                    'conditions' => ['Taxonomy.id' => $taxonomy_id],
+                    'contain' => [
+                        'TaxonomyPredicate' => [
+                            'fields' => ['TaxonomyPredicate.id', 'TaxonomyPredicate.value'],
+                            'TaxonomyEntry' => ['fields' => ['TaxonomyEntry.id', 'TaxonomyEntry.value']]
+                        ]
+                    ]
+                ]);
+                if (empty($taxonomy)) {
+                    throw new NotFoundException(__('Taxonomy not found.'));
+                }
+                // Same counter as the index cell, so the two never disagree.
+                $counted = $this->__tagCount([$taxonomy])[0];
+                $this->set('taxonomy', $counted['Taxonomy']);
+                $this->set('currentCount', $counted['current_count']);
+                $this->set('totalCount', $counted['total_count']);
+                $this->layout = false;
+                return $this->render('ajax/taxonomyEnableAllTagsConfirmationForm');
+            }
+            $this->request->data['Taxonomy']['taxonomy_id'] = $taxonomy_id;
+            $this->request->data['Taxonomy']['name'] = $this->request->params['named']['name'];
         } else {
             if ($taxonomy_id) {
                 $result = $this->Taxonomy->addTags($taxonomy_id);
@@ -403,19 +484,52 @@ class TaxonomiesController extends AppController
 
     public function disableTag($taxonomy_id = false)
     {
+        if ($this->theme === 'Overmind') {
+            $this->layout=false;
+        }
         if ($this->request->is('get')) {
             if (empty($taxonomy_id) && !empty($this->request->params['named']['taxonomy_id'])) {
                 $taxonomy_id = $this->request->params['named']['taxonomy_id'];
             }
-            if (
-                empty($taxonomy_id) ||
-                empty($this->request->params['named']['name'])
-            ) {
+            if (empty($taxonomy_id)) {
                 throw new MethodNotAllowedException(__('Taxonomy ID or tag name must be provided.'));
-            } else {
-                $this->request->data['Taxonomy']['taxonomy_id'] = $taxonomy_id;
-                $this->request->data['Taxonomy']['name'] = $this->request->params['named']['name'];
             }
+            if (empty($this->request->params['named']['name'])) {
+                /*
+                 * No tag named: this is the index's "enable all" asking before
+                 * it creates every tag the taxonomy is still missing. The
+                 * question and the creation share this URL, so the confirmation
+                 * form carries a token the POST can spend.
+                 *
+                 * Only the BS5 index offers it — the legacy one still confirms
+                 * in the browser and has no view here — so any other theme
+                 * keeps the old complaint.
+                 */
+                if ($this->theme !== 'Overmind') {
+                    throw new MethodNotAllowedException(__('Taxonomy ID or tag name must be provided.'));
+                }
+                $taxonomy = $this->Taxonomy->find('first', [
+                    'conditions' => ['Taxonomy.id' => $taxonomy_id],
+                    'contain' => [
+                        'TaxonomyPredicate' => [
+                            'fields' => ['TaxonomyPredicate.id', 'TaxonomyPredicate.value'],
+                            'TaxonomyEntry' => ['fields' => ['TaxonomyEntry.id', 'TaxonomyEntry.value']]
+                        ]
+                    ]
+                ]);
+                if (empty($taxonomy)) {
+                    throw new NotFoundException(__('Taxonomy not found.'));
+                }
+                // Same counter as the index cell, so the two never disagree.
+                $counted = $this->__tagCount([$taxonomy])[0];
+                $this->set('taxonomy', $counted['Taxonomy']);
+                $this->set('currentCount', $counted['current_count']);
+                $this->set('totalCount', $counted['total_count']);
+                $this->layout = false;
+                return $this->render('ajax/taxonomyEnableAllTagsConfirmationForm');
+            }
+            $this->request->data['Taxonomy']['taxonomy_id'] = $taxonomy_id;
+            $this->request->data['Taxonomy']['name'] = $this->request->params['named']['name'];
         } else {
             if ($taxonomy_id) {
                 $result = $this->Taxonomy->disableTags($taxonomy_id);
@@ -469,6 +583,22 @@ class TaxonomiesController extends AppController
         }
     }
 
+    public function deleteSelection($id = null)
+    {
+        return $this->CRUD->deleteSelection($id, [
+            'modelName' => 'Taxonomy',
+            'restName' => 'Taxonomies',
+            'itemName' => 'Taxonomy',
+            'view' => 'ajax/taxonomyDeleteConfirmationForm',
+            'checkModifyCallback' => function() {
+                return $this->userRole['perm_site_admin'];
+            },
+            'multiSuccessMessageCallback' => function($count) {
+                return __n('%s taxonomy deleted.', '%s taxonomies deleted.', $count, $count);
+            }
+        ]);
+    }
+
     public function toggleRequired($id)
     {
         $taxonomy = $this->Taxonomy->find('first', array(
@@ -479,20 +609,36 @@ class TaxonomiesController extends AppController
             return $this->RestResponse->saveFailResponse('Taxonomy', 'toggleRequired', $id, 'Invalid Taxonomy', $this->response->type());
         }
         if ($this->request->is('post')) {
-            $taxonomy['Taxonomy']['required'] = $this->request->data['Taxonomy']['required'];
-            $result = $this->Taxonomy->save($taxonomy);
-            if ($result) {
-                return $this->RestResponse->saveSuccessResponse('Taxonomy', 'toggleRequired', $id, $this->response->type());
+            if ($this->theme !== 'Overmind') {
+                $taxonomy['Taxonomy']['required'] = $this->request->data['Taxonomy']['required'];
             } else {
-                return $this->RestResponse->saveFailResponse('Taxonomy', 'toggleRequired', $id, $this->validationError, $this->response->type());
+                $taxonomy['Taxonomy']['required'] = !$taxonomy['Taxonomy']['required'];
+            }
+            $result = $this->Taxonomy->save($taxonomy);
+            if ($this->_isRest()) {
+                if ($result) {
+                    return $this->RestResponse->saveSuccessResponse('Taxonomy', 'toggleRequired', $id, $this->response->type());
+                } else {
+                    return $this->RestResponse->saveFailResponse('Taxonomy', 'toggleRequired', $id, $this->validationError, $this->response->type());
+                }
+            } else {
+                if ($result) {
+                    $this->Flash->success(__('Required field switched.'));
+                    $this->redirect($this->referer());
+                } else {
+                    $this->Flash->error(__('Something went wrong.'));
+                    $this->redirect($this->referer());
+                }
             }
         }
 
-        $this->set('required', !$taxonomy['Taxonomy']['required']);
-        $this->set('id', $id);
-        $this->autoRender = false;
-        $this->layout = false;
-        $this->render('ajax/toggle_required');
+        if ($this->theme !== 'Overmind') {
+            $this->set('required', !$taxonomy['Taxonomy']['required']);
+            $this->set('id', $id);
+            $this->autoRender = false;
+            $this->layout = false;
+            $this->render('ajax/toggle_required');
+        }
     }
 
     public function toggleHighlighted($id)
@@ -505,20 +651,36 @@ class TaxonomiesController extends AppController
             return $this->RestResponse->saveFailResponse('Taxonomy', 'toggleHighlighted', $id, 'Invalid Taxonomy', $this->response->type());
         }
         if ($this->request->is('post')) {
-            $taxonomy['Taxonomy']['highlighted'] = $this->request->data['Taxonomy']['highlighted'];
-            $result = $this->Taxonomy->save($taxonomy);
-            if ($result) {
-                return $this->RestResponse->saveSuccessResponse('Taxonomy', 'toggleHighlighted', $id, $this->response->type());
+            if ($this->theme !== 'Overmind') {
+                $taxonomy['Taxonomy']['highlighted'] = $this->request->data['Taxonomy']['highlighted'];
             } else {
-                return $this->RestResponse->saveFailResponse('Taxonomy', 'toggleHighlighted', $id, $this->validationError, $this->response->type());
+                $taxonomy['Taxonomy']['highlighted'] = !$taxonomy['Taxonomy']['highlighted'];
+            }
+            $result = $this->Taxonomy->save($taxonomy);
+            if ($this->_isRest()) {
+                if ($result) {
+                    return $this->RestResponse->saveSuccessResponse('Taxonomy', 'toggleHighlighted', $id, $this->response->type());
+                } else {
+                    return $this->RestResponse->saveFailResponse('Taxonomy', 'toggleHighlighted', $id, $this->validationError, $this->response->type());
+                }
+            } else {
+                if ($result) {
+                    $this->Flash->success(__('Highlighted field switched.'));
+                    $this->redirect($this->referer());
+                } else {
+                    $this->Flash->error(__('Something went wrong.'));
+                    $this->redirect($this->referer());
+                }
             }
         }
 
-        $this->set('highlighted', !$taxonomy['Taxonomy']['highlighted']);
-        $this->set('id', $id);
-        $this->autoRender = false;
-        $this->layout = false;
-        $this->render('ajax/toggle_highlighted');
+        if ($this->theme !== 'Overmind') {
+            $this->set('highlighted', !$taxonomy['Taxonomy']['highlighted']);
+            $this->set('id', $id);
+            $this->autoRender = false;
+            $this->layout = false;
+            $this->render('ajax/toggle_highlighted');
+        }
     }
 
     /**
@@ -567,8 +729,7 @@ class TaxonomiesController extends AppController
         $this->loadModel('Tag');
         $existingTags = $this->Tag->find('column', [
             'fields' => ['Tag.name'],
-            'conditions' => [
-                'lower(Tag.name)' => array_keys($tags),
+            'conditions' => $this->Tag->nameCondition(array_keys($tags)) + [
                 'hide_tag' => 0
             ],
         ]);
@@ -625,6 +786,148 @@ class TaxonomiesController extends AppController
         $conversionResult = $this->Taxonomy->normalizeCustomTagsToTaxonomyFormat();
         $this->Flash->success(__('%s tags successfully converted. %s row updated.', $conversionResult['tag_converted'], $conversionResult['row_updated']));
         $this->redirect(array('controller' => 'taxonomies', 'action' => 'index'));
+    }
+
+
+    // --- ENABLED ---
+    public function massEnable($idList = null)
+    {
+        return $this->_massToggleState($idList, 1, 'enabled');
+    }
+
+    public function massDisable($idList = null)
+    {
+        return $this->_massToggleState($idList, 0, 'enabled');
+    }
+
+    // --- REQUIRED ---
+    public function massRequire($idList = null)
+    {
+        return $this->_massToggleState($idList, 1, 'required');
+    }
+
+    public function massOptional($idList = null)
+    {
+        return $this->_massToggleState($idList, 0, 'required');
+    }
+
+    // --- HIGHLIGHTED ---
+    public function massHighlight($idList = null)
+    {
+        return $this->_massToggleState($idList, 1, 'highlighted');
+    }
+
+    public function massRemoveHighlight($idList = null)
+    {
+        return $this->_massToggleState($idList, 0, 'highlighted');
+    }
+
+    private function _massToggleState($idList = null, $state = null, $field = '')
+    {
+        $ids = $this->_massActionIdList($idList, 'Taxonomy');
+
+        if (empty($ids)) {
+            $message = __('Invalid IDs provided.');
+            if ($this->_isRest()) {
+                return $this->RestResponse->saveFailResponse('Taxonomies', 'massToggle', false, $message, $this->response->type());
+            }
+            return new CakeResponse([
+                'body' => json_encode(['saved' => false, 'errors' => $message]),
+                'status' => 200,
+                'type' => 'json'
+            ]);
+        }
+
+        if (!in_array($field, ['enabled', 'required', 'highlighted'])) {
+            $message = __('Invalid field provided.');
+            if ($this->_isRest()) {
+                return $this->RestResponse->saveFailResponse('Taxonomies', 'massToggle', false, $message, $this->response->type());
+            }
+            return new CakeResponse([
+                'body' => json_encode(['saved' => false, 'errors' => $message]),
+                'status' => 200,
+                'type' => 'json'
+            ]);
+        }
+
+        if ($this->request->is('post') || $this->request->is('put')) {
+            $successCount = 0;
+
+            foreach ($ids as $id) {
+                $this->Taxonomy->id = $id;
+
+                if ($this->Taxonomy->exists()) {
+                    if ($this->Taxonomy->saveField($field, $state)) {
+
+                        if ($field === 'enabled' && !$state) {
+                            $this->Taxonomy->disableTags($id);
+                        }
+                        // Log
+                        // $action = $state ? 'enable' : 'disable';
+                        // if ($field === 'required') {
+                        //     $action = $state ? 'required' : 'required';
+                        // } elseif ($field === 'highlighted') {
+                        //     $action = $state ? 'highlighted' : 'highlighted';
+                        // }
+
+                        // $this->__log(
+                        //     $action,
+                        //     $id,
+                        //     'Taxonomy ' . $field . ' changed',
+                        //     'Taxonomy ID ' . $id . ' set ' . $field . ' = ' . $state
+                        // );
+
+                        $successCount++;
+                    }
+                }
+            }
+
+            $actionTextMap = [
+                'enabled' => $state ? __('enabled') : __('disabled'),
+                'required' => $state ? __('required') : __('optional'),
+                'highlighted' => $state ? __('highlighted') : __('not highlighted'),
+            ];
+
+            $message = __('%s Taxonomies successfully %s.', $successCount, $actionTextMap[$field]);
+
+            if ($this->_isRest()) {
+                return $this->RestResponse->saveSuccessResponse('Taxonomies', 'massToggle', false, $this->response->type(), $message);
+            }
+            if ($this->request->is('ajax')) {
+                return new CakeResponse([
+                    'body' => json_encode(['saved' => true, 'success' => $message]),
+                    'status' => 200,
+                    'type' => 'json'
+                ]);
+            }
+
+            $this->Flash->success($message);
+            return $this->redirect($this->referer(['action' => 'index']));
+        }
+
+        $this->layout = false;
+
+        $actionTextMap = [
+            'enabled' => $state ? 'enable' : 'disable',
+            'required' => $state ? 'require' : 'make optional',
+            'highlighted' => $state ? 'highlight' : 'remove highlight on',
+        ];
+
+        $urlMap = [
+            'enabled' => $state ? 'massEnable' : 'massDisable',
+            'required' => $state ? 'massRequire' : 'massOptional',
+            'highlighted' => $state ? 'massHighlight' : 'massRemovehighlight',
+        ];
+
+        $this->set('actionText', __($actionTextMap[$field]));
+        $this->set('idArray', $ids);
+        $this->set('state', $state);
+        // The confirmation form carries the list back in Taxonomy.id - a
+        // JSON list in the POST URL is black-holed, see _massActionIdList().
+        $this->request->data['Taxonomy']['id'] = json_encode($ids);
+        $this->set('url', '/taxonomies/' . $urlMap[$field]);
+
+        $this->render('ajax/taxonomyToggleConfirmationForm');
     }
 
 }

@@ -31,8 +31,19 @@ class TasksController extends AppController
             throw new MethodNotAllowedException('You are not authorised to do that.');
         }
 
+        // Filter-bar controls
+        $conditions = [];
+        if (!empty($this->passedArgs['type'])) {
+            $conditions['Task.type'] = $this->passedArgs['type'];
+        }
+        if (isset($this->passedArgs['enabled']) && $this->passedArgs['enabled'] !== '') {
+            $conditions['Task.enabled'] = (int)$this->passedArgs['enabled'];
+        }
+
         $this->CRUD->index([
             'contain' => ['User.id', 'User.email', 'Job'],
+            'quickFilters' => ['Task.type', 'Task.action', 'Task.params', 'Task.description', 'Task.message'],
+            'conditions' => $conditions,
         ]);
         if ($this->IndexFilter->isRest()) {
             return $this->restResponsePayload;
@@ -49,6 +60,27 @@ class TasksController extends AppController
         }
 
         $this->set('schedulerEnabled', $schedulerEnabled);
+        $this->set('taskActionData', $this->__getTaskActionData());
+    }
+
+    /**
+     * id => name lookup maps (servers / feeds / workflows / taxii) consumed by
+     * the task_action Field to turn a task's `params` ids into readable target
+     * names. `callbacks => false` skips the (expensive) Workflow afterFind.
+     */
+    private function __getTaskActionData()
+    {
+        $this->Server = ClassRegistry::init('Server');
+        $this->Feed = ClassRegistry::init('Feed');
+        $this->Workflow = ClassRegistry::init('Workflow');
+        $this->TaxiiServer = ClassRegistry::init('TaxiiServer');
+        $listOpts = ['recursive' => -1, 'callbacks' => false];
+        return [
+            'servers'   => $this->Server->find('list', $listOpts + ['fields' => ['Server.id', 'Server.name']]),
+            'feeds'     => $this->Feed->find('list', $listOpts + ['fields' => ['Feed.id', 'Feed.name']]),
+            'workflows' => $this->Workflow->find('list', $listOpts + ['fields' => ['Workflow.id', 'Workflow.name']]),
+            'taxii'     => $this->TaxiiServer->find('list', $listOpts + ['fields' => ['TaxiiServer.id', 'TaxiiServer.name']]),
+        ];
     }
 
     public function toggleEnabled($id)
@@ -67,6 +99,17 @@ class TasksController extends AppController
         if ($this->request->is('post')) {
             $task['Task']['enabled'] = !$task['Task']['enabled'];
             $result = $this->Task->save($task);
+            if ($this->theme === 'Overmind' && !$this->IndexFilter->isRest()) {
+                // The themed confirm fragment submits natively, so redirect back
+                // to the (themed) index with a flash instead of raw JSON.
+                if ($result) {
+                    $this->Flash->success($task['Task']['enabled'] ? __('Task enabled.') : __('Task disabled.'));
+                } else {
+                    $this->Flash->error(__('Could not toggle the task.'));
+                }
+                $this->redirect(['action' => 'index']);
+                return;
+            }
             if ($result) {
                 return $this->RestResponse->saveSuccessResponse('Task', 'toggleEnabled', $id, $this->response->type());
             } else {
@@ -76,9 +119,13 @@ class TasksController extends AppController
 
         $this->set('enabled', !$task['Task']['enabled']);
         $this->set('id', $id);
-        $this->autoRender = false;
         $this->layout = false;
-        $this->render('ajax/toggle_enabled');
+        if ($this->theme === 'Overmind') {
+            $this->render('ajax/toggleEnabledConfirmationForm');
+        } else {
+            $this->autoRender = false;
+            $this->render('ajax/toggle_enabled');
+        }
     }
 
     public function add()
@@ -104,6 +151,11 @@ class TasksController extends AppController
             'menuList' => 'admin',
             'menuItem' => 'tasks',
         ]);
+
+        if ($this->theme === 'Overmind') {
+            $this->layout = false;
+            $this->render('add');
+        }
     }
 
     public function edit($id)
@@ -132,6 +184,8 @@ class TasksController extends AppController
                             if ($task['Task']['action'] === 'pull') {
                                 $task['Task']['server_technique'] = $params[1];
                             }
+                        } elseif ($task['Task']['type'] === 'TAXII') {
+                            $task['Task']['taxii_server_id'] = $params[0];
                         } elseif ($task['Task']['type'] === 'Feed') {
                             $task['Task']['feed_action'] = $task['Task']['action'];
                             if ($task['Task']['action'] === 'fetch') {
@@ -191,6 +245,9 @@ class TasksController extends AppController
                 'menuList' => 'admin',
                 'menuItem' => 'tasks',
             ]);
+            if ($this->theme === 'Overmind') {
+                $this->layout = false;
+            }
             $this->render('add');
         }
     }
@@ -204,6 +261,84 @@ class TasksController extends AppController
         if ($this->IndexFilter->isRest()) {
             return $this->restResponsePayload;
         }
+    }
+
+    public function deleteSelection($id = null)
+    {
+        if (!$this->_isSiteAdmin()) {
+            throw new MethodNotAllowedException('You are not authorised to do that.');
+        }
+
+        if ($this->request->is(['post', 'put', 'delete'])) {
+            $idList = $this->request->data['Task']['id'] ?? $id;
+            if (!is_array($idList)) {
+                $idList = is_numeric($idList) ? [$idList] : json_decode($idList, true);
+            }
+            if (empty($idList)) {
+                throw new NotFoundException(__('Invalid input.'));
+            }
+
+            $deleted = 0;
+            $failed = 0;
+            foreach ($idList as $taskId) {
+                $task = $this->Task->find('first', [
+                    'recursive' => -1,
+                    'conditions' => ['Task.id' => $taskId],
+                ]);
+                if (empty($task)) {
+                    $failed++;
+                    continue;
+                }
+                if ($this->Task->delete($task['Task']['id'])) {
+                    $deleted++;
+                } else {
+                    $failed++;
+                }
+            }
+
+            $messages = [];
+            if ($deleted) {
+                $messages[] = __n('%s task deleted.', '%s tasks deleted.', $deleted, $deleted);
+            }
+            if ($failed) {
+                $messages[] = __n('%s task could not be deleted.', '%s tasks could not be deleted.', $failed, $failed);
+            }
+            $message = trim(implode(' ', $messages));
+
+            if ($this->IndexFilter->isRest()) {
+                if ($deleted) {
+                    return $this->RestResponse->saveSuccessResponse('Tasks', 'deleteSelection', $id, $this->response->type(), $message);
+                }
+                return $this->RestResponse->saveFailResponse('Tasks', 'deleteSelection', false, $message, $this->response->type());
+            }
+
+            if ($deleted && !$failed) {
+                $this->Flash->success($message);
+            } elseif ($deleted) {
+                $this->Flash->warning($message);
+            } else {
+                $this->Flash->error($message ?: __('No tasks were deleted.'));
+            }
+            return $this->redirect(['action' => 'index']);
+        }
+
+        // GET → build the confirmation modal.
+        $idList = is_numeric($id) ? [$id] : json_decode($id, true);
+        if (empty($idList)) {
+            throw new NotFoundException(__('Invalid input.'));
+        }
+        $tasks = $this->Task->find('all', [
+            'recursive' => -1,
+            'conditions' => ['Task.id' => $idList],
+            'fields' => ['Task.id', 'Task.type', 'Task.action', 'Task.params', 'Task.description'],
+        ]);
+
+        $this->request->data['Task']['id'] = json_encode($idList);
+        $this->set('tasks', $tasks);
+        $this->set('idArray', $idList);
+        $this->set('taskActionData', $this->__getTaskActionData());
+        $this->layout = false;
+        $this->render('ajax/taskDeleteConfirmationForm');
     }
 
     public function forceRun($id)
@@ -257,8 +392,13 @@ class TasksController extends AppController
             }
         } else {
             $this->set('task', $task);
+            $this->set('id', $id);
             $this->layout = false;
-            $this->render('ajax/force_run');
+            if ($this->theme === 'Overmind') {
+                $this->render('ajax/forceRunConfirmationForm');
+            } else {
+                $this->render('ajax/force_run');
+            }
         }
     }
 
@@ -306,7 +446,11 @@ class TasksController extends AppController
         $this->set('task', $task);
         $this->set('logs', $this->__getFailedJobLog($task['Job']['process_id']));
         $this->layout = false;
-        $this->render('ajax/view_logs');
+        if ($this->theme === 'Overmind') {
+            $this->render('ajax/viewLogs');
+        } else {
+            $this->render('ajax/view_logs');
+        }
     }
 
     private function __getFailedJobLog(string $id): array
@@ -326,6 +470,7 @@ class TasksController extends AppController
         $this->Server = ClassRegistry::init('Server');
         $this->Feed = ClassRegistry::init('Feed');
         $this->Workflow = ClassRegistry::init('Workflow');
+        $this->TaxiiServer = ClassRegistry::init('TaxiiServer');
 
         $workflows = $this->Workflow->find('all', [
             'order' => ['Workflow.name' => 'ASC'],
@@ -362,6 +507,11 @@ class TasksController extends AppController
                 'order' => ['Feed.name' => 'ASC']
             ]),
             'workflows' => $dropdownWorkflows,
+            'taxii_servers' => ['all' => __('All enabled TAXII servers')] + $this->TaxiiServer->find('list', [
+                'fields' => ['TaxiiServer.id', 'TaxiiServer.name'],
+                'conditions' => ['TaxiiServer.enabled' => 1],
+                'order' => ['TaxiiServer.name' => 'ASC']
+            ]),
         ];
 
         return $dropdownData;
@@ -416,6 +566,21 @@ class TasksController extends AppController
                 return;
             }
             $data['Task']['params'] = $data['Task']['workflow'];
+        } elseif ($data['Task']['type'] === 'TAXII') {
+            $data['Task']['action'] = 'push';
+
+            if (!isset($data['Task']['taxii_server_id']) || empty($data['Task']['taxii_server_id'])) {
+                $this->Flash->error(__('Please select a TAXII server.'));
+                return;
+            }
+            if ($data['Task']['taxii_server_id'] !== 'all' && !$this->TaxiiServer->hasAny([
+                'TaxiiServer.id' => $data['Task']['taxii_server_id'],
+                'TaxiiServer.enabled' => 1,
+            ])) {
+                $this->Flash->error(__('Please select an enabled TAXII server.'));
+                return;
+            }
+            $data['Task']['params'] = $data['Task']['taxii_server_id'];
         } elseif ($data['Task']['type'] === 'Periodic Summary') {
             $data['Task']['action'] = 'send';
         } elseif ($data['Task']['type'] === 'Admin') {

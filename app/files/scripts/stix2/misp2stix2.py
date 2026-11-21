@@ -26,14 +26,14 @@ from typing import Union
 
 import importlib
 MODULE_TO_DIRECTORY = {
+    "misp_stix_converter": "misp-stix",
     "stix2": "cti-python-stix2",
     "stix": "python-stix",
     "cybox": "python-cybox",
     "mixbox": "mixbox",
-    "misp_stix_converter": "misp-stix",
-    "maec": "python-maec",
+    "maec": "python-maec"
 }
-_CURRENT_PATH = Path(__file__).resolve().parent
+_CURRENT_PATH = Path(__file__).resolve().parent.parent
 _CURRENT_PATH_IDX = 0
 for module_name, dir_path in MODULE_TO_DIRECTORY.items():
     try:
@@ -67,7 +67,7 @@ def _process_misp_files(
             parser.parse_json_file(name)
             with open(f'{name}.out', 'wt', encoding='utf-8') as f:
                 f.write(
-                    json.dumps(parser.stix_objects, cls=STIXJSONEncoder)
+                    json.dumps(parser.fetch_stix_objects, cls=STIXJSONEncoder)
                 )
         if parser.errors:
             _handle_messages('Errors', parser.errors)

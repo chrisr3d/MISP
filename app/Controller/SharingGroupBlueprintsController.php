@@ -64,7 +64,22 @@ class SharingGroupBlueprintsController extends AppController
         if ($this->restResponsePayload) {
             return $this->restResponsePayload;
         }
+        if ($this->theme === 'Overmind') {
+            $this->layout = false;
+        }
+        $this->__setRuleVocabulary();
         $this->set('menuData', array('menuList' => 'globalActions', 'menuItem' => 'addMG'));
+    }
+
+    /**
+     * The rule editor builds its filter palette and validates the keys the user
+     * types against the model, so the form cannot drift from what
+     * SharingGroupBlueprint::__evaluateLeaf() actually understands.
+     */
+    private function __setRuleVocabulary()
+    {
+        $this->set('validFilters', $this->SharingGroupBlueprint->validFilters);
+        $this->set('operands', $this->SharingGroupBlueprint->operands);
     }
 
     public function edit($id)
@@ -83,6 +98,10 @@ class SharingGroupBlueprintsController extends AppController
         if ($this->IndexFilter->isRest()) {
             return $this->restResponsePayload;
         }
+        if ($this->theme === 'Overmind') {
+            $this->layout = false;
+        }
+        $this->__setRuleVocabulary();
         $this->render('add');
     }
 
@@ -96,6 +115,22 @@ class SharingGroupBlueprintsController extends AppController
         if ($this->IndexFilter->isRest()) {
             return $this->restResponsePayload;
         }
+    }
+
+    public function deleteSelection($id = null)
+    {
+        return $this->CRUD->deleteSelection($id, [
+            'modelName' => 'SharingGroupBlueprint',
+            'restName' => 'SharingGroupBlueprints',
+            'itemName' => 'SharingGroupBlueprint',
+            'view' => 'ajax/sharingGroupBlueprintDeleteConfirmationForm',
+            'checkModifyCallback' => function($itemId) {
+                return $this->userRole['perm_site_admin'];
+            },
+            'multiSuccessMessageCallback' => function($count) {
+                return __n('%s SharingGroupBlueprint deleted.', '%s SharingGroupBlueprints deleted.', $count, $count);
+            }
+        ]);
     }
 
     public function view($id)
@@ -123,6 +158,43 @@ class SharingGroupBlueprintsController extends AppController
         }
         $this->set('id', $id);
         $this->set('menuData', array('menuList' => 'globalActions', 'menuItem' => 'viewMG'));
+        $this->__setRuleVocabulary();
+        try {
+            $orgIds = $this->__matchingOrgIds($this->viewVars['data']);
+            $matchingOrgs = empty($orgIds) ? [] : $this->SharingGroupBlueprint->SharingGroup->Organisation->find('all', [
+                'recursive' => -1,
+                'fields' => ['id', 'uuid', 'name', 'sector', 'type', 'nationality', 'local'],
+                'conditions' => ['id' => $orgIds],
+                'order' => ['Organisation.name'],
+            ]);
+            $this->set('matchingOrgs', $matchingOrgs);
+            $this->set('matchingOrgCount', count($matchingOrgs));
+        } catch (Exception $e) {
+            $this->set('matchingOrgs', null);
+            $this->set('matchingOrgCount', null);
+        }
+    }
+
+    /**
+     * The organisations the blueprint selects, evaluated as its creator org so
+     * an admin looking at it sees what its owner would get.
+     *
+     * @param array $sharingGroupBlueprint
+     * @return array organisation ids
+     */
+    private function __matchingOrgIds(array $sharingGroupBlueprint)
+    {
+        $creator = [
+            'Role' => [
+                'perm_site_admin' => false
+            ],
+            'org_id' => $sharingGroupBlueprint['SharingGroupBlueprint']['org_id'],
+            'id' => 1
+        ];
+        $rules = $sharingGroupBlueprint['SharingGroupBlueprint']['rules'];
+        $sharingGroupBlueprint['SharingGroupBlueprint']['rules'] = json_encode(json_decode($rules, true));
+        $result = $this->SharingGroupBlueprint->evaluateSharingGroupBlueprint($sharingGroupBlueprint, $creator);
+        return array_values(array_unique($result['orgs'] ?? []));
     }
 
     public function viewOrgs($id)
@@ -135,19 +207,10 @@ class SharingGroupBlueprintsController extends AppController
         if (empty($sharingGroupBlueprint)) {
             throw new NotFoundException(__('Invalid Sharing Group Blueprint'));
         }
-        // we create a fake user to restrict the visible sharing groups to the creator of the SharingGroupBlueprint, in case an admin wants to update it
-        $fake_user = [
-            'Role' => [
-                'perm_site_admin' => false
-            ],
-            'org_id' => $sharingGroupBlueprint['SharingGroupBlueprint']['org_id'],
-            'id' => 1
-        ];
-        $temp = $this->SharingGroupBlueprint->evaluateSharingGroupBlueprint($sharingGroupBlueprint, $fake_user);
         $orgs = $this->SharingGroupBlueprint->SharingGroup->Organisation->find('all', [
             'recursive' => -1,
             'fields' => ['id', 'uuid', 'name', 'sector', 'type', 'nationality'],
-            'conditions' => ['id' => $temp['orgs']]
+            'conditions' => ['id' => $this->__matchingOrgIds($sharingGroupBlueprint)]
         ]);
         if ($this->IndexFilter->isRest()) {
             return $this->RestResponse->viewData($orgs, 'json');
@@ -240,7 +303,11 @@ class SharingGroupBlueprintsController extends AppController
             $this->set('question', __('Are you sure you want to detach the associated sharing group from this Sharing Group Blueprint? This action is irreversible.'));
             $this->set('actionName', __('Detach'));
             $this->layout = false;
-            $this->render('/genericTemplates/confirm');
+            if($this->theme === "Overmind"){
+                $this->render('ajax/sharingGroupBlueprintDetachConfirmationForm');
+            } else {
+                $this->render('/genericTemplates/confirm');
+            }
         }
     }
 
@@ -327,6 +394,9 @@ class SharingGroupBlueprintsController extends AppController
         $server_data = [];
         foreach ($servers as $s) {
             $server_data[$s['Server']['id']] = $s['Server']['name'];
+        }
+        if ($this->theme === 'Overmind') {
+            $this->layout = false;
         }
         $this->set('servers', $server_data);
     }

@@ -3,6 +3,7 @@
 class OrgEvolutionLineWidget
 {
     public $title = 'Evolution of orgs count (filterable)';
+    public $category = 'orgs';
     public $render = 'MultiLineChart';
     public $width = 7;
     public $height = 6;
@@ -15,6 +16,12 @@ class OrgEvolutionLineWidget
         'start_date' => 'Start date, expressed in Y-m-d format (e.g. 2012-10-01)',
         'local' => 'Should the list only show local organisations? (boolean or list of booleans, defaults to 1. To get both sets, use [0,1])',
         'cumulative' => '(default: on), should the data counted cumulatively over time',
+    ];
+    public $schema = [
+        'filter' => [
+            'type' => 'org_meta_filter',
+            'help' => 'Filter by organisation meta-data (sector, type, nationality, name, uuid). Each entry may have "!" prefix to negate.',
+        ],
     ];
     private $validFilterKeys = [
         'nationality',
@@ -81,12 +88,15 @@ class OrgEvolutionLineWidget
         if ($timeConditions) {
             $params['conditions']['AND'][] = ['Organisation.date_created >=' => $timeConditions];
         }
+        // Grouping by the formatted month alone: MONTH()/YEAR() were both
+        // MySQL-only and redundant, since the 'YYYY-MM' string already
+        // determines them.
+        $month = $this->Organisation->getSqlDialect()->formatYearMonth('date_created');
         $raw = $this->Organisation->find('all', [
             'recursive' => -1,
             'conditions' => $params['conditions'],
-            'fields' => ['DATE_FORMAT(date_created, "%Y-%m") AS date', 'count(id) AS count'],
-            'group' => ['MONTH(date_created), YEAR(date_created)', 'date']
-            
+            'fields' => [$month . ' AS date', 'count(id) AS count'],
+            'group' => [$month]
         ]);
         usort($raw, [$this, 'sortByCreationDate']);
         $raw_padded = [];

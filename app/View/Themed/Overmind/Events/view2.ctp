@@ -1,0 +1,186 @@
+<?php
+    $this->set('headerIdentity', $event['Event']);
+    $headerTitle = __('') . ($event['Event']['info'] ?? '');
+    $headerDescription = '';
+    $headerActions = [];
+
+    $canEdit = $isSiteAdmin || $this->Acl->canModifyEvent($event);
+    if ($canEdit) {
+        $headerActions[] = [
+            'type' => 'modal',
+            'tab' => 'attributes',
+            'label' => __('Add attribute'),
+            'icon' => 'plus',
+            'url' => sprintf('%s/attributes/add/%s', $baseurl, h($event['Event']['id'])),
+        ];
+
+        $headerActions[] = [
+            'type' => 'modal',
+            'tab' => 'objects',
+            'label' => __('Add object'),
+            'icon' => 'plus',
+            'url' => sprintf('%s/objects/add/%s', $baseurl, h($event['Event']['id'])),
+        ];
+
+        $headerActions[] = [
+            'type' => 'modal',
+            'tab' => 'reports',
+            'label' => __('Add report'),
+            'icon' => 'plus',
+            'url' => sprintf('%s/event_reports/add/%s', $baseurl, h($event['Event']['id'])),
+        ];
+    }
+
+    $this->set('headerTitle', $headerTitle);
+    $this->set('headerDescription', $headerDescription);
+    $this->set('headerActions', $headerActions);
+
+    echo $this->element('genericElements/assetLoader', [
+        'js'  => ['markdown-it', 'font-awesome-helper', 'misp-report-markdown', 'Chart.min']
+    ]);
+
+    // Extended / extending view: say so, and carry the mode into every lazy
+    // tab so a tab load never drops back to the atomic view.
+    echo $this->element('Events/View/extension_banner');
+    $extensionSuffix = $extensionSuffix ?? '';
+
+    $searchFor = $this->request->params['named']['searchFor'] ?? '';
+    $distributionFilter = $this->request->params['named']['distribution'] ?? '';
+    $listSuffix = $extensionSuffix
+        . ($searchFor !== '' ? '/searchFor:' . rawurlencode($searchFor) : '')
+        . ($distributionFilter !== '' ? '/distribution:' . (int)$distributionFilter : '');
+
+    $outliers = [];
+    foreach (['Attribute' => 'attributes', 'Object' => 'objects'] as $scope => $tab) {
+        foreach ($distributionOutliers[$scope] ?? [] as $level => $count) {
+            $outliers[] = [
+                'level' => $level,
+                'text' => $scope === 'Attribute'
+                    ? __n('%s attribute', '%s attributes', $count, $count)
+                    : __n('%s object', '%s objects', $count, $count),
+                'url' => sprintf(
+                    '%s/events/view2/%s%s/distribution:%s#tab-%s',
+                    $baseurl, h($event['Event']['id']), $extensionSuffix, $level, $tab
+                ),
+            ];
+        }
+    }
+
+    echo $this->element('genericElementsBS5/Layout/view_layout',
+    [
+        'data' => $event,
+        'ownership' => [
+            'orgc' => $event['Orgc'] ?? [],
+            'org' => $event['Org'] ?? [],
+            'user' => $event['User'] ?? [],
+            'distribution' => $event['Event']['distribution'] ?? null,
+            'sharingGroup' => $event['SharingGroup'] ?? [],
+            'outliers' => $outliers,
+        ],
+        'report' => $event['EventReport'] ?? null,
+        'tabs' => [
+            [
+                'id' => 'general',
+                'title' => __('General'),
+                'icon' => 'fas fa-info-circle',
+
+                // Content
+                'left' => [
+                    'EventReports/View/eventReport_preview',
+                    ['row' => ['Events/View/event_tags', 'Events/View/event_galaxies']],
+                    ['row' => ['Events/View/event_attachments', 'Events/View/event_analyst_data']],
+                    'Events/View/event_general',
+                ],
+                'right' => [
+                    'Events/View/event_actions',
+                    'Events/View/event_galaxy_matrices',
+                    'Events/View/event_sightings',
+                    'Events/View/event_related',
+                    'Events/View/event_warninglists',
+                    'Events/View/event_collections',
+                ]
+            ],
+            [
+                'id' => 'objects',
+                'title' => __('Objects'),
+                'icon' => 'misp-icon misp-icon-object misp-simple',
+                'count' => $object_count ?? 0,
+
+                // Content
+                'left' => [
+                    [
+                        'ajax' => sprintf('/events/viewObjects/%s%s', h($event['Event']['id']), $listSuffix)
+                    ]
+                ],
+            ],
+            [
+                'id' => 'attributes',
+                'title' => __('Attributes'),
+                'icon' => 'misp-icon misp-icon-attribute misp-simple',
+                'count' => $attribute_count ?? 0,
+
+                // Content
+                'left' => [
+                    [
+                        'ajax' => sprintf('/events/viewAttributes/%s%s', h($event['Event']['id']), $listSuffix)
+                    ]
+                ],
+            ],
+            [
+                'id' => 'reports',
+                'title' => __('Reports'),
+                'icon' => 'misp-icon misp-icon-report misp-simple',
+                'count' => $report_count ?? 0,
+
+                // Content
+                'left' => [
+                    [
+                        'ajax' => sprintf('/events/viewEventReports/%s%s', h($event['Event']['id']), $extensionSuffix)
+                    ]
+                ],
+            ],
+            [
+                'id' => 'correlation',
+                'title' => __('Correlation'),
+                'icon' => 'fas fa-link',
+                'count' => $correlation_count ?? 0,
+
+                // Content
+                'left' => [
+                    'Events/View/event_correlation_graph',
+                ],
+            ],
+            [
+                'id' => 'pivot-explorer',
+                'title' => __('Pivot Explorer'),
+                'icon' => 'fas fa-circle-nodes',
+
+                // Content
+                'left' => [
+                    'Events/View/event_pivot_explorer',
+                ],
+            ],
+            [
+                'id' => 'timeline',
+                'title' => __('Timeline'),
+                'icon' => 'fas fa-timeline',
+
+                // Content
+                'left' => [
+                    'Events/View/event_timeline',
+                ],
+            ],
+            [
+                'id' => 'history',
+                'title' => __('History'),
+                'icon' => 'fas fa-history',
+
+                // Content
+                'left' => [
+                    'Events/View/event_history',
+                ]
+            ]
+        ]
+    ]);
+?>
+

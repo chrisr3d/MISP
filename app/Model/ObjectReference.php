@@ -126,24 +126,26 @@ class ObjectReference extends AppModel
 
     public function smartDelete($id, $hard = false)
     {
+        $reference = $this->find('first', array(
+            'conditions' => array('ObjectReference.id' => $id),
+            'recursive' => -1
+        ));
+        if (empty($reference)) {
+            return array('Invalid object reference.');
+        }
+
         if ($hard) {
             $result = $this->delete($id);
             if ($result) {
-                $this->updateTimestamps($id);
+                $this->updateTimestamps($reference);
             }
             return $result;
         } else {
-            $reference = $this->find('first', array(
-                'conditions' => array('ObjectReference.id' => $id),
-                'recursive' => -1
-            ));
-            if (empty($reference)) {
-                return array('Invalid object reference.');
-            }
             $reference['ObjectReference']['deleted'] = 1;
-            $result = $this->save($reference);
+            $reference['ObjectReference']['timestamp'] = time();
+            $result = $this->save($reference, true, array('id', 'deleted', 'timestamp'));
             if ($result) {
-                $this->updateTimestamps($id);
+                $this->updateTimestamps($reference);
                 return true;
             }
             return $this->validationErrors;
@@ -177,7 +179,7 @@ class ObjectReference extends AppModel
             } elseif (!empty($data[$side]) && $side == 'referenced') {
                 $referenced_id = $data[$side]['Object']['id'];
                 $referenced_type = 1;
-            } elseif (!empty($data[$side]) && $side = 'object') {
+            } elseif (!empty($data[$side]) && $side == 'object') {
                 $object_id = $data[$side]['Object']['id'];
             } else {
                 return 'Invalid ' . $side . ' uuid';
@@ -211,6 +213,15 @@ class ObjectReference extends AppModel
                 'recursive' => -1
             ));
             if (!empty($existingReference)) {
+                // The uuid is unique: another event's reference is neither updated nor recreated here.
+                if ((int)$existingReference['ObjectReference']['event_id'] !== (int)$eventId) {
+                    // Not 'edit': createLogEntry() drops those when the new audit log is on.
+                    $this->loadLog()->createLogEntry('SYSTEM', 'warning', 'ObjectReference', 0,
+                        'Duplicate UUID found in object reference',
+                        sprintf('An object reference was blocked from being saved in event %s: its uuid %s belongs to a reference in event %s.', $eventId, $reference['uuid'], $existingReference['ObjectReference']['event_id'])
+                    );
+                    return true;
+                }
                 // ObjectReference not newer than existing one
                 if (isset($reference['timestamp']) && $reference['timestamp'] <= $existingReference['ObjectReference']['timestamp']) {
                     return true;

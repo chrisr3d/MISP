@@ -60,6 +60,7 @@ class CorrelationsController extends AppController
 
     public function generateTopCorrelations()
     {
+        $this->request->allowMethod(['post']);
         $result = $this->Correlation->generateTopCorrelationsRouter();
         if ($this->_isRest()) {
             return $this->RestResponse->viewData($result, 'json');
@@ -80,14 +81,14 @@ class CorrelationsController extends AppController
     {
         $query = [
             'limit' => 50,
-            'page' => 1,
-            'order' => 'occurrence desc'
+            'page' => 1
         ];
         foreach ($query as $customParam => $foo) {
             if (isset($this->request->params['named'][$customParam])) {
                 $query[$customParam] = $this->request->params['named'][$customParam];
             }
         }
+        $query['order'] = 'occurrence desc';
         if (isset($this->request->params['named']['scope'])) {
             $limit = $this->Correlation->OverCorrelatingValue->getLimit();
             if ($this->request->params['named']['scope'] === 'over_correlating') {
@@ -211,6 +212,7 @@ class CorrelationsController extends AppController
 
     public function generateOccurrences()
     {
+        $this->request->allowMethod(['post']);
         $this->loadModel('OverCorrelatingValue');
         $this->OverCorrelatingValue->generateOccurrencesRouter();
         if (Configure::read('MISP.background_jobs')) {
@@ -223,5 +225,136 @@ class CorrelationsController extends AppController
         }
         $this->Flash->info($message);
         $this->redirect(['controller' => 'correlations', 'action' => 'overCorrelations']);
+    }
+
+    public function eventCorrelations($eventId)
+    {
+        if (!$this->Auth->user()) {
+            throw new ForbiddenException();
+        }
+        $this->loadModel('Event');
+        $event = $this->Event->fetchSimpleEvent($this->Auth->user(), $eventId, ['fields' => ['Event.id']]);
+        if (empty($event)) {
+            throw new NotFoundException(__('Invalid event.'));
+        }
+        $eventId = (int)$event['Event']['id'];
+        $sgids = $this->Event->SharingGroup->authorizedIds($this->Auth->user());
+        $correlations = $this->Correlation->getAttributesRelatedToEvent($this->Auth->user(), $eventId, $sgids);
+        $extended = filter_var($this->request->query('extended'), FILTER_VALIDATE_BOOLEAN);
+        $includeAttributes = $extended || filter_var($this->request->query('include_attributes'), FILTER_VALIDATE_BOOLEAN);
+        $includeOrgNames = $extended || filter_var($this->request->query('include_org_names'), FILTER_VALIDATE_BOOLEAN);
+        $includeWarninglistHits = filter_var($this->request->query('include_warninglist_hits'), FILTER_VALIDATE_BOOLEAN);
+        if ($includeAttributes || $includeOrgNames) {
+            $attributeIds = [];
+            $orgIds = [];
+            foreach ($correlations as $parentId => $relations) {
+                foreach ($relations as $rel) {
+                    if ($includeAttributes) {
+                        $attributeIds[] = $rel['attribute_id'];
+                    }
+                    if ($includeOrgNames && !empty($rel['org_id'])) {
+                        $orgIds[(int)$rel['org_id']] = (int)$rel['org_id'];
+                    }
+                }
+            }
+            if ($includeAttributes && !empty($attributeIds)) {
+                $this->loadModel('MispAttribute');
+                $attributes = $this->MispAttribute->find('all', [
+                    'conditions' => ['Attribute.id' => $attributeIds],
+                    'contain' => [
+                        'AttributeTag' => ['Tag'],
+                        'SharingGroup' => ['fields' => ['SharingGroup.name']],
+                        'Object' => ['fields' => ['Object.id', 'Object.name', 'Object.uuid']]
+                    ]
+                ]);
+                $attributeDetails = [];
+                foreach ($attributes as $attr) {
+                    $attributeDetails[$attr['Attribute']['id']] = $attr;
+                }
+                foreach ($correlations as $parentId => &$relations) {
+                    foreach ($relations as &$rel) {
+                        if (isset($attributeDetails[$rel['attribute_id']])) {
+                            $rel['Attribute'] = $attributeDetails[$rel['attribute_id']]['Attribute'];
+                            $rel['Attribute']['AttributeTag'] = $attributeDetails[$rel['attribute_id']]['AttributeTag'];
+                            $rel['Attribute']['SharingGroup'] = $attributeDetails[$rel['attribute_id']]['SharingGroup'];
+                            if (!empty($attributeDetails[$rel['attribute_id']]['Object'])) {
+                                $rel['Attribute']['Object'] = $attributeDetails[$rel['attribute_id']]['Object'];
+                            }
+                        }
+                    }
+                }
+            }
+            if ($includeOrgNames && !empty($orgIds)) {
+                $this->loadModel('Organisation');
+                $organisations = $this->Organisation->find('list', [
+                    'recursive' => -1,
+                    'conditions' => ['Organisation.id' => array_values($orgIds)],
+                    'fields' => ['Organisation.id', 'Organisation.name']
+                ]);
+                foreach ($correlations as &$relations) {
+                    foreach ($relations as &$rel) {
+                        if (!empty($rel['org_id']) && isset($organisations[$rel['org_id']])) {
+                            $rel['org_name'] = $organisations[$rel['org_id']];
+                        }
+                    }
+                }
+                unset($relations, $rel);
+            }
+        }
+        if (!$includeWarninglistHits) {
+            return $this->RestResponse->viewData($correlations, 'json');
+        }
+        // Opt-in envelope - the bare map is kept for every other caller
+        return $this->RestResponse->viewData([
+            'correlations' => $correlations,
+            'warninglist_hits' => $this->__warninglistHits(array_keys($correlations)),
+        ], 'json');
+    }
+
+    /**
+     * Maps attribute IDs onto the names of the enabled warninglists they
+     * hit. Attributes without a hit are left out, so an empty result means
+     * no correlating attribute of the event is warninglisted.
+     *
+     * Only to_ids attributes are checked, as everywhere else in MISP.
+     *
+     * @param array $attributeIds
+     * @return array [attribute_id => [warninglist name, ..]]
+     */
+    private function __warninglistHits(array $attributeIds)
+    {
+        if (empty($attributeIds)) {
+            return [];
+        }
+        $this->loadModel('MispAttribute');
+        $this->loadModel('Warninglist');
+        $attributes = $this->MispAttribute->find('all', [
+            'recursive' => -1,
+            'conditions' => ['Attribute.id' => $attributeIds],
+            'fields' => [
+                'Attribute.id',
+                'Attribute.type',
+                'Attribute.value',
+                'Attribute.to_ids',
+            ],
+        ]);
+        // attachWarninglistToAttributes() works on flat attributes
+        $flat = [];
+        foreach ($attributes as $attribute) {
+            $flat[] = $attribute['Attribute'];
+        }
+        $this->Warninglist->attachWarninglistToAttributes($flat);
+        $hits = [];
+        foreach ($flat as $attribute) {
+            if (empty($attribute['warnings'])) {
+                continue;
+            }
+            $names = [];
+            foreach ($attribute['warnings'] as $warning) {
+                $names[$warning['warninglist_name']] = true;
+            }
+            $hits[$attribute['id']] = array_keys($names);
+        }
+        return $hits;
     }
 }

@@ -4,6 +4,8 @@ from zmq.auth.thread import ThreadAuthenticator
 from zmq.utils.monitor import recv_monitor_message
 import sys
 import redis
+from redis.exceptions import TimeoutError as RedisTimeoutError
+from redis.exceptions import ConnectionError as RedisConnectionError
 import os
 import time
 import threading
@@ -61,20 +63,21 @@ class MispZmq:
     redis: redis.StrictRedis
     namespace: str
 
-    def __init__(self, debug=False):
+    def __init__(self, debug=False, supervisor_managed=False):
         logging.basicConfig(level=logging.DEBUG if debug else logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
         self._logger = logging.getLogger()
 
         self.tmp_location = Path(__file__).parent.parent / "tmp"
-        self.pidfile = self.tmp_location / "mispzmq.pid"
-        if self.pidfile.exists():
-            with open(self.pidfile.as_posix()) as f:
-                pid = f.read()
-            if check_pid(pid):
-                raise Exception(f"mispzmq already running on PID {pid}")
-            else:
-                # Cleanup
-                self.pidfile.unlink()
+        if not supervisor_managed:
+            self.pidfile = self.tmp_location / "mispzmq.pid"
+            if self.pidfile.exists():
+                with open(self.pidfile.as_posix()) as f:
+                    pid = f.read()
+                if check_pid(pid):
+                    raise Exception(f"mispzmq already running on PID {pid}")
+                else:
+                    # Cleanup
+                    self.pidfile.unlink()
         if (self.tmp_location / "mispzmq_settings.json").exists():
             self._setup()
         else:
@@ -92,7 +95,7 @@ class MispZmq:
             redis_host = redis_host[6:]
         self.redis = redis.StrictRedis(host=redis_host, db=self.settings["redis_database"],
                                    password=self.settings["redis_password"], port=self.settings["redis_port"],
-                                   ssl=redis_ssl)
+                                   ssl=redis_ssl, protocol=2, socket_connect_timeout=5, socket_timeout=30, health_check_interval=30, retry_on_timeout=True)
         self.timestamp_settings = time.time()
         self._logger.debug("Connected to Redis {}:{}/{}".format(self.settings["redis_host"], self.settings["redis_port"],
                                                            self.settings["redis_database"]))
@@ -150,6 +153,8 @@ class MispZmq:
             self._logger.warning(f"Received invalid command '{command}'.")
 
     def _create_pid_file(self):
+        if self.pidfile is None:
+            return
         with open(self.pidfile.as_posix(), "w") as f:
             f.write(str(os.getpid()))
 
@@ -183,7 +188,7 @@ class MispZmq:
             "While you're dying I'll be still alive.",
         ]
         topics = ["misp_json", "misp_json_event", "misp_json_attribute", "misp_json_sighting",
-                  "misp_json_organisation", "misp_json_user", "misp_json_conversation",
+                  "misp_json_organisation", "misp_json_user",
                   "misp_json_object", "misp_json_object_reference", "misp_json_audit",
                   "misp_json_tag", "misp_json_warninglist", "misp_json_workflow"
                   ]
@@ -195,7 +200,16 @@ class MispZmq:
         key_prefix = f"{self.namespace}:".encode("utf-8")
 
         while True:
-            data = self.redis.blpop(lists, timeout=10)
+            try:
+                data = self.redis.blpop(lists, timeout=10)
+            except RedisTimeoutError:
+                self._logger.debug("Redis BLPOP timeout")
+                data = None
+            except RedisConnectionError as e:
+                self._logger.debug("Redis connection error")
+                time.sleep(2)
+                self._setup()
+                data = None
 
             if data is None:
                 # redis timeout expired
@@ -227,9 +241,11 @@ class MispZmq:
 if __name__ == "__main__":
     arg_parser = argparse.ArgumentParser(description="MISP ZeroMQ PUB server")
     arg_parser.add_argument("--debug", action="store_true", help="Enable debugging messages")
+    arg_parser.add_argument("--supervisor-managed", action="store_true",
+                            help="Disable PID file handling when managed by Supervisor")
     parsed = arg_parser.parse_args()
 
-    mzq = MispZmq(parsed.debug)
+    mzq = MispZmq(parsed.debug, supervisor_managed=parsed.supervisor_managed)
     try:
         mzq.main()
     except KeyboardInterrupt:

@@ -70,6 +70,13 @@ class CRUDComponent extends Component
             $this->Controller->restResponsePayload = $this->Controller->RestResponse->viewData($data, 'json');
         } else {
             $query['includeAnalystData'] = true;
+            // Optional pagination overrides — web UI only, REST returns the full set.
+            if (!empty($options['limit'])) {
+                $query['limit'] = $options['limit'];
+            }
+            if (!empty($options['maxLimit'])) {
+                $query['maxLimit'] = $options['maxLimit'];
+            }
             $this->Controller->paginate = $query;
             $data = $this->Controller->paginate();
             if (isset($options['afterFind'])) {
@@ -89,8 +96,12 @@ class CRUDComponent extends Component
         $data = [];
         if ($this->Controller->request->is('post') || $this->Controller->request->is('put')) {
             $input = $this->Controller->request->data;
-            if (empty($input[$modelName])) {
+            if (empty($input[$modelName]) || !is_array($input[$modelName])) {
                 $input = [$modelName => $input];
+            } else {
+                // A flat body can survive alongside the model's own block, for instance when the
+                // controller promotes harvested parameters into it. The block is the record.
+                $input = [$modelName => $input[$modelName]];
             }
             if (!empty($params['override'])) {
                 foreach ($params['override'] as $field => $value) {
@@ -199,13 +210,19 @@ class CRUDComponent extends Component
             $data = $params['afterFind']($data);
         }
         if ($this->Controller->request->is('post') || $this->Controller->request->is('put')) {
+            // The record loaded above is the only row this edit is authorised to touch.
+            // Capture its primary key now so a payload-supplied id cannot later redirect
+            // save() onto a different row: CakePHP treats an id in the save data as an
+            // UPDATE target, so without this an injected id would mass-assign the write
+            // onto an arbitrary record (the scope/auth check only validated this one).
+            $massAssignSafeId = isset($data[$modelName]['id']) ? $data[$modelName]['id'] : null;
             $input = $this->Controller->request->data;
             if (empty($input[$modelName])) {
                 $input = [$modelName => $input];
             }
             if (!empty($params['override'])) {
                 foreach ($params['override'] as $field => $value) {
-                    $input[$field] = $value;
+                    $input[$modelName][$field] = $value;
                 }
             }
             if (!empty($params['fields'])) {
@@ -218,6 +235,11 @@ class CRUDComponent extends Component
                 foreach ($input[$modelName] as $field => $fieldData) {
                     $data[$modelName][$field] = $fieldData;
                 }
+            }
+            // Re-pin the primary key to the loaded record: never let a payload-supplied
+            // id move this write off the authorised row.
+            if ($massAssignSafeId !== null) {
+                $data[$modelName]['id'] = $massAssignSafeId;
             }
             if (isset($params['beforeSave'])) {
                 $data = $params['beforeSave']($data);
@@ -317,7 +339,7 @@ class CRUDComponent extends Component
                 throw new MethodNotAllowedException('Something went wrong, delete action failed.');
             }
         }
-        if ($validationError === null && $this->Controller->request->is('post') || $this->Controller->request->is('delete')) {
+        if ($validationError === null && ($this->Controller->request->is('post') || $this->Controller->request->is('delete'))) {
             if (!empty($params['modelFunction'])) {
                 $result = $this->Controller->$modelName->{$params['modelFunction']}($id);
             } else {
@@ -358,13 +380,34 @@ class CRUDComponent extends Component
         $this->Controller->render('/genericTemplates/delete');
     }
 
+    /**
+     * Prefix a bare column name with the alias of the model being indexed.
+     *
+     * The index joins whatever `contain` names, and as soon as a joined table
+     * shares a column name with the main one - `name`, `description` and `uuid`
+     * on `organisations` next to `galaxies`, say - a bare `LOWER(name) LIKE`
+     * is ambiguous and MySQL refuses the whole query. Filter names stay as the
+     * controllers declare them and as callers pass them; only the SQL side is
+     * qualified. A name that already carries an alias is left alone.
+     *
+     * @param string $field
+     * @return string
+     */
+    private function __qualifyField($field)
+    {
+        if (strpos($field, '.') !== false) {
+            return $field;
+        }
+        return $this->Controller->{$this->Controller->modelClass}->alias . '.' . $field;
+    }
+
     public function setQuickFilters($params, array $query, $quickFilterFields, $quickFilterParameter = 'quickFilter')
     {
         if (!empty($params[$quickFilterParameter]) && !empty($quickFilterFields)) {
             $queryConditions = [];
             $filter = '%' . strtolower($params[$quickFilterParameter]) . '%';
             foreach ($quickFilterFields as $filterField) {
-                $queryConditions["LOWER($filterField) LIKE"] = $filter;
+                $queryConditions['LOWER(' . $this->__qualifyField($filterField) . ') LIKE'] = $filter;
             }
             $query['conditions']['OR'] = $queryConditions;
         }
@@ -380,12 +423,13 @@ class CRUDComponent extends Component
                 if ($filter === $quickFilterParameter) {
                     continue;
                 }
+                $field = $this->__qualifyField($filter);
                 if (is_array($filterValue)) {
-                    $query['conditions']['AND'][] = [$filter => $filterValue];
+                    $query['conditions']['AND'][] = [$field => $filterValue];
                 } else if (strlen(trim($filterValue, '%')) === strlen($filterValue)) {
-                    $query['conditions']['AND'][] = [$filter => $filterValue];
+                    $query['conditions']['AND'][] = [$field => $filterValue];
                 } else {
-                    $query['conditions']['AND'][] = [$filter . ' LIKE' => $filterValue];
+                    $query['conditions']['AND'][] = [$field . ' LIKE' => $filterValue];
                 }
             }
         }
@@ -428,4 +472,107 @@ class CRUDComponent extends Component
         }
         return $massagedFilters;
     }
+
+    public function deleteSelection($id = null, array $options = [])
+    {
+        $this->prepareResponse();
+        $modelName = $options['modelName'] ?? $this->Controller->modelClass;
+        $restName = $options['restName'] ?? $modelName . 's';
+        $itemName = $options['itemName'] ?? strtolower($modelName);
+        $viewPath = $options['view'] ?? 'ajax/' . strtolower($modelName) . 'DeleteConfirmationForm';
+
+        $Model = $this->Controller->{$modelName};
+
+        if ($this->Controller->request->is(['post', 'put', 'delete'])) {
+            if (isset($this->Controller->request->data['id'])) {
+                $this->Controller->request->data[$modelName] = $this->Controller->request->data;
+            }
+            if (!isset($id) && isset($this->Controller->request->data[$modelName]['id'])) {
+                $idList = $this->Controller->request->data[$modelName]['id'];
+                if (!is_array($idList)) {
+                    if (is_numeric($idList) || Validation::uuid($idList)) {
+                        $idList = [$idList];
+                    } else {
+                        $idList = json_decode($idList, true);
+                    }
+                }
+                if (empty($idList)) {
+                    throw new NotFoundException(__('Invalid input.'));
+                }
+            } else {
+                $idList = [$id];
+            }
+            $successes = [];
+            $fails = [];
+            foreach ($idList as $cid) {
+                $item = $Model->find('first', [
+                    'conditions' => Validation::uuid($cid)
+                        ? [$modelName . '.uuid' => $cid]
+                        : [$modelName . '.id' => $cid],
+                    'recursive' => -1,
+                ]);
+                if (empty($item)) {
+                    $fails[] = $cid;
+                    continue;
+                }
+
+                $itemId = $item[$modelName]['id'];
+                $canModify = true;
+                if (isset($options['checkModifyCallback']) && is_callable($options['checkModifyCallback'])) {
+                    $canModify = call_user_func($options['checkModifyCallback'], $itemId, $item);
+                }
+
+                if (!$canModify) {
+                    $fails[] = $cid;
+                    continue;
+                }
+                if ($Model->delete($itemId)) {
+                    $successes[] = $cid;
+                } else {
+                    $fails[] = $cid;
+                }
+            }
+            if (count($idList) === 1) {
+                $message = empty($successes)
+                    ? __('%s was not deleted.', ucfirst($itemName))
+                    : __('%s deleted.', ucfirst($itemName));
+            } else {
+                $message = '';
+                if (!empty($successes)) {
+                    if (isset($options['multiSuccessMessageCallback']) && is_callable($options['multiSuccessMessageCallback'])) {
+                        $message .= call_user_func($options['multiSuccessMessageCallback'], count($successes));
+                    } else {
+                        $message .= count($successes) . ' ' . $itemName . '(s) deleted.';
+                    }
+                }
+                if (!empty($fails)) {
+                    $message .= ' ' . count($fails) . ' ' . $itemName . '(s) could not be deleted due to insufficient privileges or not found.';
+                }
+            }
+            if (isset($this->Controller->IndexFilter) && $this->Controller->IndexFilter->isRest()) {
+                if (!empty($successes)) {
+                    return $this->Controller->RestResponse->saveSuccessResponse(
+                        $restName, 'delete', $id, $this->Controller->response->type(), $message
+                    );
+                } else {
+                    return $this->Controller->RestResponse->saveFailResponse(
+                        $restName, 'delete', false, $message, $this->Controller->response->type()
+                    );
+                }
+            }
+            if (!empty($successes)) {
+                $this->Controller->Flash->success(trim($message));
+            } else {
+                $this->Controller->Flash->error(trim($message));
+            }
+            return $this->Controller->redirect(['action' => 'index']);
+        } else {
+            $itemList = is_numeric($id) ? [$id] : json_decode($id, true);
+            $this->Controller->request->data[$modelName]['id'] = json_encode($itemList);
+            $this->Controller->set('idArray', $itemList);
+            $this->Controller->layout = false;
+            return $this->Controller->render($viewPath);
+        }
+    }
+
 }

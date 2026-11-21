@@ -3,6 +3,7 @@
 class NewOrgsWidget
 {
     public $title = 'New organisations';
+    public $category = 'orgs';
     public $render = 'Index';
     public $width = 7;
     public $height = 6;
@@ -23,6 +24,12 @@ class NewOrgsWidget
         'year' => 'Which organisations have been added this year? (boolean)',
         'local' => 'Should the list only show local organisations? (boolean or list of booleans, defaults to 1. To get both sets, use [0,1])',
         'fields' => 'Which fields should be displayed, by default all are selected. Pass a list with the following options: [id, uuid, name, sector, type, nationality, creation_date]'
+    ];
+    public $schema = [
+        'filter' => [
+            'type' => 'org_meta_filter',
+            'help' => 'Filter by organisation meta-data (sector, type, nationality, name, uuid). Each entry may have "!" prefix to negate.',
+        ],
     ];
     private $validFilterKeys = [
         'nationality',
@@ -104,7 +111,7 @@ class NewOrgsWidget
         $field_options = [
             'id' => [
                 'name' => '#',
-                'url' => Configure::read('MISP.baseurl') . '/organisations/view',
+                'url' => (Configure::read('MISP.baseurl') ?: rtrim(Router::url('/', true), '/')) . '/organisations/view',
                 'element' => 'links',
                 'data_path' => 'Organisation.id',
                 'url_params_data_paths' => 'Organisation.id'
@@ -165,20 +172,26 @@ class NewOrgsWidget
         if ($timeConditions) {
             $params['conditions']['AND'][]['AND'] = $timeConditions;
         }
+        $fields = [];
         if (isset($options['fields'])) {
-            $fields = [];
             foreach ($options['fields'] as $field) {
                 if (isset($field_options[$field])) {
                     $fields[$field] = $field_options[$field];
                 }
             }
-        } else {
+        }
+        if (empty($fields)) {
             $fields = $field_options;
         }
         $data = $this->Organisation->find('all', [
             'recursive' => -1,
             'conditions' => $params['conditions'],
-            'limit' => isset($options['limit']) ? (int)$options['limit'] : 10,
+            // empty() rather than isset(): DboSource::limit() emits no LIMIT
+            // clause at all for a falsy value (DboSource.php:3065), so the
+            // isset() form let limit=0 - and limit=-1, which sprintf('%u')
+            // turns into a huge number - dump the whole organisations table.
+            // Matches the guard the sibling widgets already use.
+            'limit' => empty($options['limit']) ? 10 : (int)$options['limit'],
             'fields' => array_keys($fields),
             'order' => 'Organisation.date_created DESC'
         ]);
@@ -188,5 +201,22 @@ class NewOrgsWidget
             'fields' => $fields,
             'description' => $this->tableDescription
         ];
+    }
+
+    /**
+     * Enumerating the organisation directory is exactly what
+     * `Security.hide_organisation_index_from_users` exists to prevent, and
+     * `organisations/index` refuses outright when it is set. Mirror that
+     * predicate here - `renderWidget`'s `exportjson` hands back this handler's
+     * return value verbatim, so without this the widget is a way around the
+     * setting. Kept in sync with the `organisation_index` dynamic check in
+     * ACLComponent.php:1171, and with the copy in OrgsContributorsGeneric.
+     */
+    public function checkPermissions($user)
+    {
+        if (Configure::read('Security.hide_organisation_index_from_users')) {
+            return !empty($user['Role']['perm_sharing_group']);
+        }
+        return true;
     }
 }

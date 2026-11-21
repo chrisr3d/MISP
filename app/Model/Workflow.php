@@ -492,7 +492,7 @@ class Workflow extends AppModel
      * @param array $blockingErrors
      * @return array
      */
-    public function executeWorkflow($workflow_id, array $data, array &$blockingErrors=[]): array
+    public function executeWorkflow($workflow_id, array $data, array &$blockingErrors=[], array $env_vars=[]): array
     {
         $this->loadAllWorkflowModules();
 
@@ -520,13 +520,13 @@ class Workflow extends AppModel
             ];
         }
         if (!empty($triggerModule->is_adhoc)) {
-            return $this->__runAdHocWorkflow($workflow, $trigger_id, $triggerModule, $startNodeID, $blockingErrors, $data);
+            return $this->__runAdHocWorkflow($workflow, $trigger_id, $triggerModule, $startNodeID, $blockingErrors, $data, $env_vars);
         }
-        $result = $this->__runWorkflow($workflow, $triggerModule, $data, $startNodeID, $blockingErrors);
+        $result = $this->__runWorkflow($workflow, $triggerModule, $data, $startNodeID, $blockingErrors, $env_vars);
         return $result;
     }
 
-    private function __runAdHocWorkflow($workflow, $trigger_id, $triggerModule, $startNodeID, array &$blockingErrors, array $passedData = []): array
+    private function __runAdHocWorkflow($workflow, $trigger_id, $triggerModule, $startNodeID, array &$blockingErrors, array $passedData = [], array $env_vars=[]): array
     {
         $userForWorkflow = $this->getUserForWorkflow();
         $graphData = !empty($workflow['Workflow']) ? $workflow['Workflow']['data'] : $workflow['data'];
@@ -534,7 +534,7 @@ class Workflow extends AppModel
         $data = $triggerModule->collectData($userForWorkflow, $indexed_params, $passedData);
         $lastResult = ['success' => false, 'outcomeText' => __('No data collected.'), 'walkResult' => []];
         foreach ($data as $dataPiece) {
-            $lastResult = $this->executeWorkflowForTrigger($trigger_id, $dataPiece, $blockingErrors, true); // FIXME: reuse passed user
+            $lastResult = $this->executeWorkflowForTrigger($trigger_id, $dataPiece, $blockingErrors, true, $env_vars); // FIXME: reuse passed user
         }
         return $lastResult;
     }
@@ -568,13 +568,14 @@ class Workflow extends AppModel
                 sprintf('Workflow for trigger `%s`', $trigger_id),
                 __('Executing non-blocking workflow for trigger `%s`', $trigger_id)
             );
+	    $tempFile = $this->Job->getBackgroundJobsTool()->enqueueDataFile($data);
             $this->Job->getBackgroundJobsTool()->enqueue(
                 BackgroundJobsTool::PRIO_QUEUE,
                 BackgroundJobsTool::CMD_WORKFLOW,
                 [
                     'executeWorkflowForTrigger',
                     $trigger_id,
-                    JsonTool::encode($data),
+                    $tempFile,
                     JsonTool::encode($logging),
                     $jobId,
                     Configure::check('CurrentUserId') ? JsonTool::encode(Configure::read('CurrentUserId')) : null,
@@ -600,7 +601,7 @@ class Workflow extends AppModel
      * @return boolean True if the execution for the blocking path was a success
      * @throws TriggerNotFoundException
      */
-    public function executeWorkflowForTrigger($trigger_id, array $data, array &$blockingErrors=[], $returnFullResult = false)
+    public function executeWorkflowForTrigger($trigger_id, array $data, array &$blockingErrors=[], $returnFullResult = false, $env_vars=[])
     {
         $this->loadAllWorkflowModules();
 
@@ -620,7 +621,7 @@ class Workflow extends AppModel
             return false;
         }
         // Take care for Ad-Hoc Workflows
-        $result = $this->__runWorkflow($workflow, $triggerModule, $data, $startNodeID, $blockingErrors);
+        $result = $this->__runWorkflow($workflow, $triggerModule, $data, $startNodeID, $blockingErrors, $env_vars);
         return !empty($returnFullResult) ? $result : $result['success'];
     }
 
@@ -633,7 +634,7 @@ class Workflow extends AppModel
      * @param int $startNodeID
      * @return array
      */
-    private function __runWorkflow(array $workflow, $triggerModule, array $data, $startNodeID, &$blockingErrors=[]): array
+    private function __runWorkflow(array $workflow, $triggerModule, array $data, $startNodeID, &$blockingErrors=[], $env_vars=[]): array
     {
         $this->Log = ClassRegistry::init('Log');
         $message =  __('Started executing workflow for trigger `%s` (%s)', $triggerModule->id, $workflow['Workflow']['id']);
@@ -652,6 +653,15 @@ class Workflow extends AppModel
         if ($data === false) {
             $conversionFailure = true;
             $message = __('Error while normalizing data for trigger. Invalid input.');
+        }
+        if (!empty($env_vars)) {
+            if (empty($data['_env'])) {
+                $data['_env'] = $env_vars;
+            } else {
+                foreach ($env_vars as $k => $v) {
+                    $data['_env'][$k] = $v;
+                }
+            }
         }
         if ($conversionFailure) {
             $this->logExecutionIfDebug($workflow, $message);
@@ -1032,7 +1042,11 @@ class Workflow extends AppModel
         }
         // Load module from misp-module service
         $modules_from_service = $this->__getModulesFromModuleService() ?? [];
-        $misp_module_class = $this->__getClassForMispModule($modules_from_service);
+        $builtinModuleIDs = [];
+        foreach ($this->loaded_modules as $modules) {
+            $builtinModuleIDs = array_merge($builtinModuleIDs, array_keys($modules));
+        }
+        $misp_module_class = $this->__getClassForMispModule($modules_from_service, $builtinModuleIDs);
         $misp_module_configs = [];
         foreach ($misp_module_class as $i => $module_class) {
             $misp_module_configs[$i] = $module_class->getConfig();
@@ -1052,7 +1066,6 @@ class Workflow extends AppModel
             $this->loaded_classes['trigger'] = array_merge($this->loaded_classes['trigger'], [$trigger_id => $adHocClass]);
         }
 
-        $this->loaded_classes['action'] = array_merge($this->loaded_classes['action'], $misp_module_class);
         $this->__mergeGlobalConfigIntoLoadedModules();
         $this->module_initialized = true;
     }
@@ -1110,7 +1123,11 @@ class Workflow extends AppModel
         return $modules;
     }
 
-    private function __getClassForMispModule($misp_module_configs)
+    /**
+     * Instantiate the misp-modules service modules. A module whose id is already used by a
+     * built-in module is dropped: enabled state is keyed by id alone, so it must not shadow one.
+     */
+    private function __getClassForMispModule($misp_module_configs, array $reservedIDs=[])
     {
         $filepathMispModule = sprintf('%s/%s', Workflow::MODULE_ROOT_PATH, 'Module_misp_module.php');
         $className = 'Module_misp_module';
@@ -1120,16 +1137,22 @@ class Workflow extends AppModel
             try {
                 $reflection = new \ReflectionClass($className);
             } catch (\ReflectionException $e) {
-                return $e->getMessage();
+                CakeLog::warning(sprintf('Could not load the misp-module workflow class: %s', $e->getMessage()));
+                return [];
             }
         } catch (Exception $e) {
-            return $e->getMessage();
+            CakeLog::warning(sprintf('Could not load the misp-module workflow class: %s', $e->getMessage()));
+            return [];
         }
         $moduleClasses = [];
         if (is_array($misp_module_configs)) {
             foreach ($misp_module_configs as $moduleConfig) {
                 $mainClass = $reflection->newInstance($moduleConfig);
                 if ($mainClass->checkLoading() === 'The Factory Must Grow') {
+                    if (in_array($mainClass->id, $reservedIDs)) {
+                        CakeLog::warning(sprintf('misp-module `%s` ignored: its workflow module id `%s` is already used by a built-in module', $mainClass->name, $mainClass->id));
+                        continue;
+                    }
                     $moduleClasses[$mainClass->id] = $mainClass;
                 }
             }
@@ -1489,6 +1512,12 @@ class Workflow extends AppModel
     {
         $errors = [];
         $this->create();
+        // Defence in depth: addWorkflow only ever INSERTs. A client-supplied
+        // primary key would make save() a covert UPDATE of an arbitrary row even
+        // though the fieldList omits `id` (the fieldList limits which columns are
+        // written, not the INSERT-vs-UPDATE decision, which set() derives from the
+        // supplied id). Strip it for both the wrapped and flat caller shapes.
+        unset($workflow['Workflow']['id'], $workflow['id']);
         $saved = $this->__saveAndReturnErrors($workflow, ['fieldList' => self::CAPTURE_FIELDS_ADD], $errors);
         return [
             'saved' => $saved,
