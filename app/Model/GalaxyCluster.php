@@ -2458,16 +2458,19 @@ class GalaxyCluster extends AppModel
     }
 
     /**
-     * convertGalaxyClustersToTags
+     * Imports a converted record's clusters and swaps the converter's guessed
+     * cluster tags for the stored tag of each cluster the user can see.
      *
      * @param array $user
      * @param array $galaxies
-     * @return array The tag names extracted from galaxy clusters
+     * @param array $tags The record's tags, as the converter wrote them
+     * @return array The record's tags
      */
-    public function convertGalaxyClustersToTags($user, $galaxies)
+    public function convertGalaxyClustersToTags($user, $galaxies, array $tags)
     {
         $galaxyClusters = [];
-        $tag_names = [];
+        $uuids = [];
+        $guessedTagNames = [];
         foreach ($galaxies as $galaxy) {
             if (empty($galaxy['GalaxyCluster'])) {
                 continue;
@@ -2477,10 +2480,36 @@ class GalaxyCluster extends AppModel
             foreach ($clusters as $cluster) {
                 $cluster['Galaxy'] = $galaxy;
                 $galaxyClusters[] = array('GalaxyCluster' => $cluster);
-                $tag_names[] = !empty($cluster['tag_name']) ? $cluster['tag_name'] : 'misp-galaxy:' . $cluster['type'] . '="' . $cluster['uuid'] . '"';
+                $uuids[] = $cluster['uuid'];
+                foreach ([$cluster['value'], $cluster['uuid']] as $name) {
+                    $guessedTagNames[] = sprintf(
+                        'misp-galaxy:%s="%s"',
+                        $cluster['type'],
+                        $name
+                    );
+                }
             }
         }
+        if (empty($galaxyClusters)) {
+            return $tags;
+        }
         $this->Galaxy->importGalaxyAndClusters($user, $galaxyClusters);
-        return $tag_names;
+        $tagNames = array_values($this->fetchGalaxyClusters($user, [
+            'conditions' => ['GalaxyCluster.uuid' => $uuids],
+            'fields' => ['GalaxyCluster.uuid', 'GalaxyCluster.tag_name'],
+            'list' => true,
+        ]));
+        if ($user['Role']['perm_tagger'] || $user['Role']['perm_site_admin']) {
+            foreach ($tagNames as $tagName) {
+                $this->Tag->captureTag(['name' => $tagName], $user, true);
+            }
+        }
+        $tags = array_filter($tags, function ($tag) use ($guessedTagNames) {
+            return !in_array($tag['name'], $guessedTagNames, true);
+        });
+        foreach ($tagNames as $tagName) {
+            $tags[] = ['name' => $tagName];
+        }
+        return array_values($tags);
     }
 }

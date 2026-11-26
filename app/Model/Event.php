@@ -11128,13 +11128,11 @@ class Event extends AppModel
     private function __handleGalaxiesAndClusters($user, &$data)
     {
         if (!empty($data['Galaxy'])) {
-            $tag_names = $this->GalaxyCluster->convertGalaxyClustersToTags($user, $data['Galaxy']);
-            if (empty($data['Tag'])) {
-                $data['Tag'] = [];
-            }
-            foreach ($tag_names as $tag_name) {
-                $data['Tag'][] = array('name' => $tag_name);
-            }
+            $data['Tag'] = $this->GalaxyCluster->convertGalaxyClustersToTags(
+                $user,
+                $data['Galaxy'],
+                $data['Tag'] ?? []
+            );
         }
     }
 

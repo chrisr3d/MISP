@@ -10,7 +10,7 @@ import requests
 import time
 from io import BytesIO
 import urllib3  # type: ignore
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from typing import Union
 from pymisp import PyMISP, MISPOrganisation, MISPUser, MISPRole, MISPSharingGroup, MISPEvent, MISPLog, MISPSighting, Distribution, ThreatLevel, Analysis, MISPEventReport, MISPServerError
 from pymisp.tools import DomainIPObject
@@ -1277,6 +1277,246 @@ class TestLastPwChange(unittest.TestCase):
 
         # last_pw_change should be relatively close to date_modified
         self.assertTrue(self.last_pw_change_almost_equal_to_date_modified())
+
+
+class TestStixImportClusterTags(unittest.TestCase):
+    """A STIX 2 import attaches the cluster tag of every Galaxy Cluster of the
+    document that exists after the import and that the importing user can
+    see."""
+
+    STOCK_USER_ROLE_ID = 3
+    MANAGE_ORG_EVENTS = 2
+    ATTACH_CLUSTER_COLOUR = '#0088cc'
+
+    @classmethod
+    def setUpClass(cls):
+        cls.admin = PyMISP(url, key, ssl=False, debug=False)
+        cls.marker = 'stix-cluster-tags-' + gen_random_id()
+        organisation = MISPOrganisation()
+        organisation.name = 'Test org for STIX cluster tags ' + gen_random_id()
+        cls.test_org = check_response(
+            cls.admin.add_organisation(organisation, pythonify=True))
+        cls.created_users = []
+        cls.created_roles = []
+        cls.created_events = set()
+
+        stock_user_role = request(
+            cls.admin, 'GET', f'roles/view/{cls.STOCK_USER_ROLE_ID}')['Role']
+        assert stock_user_role['perm_galaxy_editor'], stock_user_role
+        assert stock_user_role['perm_tagger'], stock_user_role
+        assert not stock_user_role['perm_tag_editor'], stock_user_role
+        cls.stock_user = cls._add_user(cls.STOCK_USER_ROLE_ID)
+        cls.tag_editor = cls._add_user(cls._add_role(
+            'tag editor', perm_tagger=True, perm_tag_editor=True,
+            perm_galaxy_editor=False))
+        cls.galaxy_editor = cls._add_user(cls._add_role(
+            'galaxy editor', perm_tagger=False, perm_tag_editor=False,
+            perm_galaxy_editor=True))
+
+        # External STIX 2.1 malware share one instance-wide galaxy, which
+        # another org may have hidden; it stays visible to all after the tests
+        cls._upload(
+            cls.admin, cls._external_bundle(cls._malware()),
+            cluster_distribution=Distribution.all_communities.value)
+
+        default_clusters = cls._clusters(
+            type='threat-actor', default=1, limit=1)
+        assert default_clusters, (
+            'the instance needs the default threat-actor galaxy')
+        cls.default_cluster = default_clusters[0]
+
+    @classmethod
+    def tearDownClass(cls):
+        for event_id in cls.created_events:
+            cls.admin.delete_event(event_id)
+        for cluster in cls._clusters(value=cls.marker + '%'):
+            cls.admin.delete_galaxy_cluster(cluster['id'], hard=True)
+        for user in cls.created_users:
+            cls.admin.delete_user(user)
+        for role_id in cls.created_roles:
+            request(cls.admin, 'POST', f'admin/roles/delete/{role_id}')
+        cls.admin.delete_organisation(cls.test_org)
+
+    @classmethod
+    def _add_role(cls, name: str, **flags) -> int:
+        role = request(cls.admin, 'POST', 'admin/roles/add', {
+            'name': f'{cls.marker} {name}',
+            'permission': cls.MANAGE_ORG_EVENTS, 'perm_auth': True, **flags,
+        })['Role']
+        for flag, value in flags.items():
+            assert bool(role[flag]) == value, (flag, role)
+        cls.created_roles.append(role['id'])
+        return int(role['id'])
+
+    @classmethod
+    def _add_user(cls, role_id) -> PyMISP:
+        user = MISPUser()
+        user.email = f'{cls.marker}-{gen_random_id()}@user.local'
+        user.org_id = cls.test_org.id
+        user.role_id = role_id
+        user = check_response(cls.admin.add_user(user, pythonify=True))
+        cls.created_users.append(user)
+        return PyMISP(url, user.authkey, ssl=False, debug=False)
+
+    @classmethod
+    def _clusters(cls, **filters) -> list:
+        found = request(cls.admin, 'POST', 'galaxy_clusters/restSearch',
+                        {'returnFormat': 'json', **filters})
+        if isinstance(found, dict):
+            found = found.get('response', [])
+        return [entry['GalaxyCluster'] for entry in found]
+
+    @staticmethod
+    def _stix_object(stix_type: str, **properties) -> dict:
+        now = datetime.now(timezone.utc).strftime('%Y-%m-%dT%H:%M:%S.000Z')
+        return {
+            'type': stix_type, 'spec_version': '2.1',
+            'id': f'{stix_type}--{uuid.uuid4()}',
+            'created': now, 'modified': now, **properties,
+        }
+
+    @classmethod
+    def _malware(cls) -> dict:
+        return cls._stix_object(
+            'malware', name=f'{cls.marker}-{gen_random_id()}',
+            is_family=False)
+
+    @classmethod
+    def _external_bundle(cls, *stix_objects: dict) -> dict:
+        report = cls._stix_object(
+            'report', name=f'{cls.marker} report',
+            report_types=['threat-report'],
+            object_refs=[stix_object['id'] for stix_object in stix_objects])
+        report['published'] = report['created']
+        return {
+            'type': 'bundle', 'id': f'bundle--{uuid.uuid4()}',
+            'objects': [report, *stix_objects],
+        }
+
+    @classmethod
+    def _upload(cls, connector: PyMISP, bundle: dict, **url_params) -> dict:
+        response = connector._prepare_request(
+            'POST', 'events/upload_stix/2', data=bundle, kw_params=url_params)
+        event = check_response(connector._check_json_response(response))
+        cls.created_events.add(event['Event']['id'])
+        return cls.admin.get_event(
+            event['Event']['id'], pythonify=False)['Event']
+
+    def _only_cluster(self, value: str) -> dict:
+        clusters = self._clusters(value=value)
+        self.assertEqual(1, len(clusters), clusters)
+        return clusters[0]
+
+    @staticmethod
+    def _cluster_tag_names(event: dict, galaxy_type: str = '') -> set:
+        prefix = 'misp-galaxy:' + (f'{galaxy_type}=' if galaxy_type else '')
+        return {tag['name'] for tag in event.get('Tag', [])
+                if tag['name'].startswith(prefix)}
+
+    def _stored_clusters(self, cluster_uuid: str) -> list:
+        columns = ('id', 'uuid', 'value', 'tag_name', 'version', 'default',
+                   'locked', 'distribution', 'org_id', 'orgc_id', 'galaxy_id',
+                   'description')
+        return [{column: cluster[column] for column in columns}
+                for cluster in self._clusters(uuid=cluster_uuid)]
+
+    def _custom_cluster(self, connector: PyMISP) -> dict:
+        value = f'{self.marker}-{gen_random_id()}'
+        check_response(connector.add_galaxy_cluster(
+            self.default_cluster['galaxy_id'], {
+                'value': value, 'description': value,
+                'distribution': Distribution.your_organisation_only.value,
+            }))
+        return self._only_cluster(value)
+
+    def _assert_round_trip_attaches_the_stored_cluster_tag(
+            self, connector: PyMISP, cluster: dict):
+        event = check_response(
+            connector.add_event(create_simple_event(), pythonify=True))
+        self.created_events.add(event.id)
+        check_response(connector.attach_galaxy_cluster(event, cluster['id']))
+        bundle = check_response(connector.search(
+            controller='events', return_format='stix2', eventid=event.id))
+        check_response(connector.untag(event, cluster['tag_name']))
+        stored = self._stored_clusters(cluster['uuid'])
+
+        reimported = self._upload(connector, bundle)
+
+        self.assertEqual(event.uuid, reimported['uuid'])
+        self.assertEqual(
+            {cluster['tag_name']},
+            self._cluster_tag_names(reimported, cluster['type']))
+        self.assertEqual(stored, self._stored_clusters(cluster['uuid']))
+
+    def test_stock_user_gets_the_cluster_tag_of_the_cluster_it_creates(self):
+        malware = self._malware()
+        event = self._upload(self.stock_user, self._external_bundle(malware))
+
+        cluster = self._only_cluster(malware['name'])
+        tags = {tag['name']: tag for tag in event.get('Tag', [])}
+        self.assertIn(cluster['tag_name'], tags)
+        self.assertNotEqual(self.ATTACH_CLUSTER_COLOUR,
+                            tags[cluster['tag_name']]['colour'].lower())
+
+    def test_non_galaxy_editor_gets_only_existing_cluster_tags(self):
+        known, unknown = self._malware(), self._malware()
+        self._upload(self.stock_user, self._external_bundle(known))
+        known_cluster = self._only_cluster(known['name'])
+
+        event = self._upload(
+            self.tag_editor, self._external_bundle(known, unknown))
+
+        self.assertEqual(
+            {known_cluster['tag_name']},
+            self._cluster_tag_names(event, known_cluster['type']))
+        self.assertEqual([], self._clusters(value=unknown['name']))
+
+    def test_round_trip_of_a_default_cluster_for_a_site_admin(self):
+        self._assert_round_trip_attaches_the_stored_cluster_tag(
+            self.admin, self.default_cluster)
+
+    def test_round_trip_of_a_default_cluster_for_a_stock_user(self):
+        self._assert_round_trip_attaches_the_stored_cluster_tag(
+            self.stock_user, self.default_cluster)
+
+    def test_round_trip_of_a_custom_cluster_for_a_site_admin(self):
+        self._assert_round_trip_attaches_the_stored_cluster_tag(
+            self.admin, self._custom_cluster(self.admin))
+
+    def test_round_trip_of_a_custom_cluster_for_a_stock_user(self):
+        self._assert_round_trip_attaches_the_stored_cluster_tag(
+            self.stock_user, self._custom_cluster(self.stock_user))
+
+    def test_site_admin_gets_the_cluster_tag_of_the_cluster_it_creates(self):
+        malware = self._malware()
+        event = self._upload(self.admin, self._external_bundle(malware))
+
+        cluster = self._only_cluster(malware['name'])
+        self.assertEqual({cluster['tag_name']},
+                         self._cluster_tag_names(event, cluster['type']))
+
+    def test_non_tagger_gets_the_cluster_but_no_cluster_tag_created(self):
+        malware = self._malware()
+        event = self._upload(
+            self.galaxy_editor, self._external_bundle(malware))
+
+        cluster = self._only_cluster(malware['name'])
+        self.assertEqual(set(), self._cluster_tag_names(event))
+        self.assertEqual([], self.admin.search_tags(
+            cluster['tag_name'], strict_tagname=True))
+
+    def test_galaxies_as_tags_follow_the_tag_editor_rule(self):
+        for connector, expected_tags in (
+                (self.tag_editor, 1), (self.stock_user, 0)):
+            with self.subTest(expected_tags=expected_tags):
+                malware = self._malware()
+                event = self._upload(
+                    connector, self._external_bundle(malware),
+                    galaxies_as_tags=1)
+
+                self.assertEqual([], self._clusters(value=malware['name']))
+                self.assertEqual(
+                    expected_tags, len(self._cluster_tag_names(event)))
 
 
 def gen_random_id() -> str:
